@@ -11,27 +11,31 @@ today = datetime.now().strftime("%Y-%m-%d")
 data_today = {"Date": [today], "VNINDEX": [None], "DXY": [None], "US10Y": [None], "JPY_USD": [None]}
 
 # =================================================================
-# 2. LẤY VN-INDEX TỪ TRADINGVIEW
+# 2. LẤY VN-INDEX TỪ TRADINGVIEW (Mở rộng vùng quét 5 ngày)
 # =================================================================
 try:
     tv = TvDatafeed()
-    vn_data = tv.get_hist(symbol='VNINDEX', exchange='HOSE', interval=Interval.in_daily, n_bars=1)
+    # Yêu cầu 5 cây nến thay vì 1 để chống lỗi chưa mở cửa
+    vn_data = tv.get_hist(symbol='VNINDEX', exchange='HOSE', interval=Interval.in_daily, n_bars=5)
 
     if vn_data is not None and not vn_data.empty:
-        data_today["VNINDEX"] = [round(float(vn_data['close'].iloc[-1]), 2)]
+        # Lọc bỏ giá trị rỗng (NaN) và lấy con số hợp lệ cuối cùng
+        data_today["VNINDEX"] = [round(float(vn_data['close'].dropna().iloc[-1]), 2)]
 except Exception as e:
     print(f"❌ Lỗi lấy VN-Index: {e}")
 
 # =================================================================
-# 3. LẤY DỮ LIỆU VĨ MÔ QUỐC TẾ TỪ YAHOO FINANCE
+# 3. LẤY DỮ LIỆU VĨ MÔ QUỐC TẾ TỪ YAHOO (Mở rộng vùng quét 5 ngày)
 # =================================================================
 try:
     tickers_list = ["DX-Y.NYB", "^TNX", "JPY=X"]
-    df_raw = yf.download(tickers_list, period="1d", progress=False)
+    # Yêu cầu dữ liệu 5 ngày gần nhất
+    df_raw = yf.download(tickers_list, period="5d", progress=False)
 
-    data_today["DXY"]     = [round(float(df_raw['Close']['DX-Y.NYB'].iloc[-1]), 2)]
-    data_today["US10Y"]   = [round(float(df_raw['Close']['^TNX'].iloc[-1]), 2)]
-    data_today["JPY_USD"] = [round(float(df_raw['Close']['JPY=X'].iloc[-1]), 2)]
+    # Lọc bỏ NaN và trích xuất giá đóng cửa hợp lệ cuối cùng
+    data_today["DXY"]     = [round(float(df_raw['Close']['DX-Y.NYB'].dropna().iloc[-1]), 2)]
+    data_today["US10Y"]   = [round(float(df_raw['Close']['^TNX'].dropna().iloc[-1]), 2)]
+    data_today["JPY_USD"] = [round(float(df_raw['Close']['JPY=X'].dropna().iloc[-1]), 2)]
 except Exception as e:
     print(f"❌ Lỗi lấy vĩ mô quốc tế: {e}")
 
