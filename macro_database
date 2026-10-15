@@ -1,0 +1,39 @@
+macro_database.github/workflows/schedule.yml
+name: Daily Macro Tracker
+
+on:
+  schedule:
+    # Chạy vào 15:00 giờ Việt Nam (08:00 UTC) từ Thứ 2 đến Thứ 6
+    - cron: '0 8 * * 1-5'
+  workflow_dispatch: # Cho phép bấm nút chạy thử thủ công bất cứ lúc nào
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Cấp quyền để bot tự ghi và lưu file CSV lên repo
+
+    steps:
+      - name: Lấy mã nguồn
+        uses: actions/checkout@v3
+
+      - name: Cài đặt Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Cài đặt các thư viện cần thiết
+        run: |
+          pip install pandas yfinance requests beautifulsoup4
+          pip install git+https://github.com/rongardF/tvdatafeed.git
+
+      - name: Chạy Bot thu thập dữ liệu
+        run: python macro_database.py
+
+      - name: Lưu và cập nhật file CSV lên GitHub
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add macro_database.csv
+          git commit -m "Auto-update: Macro data [skip ci]" || exit 0
+          git push
