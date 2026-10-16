@@ -27,19 +27,16 @@ combo_latest = pd.merge(vn_latest, us_latest, on='Date', how='outer')
 # 4. Hàm cập nhật nối dữ liệu vào 3 file CSV
 def update_csv(filename, new_data):
     try:
-        # Đọc file cũ hiện có trên GitHub
         df_old = pd.read_csv(filename)
-        # Nối dữ liệu mới vào
         df_new = pd.concat([df_old, new_data])
-        # Xóa các dòng trùng lặp ngày, giữ lại dữ liệu mới nhất
         df_new = df_new.drop_duplicates(subset=['Date'], keep='last')
         
-        # ĐẢO CHIỀU: Sắp xếp theo ngày giảm dần (ngày mới nhất lên đầu)
+        # ĐẢO CHIỀU CỰC MẠNH: Ép kiểu ngày tháng để đảo ngược chính xác 100%
+        df_new['Date'] = pd.to_datetime(df_new['Date'])
         df_new = df_new.sort_values('Date', ascending=False)
         
-        # Lưu đè lại vào file
         df_new.to_csv(filename, index=False)
-        print(f"✅ Cập nhật thành công {filename}")
+        print(f"✅ Cập nhật và đảo chiều thành công {filename}")
     except Exception as e:
         print(f"❌ Lỗi với {filename}: {e}")
 
@@ -48,4 +45,4 @@ update_csv('vn_macro_database5years.csv', vn_latest)
 update_csv('us_macro_database5years.csv', us_latest)
 update_csv('macro_database5years.csv', combo_latest)
 
-print("🎉 Nhiệm vụ hoàn tất! Dữ liệu đã được nạp đầy và đảo chiều.")
+print("🎉 Nhiệm vụ hoàn tất! Dữ liệu đã được nạp đầy và lộn ngược.")
