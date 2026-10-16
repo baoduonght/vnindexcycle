@@ -2,7 +2,7 @@ name: Daily Macro Tracker
 
 on:
   schedule:
-    - cron: '0 8 * * 1-5'
+    - cron: '0 16 * * 1-5'
   workflow_dispatch: 
 
 jobs:
