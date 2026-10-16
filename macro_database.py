@@ -1,55 +1,49 @@
 import yfinance as yf
 import pandas as pd
-from datetime import datetime
-import os
 from tvDatafeed import TvDatafeed, Interval
 
-print("Đang bật radar dò tìm cừu béo...")
+print("🤖 Bot đang khởi động lấy dữ liệu ngày mới...")
 
-# 1. Khởi tạo bộ khung dữ liệu
-today = datetime.now().strftime("%Y-%m-%d")
-data_today = {"Date": [today], "VNINDEX": [None], "DXY": [None], "US10Y": [None], "JPY_USD": [None]}
+# 1. Lấy dữ liệu VN-Index mới nhất
+tv = TvDatafeed()
+vn_data = tv.get_hist(symbol='VNINDEX', exchange='HOSE', interval=Interval.in_daily, n_bars=5)
+vn_latest = vn_data[['close']].rename(columns={'close': 'VNINDEX'})
+vn_latest.index = vn_latest.index.strftime('%Y-%m-%d')
+vn_latest.index.name = 'Date'
+vn_latest = vn_latest.round(2).reset_index()
 
-# =================================================================
-# 2. LẤY VN-INDEX TỪ TRADINGVIEW (Mở rộng vùng quét 5 ngày)
-# =================================================================
-try:
-    tv = TvDatafeed()
-    # Yêu cầu 5 cây nến thay vì 1 để chống lỗi chưa mở cửa
-    vn_data = tv.get_hist(symbol='VNINDEX', exchange='HOSE', interval=Interval.in_daily, n_bars=5)
+# 2. Lấy dữ liệu Mỹ mới nhất
+tickers = ["DX-Y.NYB", "^TNX", "JPY=X"]
+us_data = yf.download(tickers, period="5d", progress=False)['Close']
+us_latest = us_data.rename(columns={'DX-Y.NYB': 'DXY', '^TNX': 'US10Y', 'JPY=X': 'JPY_USD'})
+us_latest.index = us_latest.index.strftime('%Y-%m-%d')
+us_latest.index.name = 'Date'
+us_latest = us_latest.round(2).reset_index()
+us_latest = us_latest.dropna(subset=['DXY', 'US10Y', 'JPY_USD'], how='all')
 
-    if vn_data is not None and not vn_data.empty:
-        # Lọc bỏ giá trị rỗng (NaN) và lấy con số hợp lệ cuối cùng
-        data_today["VNINDEX"] = [round(float(vn_data['close'].dropna().iloc[-1]), 2)]
-except Exception as e:
-    print(f"❌ Lỗi lấy VN-Index: {e}")
+# 3. Tạo bảng tổng hợp mới nhất
+combo_latest = pd.merge(vn_latest, us_latest, on='Date', how='outer')
 
-# =================================================================
-# 3. LẤY DỮ LIỆU VĨ MÔ QUỐC TẾ TỪ YAHOO (Mở rộng vùng quét 5 ngày)
-# =================================================================
-try:
-    tickers_list = ["DX-Y.NYB", "^TNX", "JPY=X"]
-    # Yêu cầu dữ liệu 5 ngày gần nhất
-    df_raw = yf.download(tickers_list, period="5d", progress=False)
+# 4. Hàm cập nhật nối dữ liệu vào 3 file CSV
+def update_csv(filename, new_data):
+    try:
+        # Đọc file cũ hiện có trên GitHub
+        df_old = pd.read_csv(filename)
+        # Nối dữ liệu mới vào
+        df_new = pd.concat([df_old, new_data])
+        # Xóa các dòng trùng lặp ngày, giữ lại dữ liệu mới nhất
+        df_new = df_new.drop_duplicates(subset=['Date'], keep='last')
+        # Sắp xếp lại theo ngày cho chuẩn
+        df_new = df_new.sort_values('Date')
+        # Lưu đè lại vào file
+        df_new.to_csv(filename, index=False)
+        print(f"✅ Cập nhật thành công {filename}")
+    except Exception as e:
+        print(f"❌ Lỗi với {filename}: {e}")
 
-    # Lọc bỏ NaN và trích xuất giá đóng cửa hợp lệ cuối cùng
-    data_today["DXY"]     = [round(float(df_raw['Close']['DX-Y.NYB'].dropna().iloc[-1]), 2)]
-    data_today["US10Y"]   = [round(float(df_raw['Close']['^TNX'].dropna().iloc[-1]), 2)]
-    data_today["JPY_USD"] = [round(float(df_raw['Close']['JPY=X'].dropna().iloc[-1]), 2)]
-except Exception as e:
-    print(f"❌ Lỗi lấy vĩ mô quốc tế: {e}")
+# 5. Chạy cập nhật cho cả 3 kho
+update_csv('vn_macro_database5years.csv', vn_latest)
+update_csv('us_macro_database5years.csv', us_latest)
+update_csv('macro_database5years.csv', combo_latest)
 
-# =================================================================
-# 4. ĐÓNG GÓI VÀ LƯU VÀO DATABASE (FILE CSV)
-# =================================================================
-df_macro = pd.DataFrame(data_today)
-
-print("\n--- TÍN HIỆU VĨ MÔ HÔM NAY ---")
-print(df_macro.to_string(index=False))
-
-# Lưu thẳng vào file CSV
-csv_filename = "macro_database.csv"
-file_exists = os.path.isfile(csv_filename)
-
-df_macro.to_csv(csv_filename, mode='a', header=not file_exists, index=False)
-print(f"\n✅ Đã ghi chép xong dữ liệu vào '{csv_filename}'. Dao đã mài, sẵn sàng chờ thời điểm!")
+print("🎉 Nhiệm vụ hoàn tất! Dữ liệu đã được nạp đầy.")
