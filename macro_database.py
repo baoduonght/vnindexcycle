@@ -33,8 +33,10 @@ def update_csv(filename, new_data):
         df_new = pd.concat([df_old, new_data])
         # Xóa các dòng trùng lặp ngày, giữ lại dữ liệu mới nhất
         df_new = df_new.drop_duplicates(subset=['Date'], keep='last')
-        # Sắp xếp lại theo ngày cho chuẩn
-        df_new = df_new.sort_values('Date')
+        
+        # ĐẢO CHIỀU: Sắp xếp theo ngày giảm dần (ngày mới nhất lên đầu)
+        df_new = df_new.sort_values('Date', ascending=False)
+        
         # Lưu đè lại vào file
         df_new.to_csv(filename, index=False)
         print(f"✅ Cập nhật thành công {filename}")
@@ -46,4 +48,4 @@ update_csv('vn_macro_database5years.csv', vn_latest)
 update_csv('us_macro_database5years.csv', us_latest)
 update_csv('macro_database5years.csv', combo_latest)
 
-print("🎉 Nhiệm vụ hoàn tất! Dữ liệu đã được nạp đầy.")
+print("🎉 Nhiệm vụ hoàn tất! Dữ liệu đã được nạp đầy và đảo chiều.")
