@@ -1,4 +1,4 @@
-CẨM NANG ĐỌC VỊ RADAR VĨ MÔ: SỰ LIÊN KẾT VỚI VN-INDEX**
+CẨM NANG ĐỌC VỊ RADAR VĨ MÔ: SỰ LIÊN KẾT VỚI VN-INDEX
 
 Dưới đây là tài liệu giải mã (Readme) cách 9 chỉ số vĩ mô quốc tế tương tác và định đoạt số phận của thị trường chứng khoán Việt Nam (VN-Index). Các chỉ số được chia thành 4 nhóm tác động chính:
 
