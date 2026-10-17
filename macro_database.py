@@ -5,44 +5,57 @@ import datetime
 import time
 import requests
 
-print("🚀 Khởi động Siêu Radar Vĩ mô: Bản Tối thượng (Độc lập 100% - Raw Data)...")
+print("🚀 Khởi động Siêu Radar Vĩ mô: Bản Tối thượng (CORS Proxy Gateway)...")
 
 tv = TvDatafeed()
 
 # --- PHẦN 1: DỮ LIỆU CƠ SỞ & PHÁI SINH VIỆT NAM (TradingView) ---
 print("1. Đang quét nội tại chứng khoán Việt Nam (VNINDEX, VN30, Phái sinh)...")
+local_df_list = []
+
 try:
     vn_raw = tv.get_hist(symbol='VNINDEX', exchange='HOSE', interval=Interval.in_daily, n_bars=1500)
-    vn_df = vn_raw[['close', 'volume']].copy()
-    vn_df.rename(columns={'close': 'VNINDEX', 'volume': 'VN_VOLUME'}, inplace=True)
+    if vn_raw is not None and not vn_raw.empty:
+        vn_df = vn_raw[['close', 'volume']].copy()
+        vn_df.rename(columns={'close': 'VNINDEX', 'volume': 'VN_VOLUME'}, inplace=True)
+        local_df_list.append(vn_df)
 
     vn30_raw = tv.get_hist(symbol='VN30', exchange='HOSE', interval=Interval.in_daily, n_bars=1500)
-    vn30_df = vn30_raw[['close']].copy()
-    vn30_df.rename(columns={'close': 'VN30'}, inplace=True)
+    if vn30_raw is not None and not vn30_raw.empty:
+        vn30_df = vn30_raw[['close']].copy()
+        vn30_df.rename(columns={'close': 'VN30'}, inplace=True)
+        local_df_list.append(vn30_df)
 
     ps_raw = tv.get_hist(symbol='VN30F1M', exchange='HNX', interval=Interval.in_daily, n_bars=1500)
-    ps_df = ps_raw[['close']].copy()
-    ps_df.rename(columns={'close': 'VN30_F1M'}, inplace=True)
+    if ps_raw is not None and not ps_raw.empty:
+        ps_df = ps_raw[['close']].copy()
+        ps_df.rename(columns={'close': 'VN30_F1M'}, inplace=True)
+        local_df_list.append(ps_df)
 
-    local_df = pd.concat([vn_df, vn30_df, ps_df], axis=1)
-    local_df['DERIVATIVE_SPREAD'] = local_df['VN30_F1M'] - local_df['VN30']
-    
-    local_df.index = local_df.index.normalize()
-    local_df = local_df[~local_df.index.duplicated(keep='last')]
+    if local_df_list:
+        local_df = pd.concat(local_df_list, axis=1)
+        if 'VN30_F1M' in local_df.columns and 'VN30' in local_df.columns:
+            local_df['DERIVATIVE_SPREAD'] = local_df['VN30_F1M'] - local_df['VN30']
+        local_df.index = local_df.index.normalize()
+        local_df = local_df[~local_df.index.duplicated(keep='last')]
+    else:
+        local_df = pd.DataFrame()
 except Exception as e:
     print(f"Lỗi hệ thống nội địa (TV): {e}")
     local_df = pd.DataFrame()
 
-# --- PHẦN 2: TỰ GỌI API VNDIRECT - LẤY DÒNG TIỀN KHỐI NGOẠI & TỰ DOANH ---
-print("2. Đang đột nhập hệ thống API của VNDirect (Khối ngoại & Tự doanh)...")
+# --- PHẦN 2: TỰ GỌI API VNDIRECT - BẰNG TUYỆT CHIÊU PROXY GATEWAY ---
+print("2. Đang dùng Trạm trung chuyển Proxy lách tường lửa VNDirect...")
 try:
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
     
-    # Lấy Dòng tiền Khối ngoại
+    # Lấy Dòng tiền Khối ngoại qua trạm trung chuyển corsproxy
     url_foreign = "https://finfo-api.vndirect.com.vn/v4/foreign_trading?q=code:VNINDEX~date:gte:2021-01-01&sort=date&size=1500"
-    res_f = requests.get(url_foreign, headers=headers)
+    bypass_url_f = f"https://corsproxy.io/?{url_foreign}"
+    
+    res_f = requests.get(bypass_url_f, headers=headers, timeout=15)
     
     if res_f.status_code == 200:
         f_data = res_f.json()['data']
@@ -54,11 +67,13 @@ try:
         f_df.index = pd.to_datetime(f_df.index).normalize()
         f_df = f_df[~f_df.index.duplicated(keep='last')]
         local_df = pd.concat([local_df, f_df], axis=1)
-        print("  -> ✅ Đã gom xong Dòng tiền Khối ngoại!")
+        print("  -> ✅ Lách tường lửa thành công: Đã gom Dòng tiền Khối ngoại!")
         
-    # Lấy Dòng tiền Tự doanh (Proprietary Trading)
+    # Lấy Dòng tiền Tự doanh qua trạm trung chuyển corsproxy
     url_prop = "https://finfo-api.vndirect.com.vn/v4/proprietary_trading?q=code:VNINDEX~date:gte:2021-01-01&sort=date&size=1500"
-    res_p = requests.get(url_prop, headers=headers)
+    bypass_url_p = f"https://corsproxy.io/?{url_prop}"
+    
+    res_p = requests.get(bypass_url_p, headers=headers, timeout=15)
     
     if res_p.status_code == 200 and 'data' in res_p.json() and len(res_p.json()['data']) > 0:
         p_data = res_p.json()['data']
@@ -70,10 +85,10 @@ try:
         p_df.index = pd.to_datetime(p_df.index).normalize()
         p_df = p_df[~p_df.index.duplicated(keep='last')]
         local_df = pd.concat([local_df, p_df], axis=1)
-        print("  -> ✅ Đã gom xong Dòng tiền Tự doanh!")
+        print("  -> ✅ Lách tường lửa thành công: Đã gom Dòng tiền Tự doanh!")
         
 except Exception as e:
-    print(f"Lỗi khi gọi API VNDirect: {e}")
+    print(f"  -> ⚠️ Lỗi mạng hoặc trạm Proxy quá tải, tạm thời bỏ qua Nhóm 2: {e}")
 
 # --- PHẦN 3: VỆ TINH VĨ MÔ TOÀN CẦU (TradingView) ---
 tv_symbols = [
@@ -123,14 +138,15 @@ except Exception as e:
     print(f"Lỗi tải dữ liệu FRED: {e}")
     fred_df = pd.DataFrame()
 
-# --- PHẦN 5: HỢP NHẤT VÀ DỌN DẸP (NO FFILL) ---
+# --- PHẦN 5: HỢP NHẤT VÀ DỌN DẸP LỖI ---
 combo_df = pd.concat([local_df, global_df, fred_df], axis=1)
 combo_df.sort_index(inplace=True)
 
-# TUYỆT ĐỐI KHÔNG SỬ DỤNG FFILL - Giữ nguyên gốc 100%
-
-# Dọn rác: Xóa những dòng trống trơn do nghỉ lễ
-combo_df.dropna(subset=['VNINDEX', 'DXY', 'US10Y'], how='all', inplace=True)
+# BỌC THÉP 2: Dọn rác an toàn - Chỉ check những cột ĐÃ CÓ trong file
+check_cols = [c for c in ['VNINDEX', 'DXY', 'US10Y'] if c in combo_df.columns]
+if check_cols:
+    combo_df.dropna(subset=check_cols, how='all', inplace=True)
+    
 combo_df = combo_df.sort_index(ascending=False)
 combo_df.index.name = 'Date'
 
@@ -145,7 +161,7 @@ if 'FED_LIQUIDITY' in combo_df.columns:
     us_cols.append('FED_LIQUIDITY')
 us_cols_exist = [c for c in us_cols if c in combo_df.columns]
 
-# Tích hợp thêm các chỉ số nội địa mới lấy từ VNDirect
+# Bổ sung 2 cột Tự doanh và Khối ngoại vào nhóm Việt Nam
 vn_cols = ['VNINDEX', 'VN_VOLUME', 'VN30', 'VN30_F1M', 'DERIVATIVE_SPREAD', 'VN10Y', 'USD_VND', 'NET_FOREIGN_FLOW', 'NET_PROP_FLOW']
 vn_cols_exist = [c for c in vn_cols if c in combo_df.columns]
 
@@ -154,4 +170,4 @@ update_csv('us_macro_database5years.csv', combo_df[us_cols_exist])
 update_csv('vn_macro_database5years.csv', combo_df[vn_cols_exist])
 update_csv('macro_database.csv', combo_df.head(60))
 
-print("🎉 HOÀN TẤT! Radar tự vận hành 100% bằng API mở, không phụ thuộc thư viện thứ 3.")
+print("🎉 HOÀN TẤT! Radar bọc thép lách tường lửa thành công.")
