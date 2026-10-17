@@ -32,3 +32,58 @@ The system outputs highly structured datasets (`macro_database5years.csv`) encom
 
 ## 🔮 Next Steps: Predictive Analytics (Phase 2)
 The aggregated historical data is currently being ingested into a **Google Colab** environment for feature engineering (lag features, momentum). The goal is to deploy a Machine Learning classifier to evaluate feature importance and predict the medium-term market trend (3-5 days outlook).
+
+🌍 Automated Macroeconomic & Market Tracking Radar
+
+(Hệ thống Radar Theo dõi Vĩ mô & Thị trường Tự động)
+
+🎯 Overview (Tổng quan)
+
+[EN] This repository outputs a daily updated dataset (macro_database5years.csv) tracking key macroeconomic indicators and financial market cash flows. The goal is to provide a reliable data foundation for tracking market cycles and predicting medium-term trends.
+[VN] Kho lưu trữ này cung cấp bộ dữ liệu (macro_database5years.csv) được cập nhật hàng ngày, theo dõi các chỉ số kinh tế vĩ mô và dòng tiền trên thị trường tài chính. Mục tiêu là tạo ra nền tảng dữ liệu để theo dõi chu kỳ và dự báo xu hướng trung hạn của thị trường.
+
+📊 Macroeconomic Data Dictionary (Từ điển Chỉ số Vĩ mô)
+
+(Giải thích chức năng và mối tương quan của các chỉ số trong hệ thống)
+
+1. Market Indices & Volume (Chỉ số Cơ sở & Thanh khoản)
+
+VNINDEX, VN30: Vietnam's main equity benchmark indices. (Chỉ số đại diện cho xu hướng chung của Thị trường Chứng khoán Việt Nam).
+
+VN_VOLUME: Daily trading volume. (Khối lượng giao dịch hàng ngày. Dùng để xác nhận xu hướng: Giá tăng kèm thanh khoản tăng là tích cực, giá tăng thanh khoản giảm là rủi ro).
+
+2. Market Sentiment / Derivatives (Tâm lý Thị trường / Phái sinh)
+
+VN30_F1M: The 1-month futures contract. (Giá hợp đồng phái sinh tháng gần nhất).
+
+DERIVATIVE_SPREAD: VN30_F1M - VN30 (Basis Spread).
+
+Meaning / Ý nghĩa: Measures speculative sentiment. A deeply negative spread indicates retail fear and heavy hedging (betting the market will drop). (Đo lường tâm lý đầu cơ. Độ lệch âm nặng thể hiện thị trường đang hoảng loạn, nhà đầu tư đang "Sọc" (Short) để phòng vệ).
+
+3. Institutional Cash Flows (Dấu chân Dòng tiền Tổ chức)
+
+NET_FOREIGN_FLOW: Net buying/selling by Foreign Investors. (Giá trị Mua/Bán ròng của Khối ngoại).
+
+NET_PROP_FLOW: Net buying/selling by Proprietary Trading firms. (Giá trị Mua/Bán ròng của Tự doanh công ty chứng khoán).
+
+Meaning / Ý nghĩa: Retail investors create daily noise; institutional flows dictate medium-term trends. Consistent accumulation by these groups during market drops often signals a market bottom. (Nhỏ lẻ tạo ra biến động hàng ngày, cá mập định hình xu hướng. Khi thị trường sập mà hai nhóm này âm thầm mua ròng liên tục, đó thường là dấu hiệu tạo đáy).
+
+4. Global Liquidity & Yields (Thanh khoản Toàn cầu & Lợi suất)
+
+FED_LIQUIDITY: The actual liquidity in the US banking system. (Lượng tiền thực tế lưu thông trong hệ thống ngân hàng Mỹ).
+
+Meaning / Ý nghĩa: When liquidity expands, markets go up. When the Fed drains liquidity, risk assets drop. (Khi FED bơm tiền, chứng khoán toàn cầu tăng. Khi FED hút tiền, tài sản rủi ro lao dốc).
+
+US10Y & VN10Y: 10-Year Government Bond Yields. (Lợi suất trái phiếu chính phủ 10 năm của Mỹ và VN).
+
+Meaning / Ý nghĩa: The "gravity" of the stock market. Rising yields mean safer, higher returns in bonds, causing money to flow out of stocks. (Kẻ thù của chứng khoán. Lợi suất tăng nghĩa là gửi tiền an toàn cũng có lãi cao, dòng tiền sẽ rút khỏi cổ phiếu rủi ro).
+
+5. Currencies & Commodities (Tỷ giá & Hàng hóa)
+
+DXY: US Dollar Index - Global currency strength. (Sức mạnh đồng Đô la Mỹ).
+
+USD_VND: USD/VND Exchange rate. (Tỷ giá Đô/Đồng).
+
+Meaning / Ý nghĩa: Sharp spikes in DXY and USD_VND force the State Bank of Vietnam (SBV) to tighten monetary policy (e.g., issue T-bills to drain money) to protect the currency, which severely hurts the stock market. (Tỷ giá căng thẳng sẽ ép Ngân hàng Nhà nước phải phát hành tín phiếu hút tiền VND về để cứu tỷ giá. Tiền bị hút về thì chứng khoán sẽ sập).
+
+GOLD & USOIL: Proxies for safe-haven demand and cost-push inflation. (Vàng đại diện cho tâm lý sợ hãi/trú ẩn; Dầu đại diện cho lạm phát chi phí đẩy - Dầu tăng làm lạm phát tăng, khó hạ lãi suất).
