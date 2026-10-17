@@ -45,4 +45,6 @@ update_csv('vn_macro_database5years.csv', vn_latest)
 update_csv('us_macro_database5years.csv', us_latest)
 update_csv('macro_database5years.csv', combo_latest)
 
+update_csv('macro_database.csv', combo_latest)
+
 print("🎉 Nhiệm vụ hoàn tất! Dữ liệu đã được nạp đầy và lộn ngược.")
