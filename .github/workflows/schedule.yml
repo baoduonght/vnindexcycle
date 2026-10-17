@@ -24,7 +24,6 @@ jobs:
         run: |
           pip install pandas yfinance requests beautifulsoup4 pandas-datareader
           pip install git+https://github.com/rongardF/tvdatafeed.git
-          pip install vnstock==0.2.8.post1
 
       - name: Chạy Bot thu thập dữ liệu
         run: python macro_database.py
