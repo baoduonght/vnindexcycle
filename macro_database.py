@@ -1,50 +1,99 @@
-import yfinance as yf
 import pandas as pd
+import yfinance as yf
 from tvDatafeed import TvDatafeed, Interval
+import pandas_datareader.data as web
+import datetime
 
-print("🤖 Bot đang khởi động lấy dữ liệu ngày mới...")
+print("🚀 Khởi động Siêu Radar Vĩ mô...")
 
-# 1. Lấy dữ liệu VN-Index mới nhất
+# 1. LẤY DỮ LIỆU TỪ TRADINGVIEW (VN-INDEX & NGOẠI TỆ)
+# Dùng TradingView lấy tỷ giá để đảm bảo không bao giờ bị khuyết dữ liệu như Yahoo
 tv = TvDatafeed()
-vn_data = tv.get_hist(symbol='VNINDEX', exchange='HOSE', interval=Interval.in_daily, n_bars=5)
-vn_latest = vn_data[['close']].rename(columns={'close': 'VNINDEX'})
-vn_latest.index = vn_latest.index.strftime('%Y-%m-%d')
-vn_latest.index.name = 'Date'
-vn_latest = vn_latest.round(2).reset_index()
 
-# 2. Lấy dữ liệu Mỹ mới nhất
-tickers = ["DX-Y.NYB", "^TNX", "JPY=X"]
-us_data = yf.download(tickers, period="5d", progress=False)['Close']
-us_latest = us_data.rename(columns={'DX-Y.NYB': 'DXY', '^TNX': 'US10Y', 'JPY=X': 'JPY_USD'})
-us_latest.index = us_latest.index.strftime('%Y-%m-%d')
-us_latest.index.name = 'Date'
-us_latest = us_latest.round(2).reset_index()
-us_latest = us_latest.dropna(subset=['DXY', 'US10Y', 'JPY_USD'], how='all')
+# Lấy VN-Index
+vnindex = tv.get_hist(symbol='VNINDEX', exchange='HOSE', interval=Interval.in_daily, n_bars=1500)
+vn_df = vnindex[['close']].copy()
+vn_df.rename(columns={'close': 'VNINDEX'}, inplace=True)
 
-# 3. Tạo bảng tổng hợp mới nhất
-combo_latest = pd.merge(vn_latest, us_latest, on='Date', how='outer')
+# Lấy Tỷ giá USD/JPY (Ký hiệu JPY_USD của bạn)
+usdjpy = tv.get_hist(symbol='USDJPY', exchange='FX_IDC', interval=Interval.in_daily, n_bars=1500)
+jpy_df = usdjpy[['close']].copy()
+jpy_df.rename(columns={'close': 'JPY_USD'}, inplace=True)
 
-# 4. Hàm cập nhật nối dữ liệu vào 3 file CSV
-def update_csv(filename, new_data):
-    try:
-        df_old = pd.read_csv(filename)
-        df_new = pd.concat([df_old, new_data])
-        df_new = df_new.drop_duplicates(subset=['Date'], keep='last')
-        
-        # ĐẢO CHIỀU CỰC MẠNH: Ép kiểu ngày tháng để đảo ngược chính xác 100%
-        df_new['Date'] = pd.to_datetime(df_new['Date'])
-        df_new = df_new.sort_values('Date', ascending=False)
-        
-        df_new.to_csv(filename, index=False)
-        print(f"✅ Cập nhật và đảo chiều thành công {filename}")
-    except Exception as e:
-        print(f"❌ Lỗi với {filename}: {e}")
+# Gộp dữ liệu TradingView
+tv_df = pd.concat([vn_df, jpy_df], axis=1)
+tv_df.index = tv_df.index.normalize()
 
-# 5. Chạy cập nhật cho cả 3 kho
-update_csv('vn_macro_database5years.csv', vn_latest)
-update_csv('us_macro_database5years.csv', us_latest)
-update_csv('macro_database5years.csv', combo_latest)
+# 2. LẤY DỮ LIỆU MỸ & HÀNG HÓA TỪ YAHOO FINANCE
+symbols = {
+    'DX-Y.NYB': 'DXY',
+    '^TNX': 'US10Y',
+    '^TWO': 'US2Y',
+    'VND=X': 'USD_VND',
+    'CNH=F': 'USD_CNH', 
+    'GC=F': 'GOLD',
+    'CL=F': 'OIL',
+    'VNQ': 'US_REAL_ESTATE'
+}
 
-update_csv('macro_database.csv', combo_latest)
+print("Đang tải dữ liệu toàn cầu từ Yahoo Finance...")
+us_data = yf.download(list(symbols.keys()), period="5y")
+if 'Close' in us_data:
+    us_df = us_data['Close'].copy()
+else:
+    us_df = us_data.copy()
+    
+us_df.rename(columns=symbols, inplace=True)
+us_df.index = us_df.index.normalize()
 
-print("🎉 Nhiệm vụ hoàn tất! Dữ liệu đã được nạp đầy và lộn ngược.")
+# 3. LẤY DỮ LIỆU THANH KHOẢN TỪ FED (FRED)
+print("Đang đột nhập kho dữ liệu Cục Dự trữ Liên bang Mỹ (FRED)...")
+end_date = datetime.datetime.now()
+start_date = end_date - datetime.timedelta(days=5*365)
+fred_tickers = ['WALCL', 'WTREGEN', 'RRPONTSYD']
+
+try:
+    fred_df = web.DataReader(fred_tickers, 'fred', start_date, end_date)
+    # Công thức thanh khoản cốt lõi
+    fred_df['FED_LIQUIDITY'] = fred_df['WALCL'] - fred_df['WTREGEN'] - fred_df['RRPONTSYD']
+    fred_df = fred_df[['FED_LIQUIDITY']]
+except Exception as e:
+    print("Lỗi tải dữ liệu FRED:", e)
+    fred_df = pd.DataFrame()
+
+# 4. GỘP TOÀN BỘ VÀ XỬ LÝ SẠCH
+combo_df = pd.concat([tv_df, us_df, fred_df], axis=1)
+combo_df.sort_index(inplace=True)
+
+# Vì tài sản FED cập nhật 1 lần/tuần nên phải lấp đầy riêng cho nó, các chỉ số khác để nguyên số thực!
+if 'FED_LIQUIDITY' in combo_df.columns:
+    combo_df['FED_LIQUIDITY'] = combo_df['FED_LIQUIDITY'].ffill()
+
+# Dọn dẹp các dòng rác hoàn toàn không có dữ liệu
+combo_df.dropna(subset=['VNINDEX', 'DXY', 'US10Y'], how='all', inplace=True)
+
+# Đảo ngược để ngày mới nhất nằm trên cùng
+combo_df = combo_df.sort_index(ascending=False)
+combo_df.index.name = 'Date'
+
+# 5. PHÂN BỔ VÀ LƯU CSV
+def update_csv(filename, new_df):
+    new_df.to_csv(filename)
+    print(f"✅ Đã lưu thành công: {filename}")
+
+# Gom cột cho file US
+us_cols = list(us_df.columns)
+us_cols.append('JPY_USD')
+if 'FED_LIQUIDITY' in combo_df.columns:
+    us_cols.append('FED_LIQUIDITY')
+
+us_cols_exist = [c for c in us_cols if c in combo_df.columns]
+us_final = combo_df[us_cols_exist]
+
+# Xuất xưởng
+update_csv('macro_database5years.csv', combo_df)
+update_csv('us_macro_database5years.csv', us_final)
+update_csv('vn_macro_database5years.csv', combo_df[['VNINDEX']])
+update_csv('macro_database.csv', combo_df.head(60))
+
+print("🎉 Nhiệm vụ hoàn tất! Dữ liệu 100% là số thật, không vay mượn.")
