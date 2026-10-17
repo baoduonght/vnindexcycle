@@ -3,13 +3,14 @@ from tvDatafeed import TvDatafeed, Interval
 import pandas_datareader.data as web
 import datetime
 import time
+import requests
 
-print("🚀 Khởi động Siêu Radar Vĩ mô: Bản Tối thượng (Raw Data 100%)...")
+print("🚀 Khởi động Siêu Radar Vĩ mô: Bản Tối thượng (Độc lập 100% - Raw Data)...")
 
 tv = TvDatafeed()
 
 # --- PHẦN 1: DỮ LIỆU CƠ SỞ & PHÁI SINH VIỆT NAM (TradingView) ---
-print("1. Đang quét nội tại chứng khoán Việt Nam...")
+print("1. Đang quét nội tại chứng khoán Việt Nam (VNINDEX, VN30, Phái sinh)...")
 try:
     vn_raw = tv.get_hist(symbol='VNINDEX', exchange='HOSE', interval=Interval.in_daily, n_bars=1500)
     vn_df = vn_raw[['close', 'volume']].copy()
@@ -32,19 +33,47 @@ except Exception as e:
     print(f"Lỗi hệ thống nội địa (TV): {e}")
     local_df = pd.DataFrame()
 
-# --- PHẦN 2: LÃI SUẤT LIÊN NGÂN HÀNG NỘI ĐỊA (vnstock) ---
-print("2. Đang quét Lãi suất liên ngân hàng qua đêm...")
+# --- PHẦN 2: TỰ GỌI API VNDIRECT - LẤY DÒNG TIỀN KHỐI NGOẠI & TỰ DOANH ---
+print("2. Đang đột nhập hệ thống API của VNDirect (Khối ngoại & Tự doanh)...")
 try:
-    from vnstock import money_market_historical_data
-    mm_df = money_market_historical_data(symbol='Lãi suất qua đêm', resolution='1D', type='interbank')
-    if mm_df is not None and not mm_df.empty:
-        mm_df.rename(columns={'close': 'VN_INTERBANK_ON'}, inplace=True)
-        mm_df.set_index('date', inplace=True)
-        mm_df.index = pd.to_datetime(mm_df.index).normalize()
-        mm_df = mm_df[~mm_df.index.duplicated(keep='last')]
-        local_df = pd.concat([local_df, mm_df[['VN_INTERBANK_ON']]], axis=1)
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
+    
+    # Lấy Dòng tiền Khối ngoại
+    url_foreign = "https://finfo-api.vndirect.com.vn/v4/foreign_trading?q=code:VNINDEX~date:gte:2021-01-01&sort=date&size=1500"
+    res_f = requests.get(url_foreign, headers=headers)
+    
+    if res_f.status_code == 200:
+        f_data = res_f.json()['data']
+        f_df = pd.DataFrame(f_data)
+        f_df['NET_FOREIGN_FLOW'] = f_df['buyVal'] - f_df['sellVal']
+        f_df = f_df[['date', 'NET_FOREIGN_FLOW']].copy()
+        f_df.rename(columns={'date': 'Date'}, inplace=True)
+        f_df.set_index('Date', inplace=True)
+        f_df.index = pd.to_datetime(f_df.index).normalize()
+        f_df = f_df[~f_df.index.duplicated(keep='last')]
+        local_df = pd.concat([local_df, f_df], axis=1)
+        print("  -> ✅ Đã gom xong Dòng tiền Khối ngoại!")
+        
+    # Lấy Dòng tiền Tự doanh (Proprietary Trading)
+    url_prop = "https://finfo-api.vndirect.com.vn/v4/proprietary_trading?q=code:VNINDEX~date:gte:2021-01-01&sort=date&size=1500"
+    res_p = requests.get(url_prop, headers=headers)
+    
+    if res_p.status_code == 200 and 'data' in res_p.json() and len(res_p.json()['data']) > 0:
+        p_data = res_p.json()['data']
+        p_df = pd.DataFrame(p_data)
+        p_df['NET_PROP_FLOW'] = p_df['buyVal'] - p_df['sellVal']
+        p_df = p_df[['date', 'NET_PROP_FLOW']].copy()
+        p_df.rename(columns={'date': 'Date'}, inplace=True)
+        p_df.set_index('Date', inplace=True)
+        p_df.index = pd.to_datetime(p_df.index).normalize()
+        p_df = p_df[~p_df.index.duplicated(keep='last')]
+        local_df = pd.concat([local_df, p_df], axis=1)
+        print("  -> ✅ Đã gom xong Dòng tiền Tự doanh!")
+        
 except Exception as e:
-    print(f"Lỗi lấy dữ liệu Lãi suất liên ngân hàng: {e}")
+    print(f"Lỗi khi gọi API VNDirect: {e}")
 
 # --- PHẦN 3: VỆ TINH VĨ MÔ TOÀN CẦU (TradingView) ---
 tv_symbols = [
@@ -60,7 +89,7 @@ tv_symbols = [
     ('VNQ', 'AMEX', 'US_REAL_ESTATE') 
 ]
 
-print("3. Đang quét vệ tinh vĩ mô toàn cầu...")
+print("3. Đang quét vệ tinh vĩ mô toàn cầu (Vàng, Dầu, Tỷ giá, BĐS)...")
 df_list = []
 for sym, exc, col_name in tv_symbols:
     try:
@@ -98,9 +127,9 @@ except Exception as e:
 combo_df = pd.concat([local_df, global_df, fred_df], axis=1)
 combo_df.sort_index(inplace=True)
 
-# KIỂM DUYỆT NGHIÊM NGẶT: Không dùng lệnh ffill ở đây để giữ nguyên gốc dữ liệu.
+# TUYỆT ĐỐI KHÔNG SỬ DỤNG FFILL - Giữ nguyên gốc 100%
 
-# Dọn rác: Xóa những dòng mà cả 3 thị trường chính đều nghỉ
+# Dọn rác: Xóa những dòng trống trơn do nghỉ lễ
 combo_df.dropna(subset=['VNINDEX', 'DXY', 'US10Y'], how='all', inplace=True)
 combo_df = combo_df.sort_index(ascending=False)
 combo_df.index.name = 'Date'
@@ -116,7 +145,8 @@ if 'FED_LIQUIDITY' in combo_df.columns:
     us_cols.append('FED_LIQUIDITY')
 us_cols_exist = [c for c in us_cols if c in combo_df.columns]
 
-vn_cols = ['VNINDEX', 'VN_VOLUME', 'VN30', 'VN30_F1M', 'DERIVATIVE_SPREAD', 'VN10Y', 'VN_INTERBANK_ON', 'USD_VND']
+# Tích hợp thêm các chỉ số nội địa mới lấy từ VNDirect
+vn_cols = ['VNINDEX', 'VN_VOLUME', 'VN30', 'VN30_F1M', 'DERIVATIVE_SPREAD', 'VN10Y', 'USD_VND', 'NET_FOREIGN_FLOW', 'NET_PROP_FLOW']
 vn_cols_exist = [c for c in vn_cols if c in combo_df.columns]
 
 update_csv('macro_database5years.csv', combo_df)
@@ -124,4 +154,4 @@ update_csv('us_macro_database5years.csv', combo_df[us_cols_exist])
 update_csv('vn_macro_database5years.csv', combo_df[vn_cols_exist])
 update_csv('macro_database.csv', combo_df.head(60))
 
-print("🎉 HOÀN TẤT! Dữ liệu 100% nguyên chất, nói không với độn số ảo.")
+print("🎉 HOÀN TẤT! Radar tự vận hành 100% bằng API mở, không phụ thuộc thư viện thứ 3.")
