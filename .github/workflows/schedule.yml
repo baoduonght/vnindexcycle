@@ -22,7 +22,7 @@ jobs:
 
       - name: Cài đặt các thư viện cần thiết
         run: |
-          pip install pandas yfinance requests beautifulsoup4 pandas-datareader
+          pip install pandas yfinance requests beautifulsoup4 pandas-datareader vnstock
           pip install git+https://github.com/rongardF/tvdatafeed.git
 
       - name: Chạy Bot thu thập dữ liệu
