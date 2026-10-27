@@ -2,8 +2,8 @@ name: Quant VN30 Daily Bot
 
 on:
   schedule:
-    # Chạy lúc 14:45 VN (tương đương 07:45 UTC) từ Thứ 2 đến Thứ 6
-    - cron: '45 7 * * 1-5'
+    # Chạy lúc 12:00 trưa VN (tương đương 05:00 UTC) từ Thứ 2 đến Thứ 6
+    - cron: '0 5 * * 1-5'
   workflow_dispatch:
 
 jobs:
