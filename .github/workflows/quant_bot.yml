@@ -1,0 +1,31 @@
+name: Quant VN30 Daily Bot
+
+on:
+  schedule:
+    # Chạy lúc 14:45 VN (tương đương 07:45 UTC) từ Thứ 2 đến Thứ 6
+    - cron: '45 7 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Cài đặt thư viện
+        run: |
+          pip install git+https://github.com/rongardF/tvdatafeed.git
+          pip install pandas "numpy<2.0" yfinance scikit-learn requests
+
+      - name: Thực thi Bot Quét Tín hiệu
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: |
+          python quant_bot.py
