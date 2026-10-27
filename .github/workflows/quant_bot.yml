@@ -33,11 +33,15 @@ jobs:
         run: |
           python quant_bot.py
 
-      # Lệnh lưu và đẩy file trading_log.csv lên GitHub
+     # Lệnh kiểm tra, lưu và đẩy file trading_log.csv lên GitHub
       - name: Lưu Nhật ký Giao dịch (Commit & Push)
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add trading_log.csv
-          git commit -m "Auto-update: Lưu lịch sử phím lệnh [skip ci]" || echo "Không có mã nào đạt điểm nổ để lưu"
-          git push
+          if [ -f trading_log.csv ]; then
+            git add trading_log.csv
+            git commit -m "Auto-update: Lưu lịch sử phím lệnh [skip ci]"
+            git push
+          else
+            echo "Không có tín hiệu mua hôm nay, bỏ qua bước lưu file."
+          fi
