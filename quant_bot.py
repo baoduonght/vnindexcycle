@@ -145,6 +145,28 @@ def main():
         for s in buy_candidates: final_msg += f"• **{s['Mã']}**: Giá {s['Giá']:.1f} | Vol: {s['Vol']:.1f}x | AI: {s['AI']:.1f}%\n"
         
     send_telegram_msg(final_msg)
+    
+    # 5. GHI NHẬT KÝ VÀO FILE CSV (Phần mới thêm)
+    if buy_candidates:
+        log_file = "trading_log.csv"
+        records = []
+        for s in buy_candidates:
+            records.append({
+                "Date": today_date.strftime('%Y-%m-%d'),
+                "VN-Index": round(today_idx, 1),
+                "Ticker": s['Mã'],
+                "Price": round(s['Giá'], 1),
+                "Vol_Ratio": round(s['Vol'], 2),
+                "AI_Score": round(s['AI'], 1)
+            })
+        
+        df_log = pd.DataFrame(records)
+        # Nếu file chưa tồn tại thì tạo mới có tiêu đề, nếu có rồi thì ghi nối tiếp (append)
+        if not os.path.exists(log_file):
+            df_log.to_csv(log_file, index=False)
+        else:
+            df_log.to_csv(log_file, mode='a', header=False, index=False)
+        print("Đã lưu lịch sử vào trading_log.csv")
 
 if __name__ == "__main__":
     main()
