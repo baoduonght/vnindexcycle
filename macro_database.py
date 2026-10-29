@@ -7,7 +7,7 @@ import requests
 
 print("🚀 Khởi động Siêu Radar Vĩ mô: Bản Tối thượng (CORS Proxy Gateway)...")
 
-tv = TvDatafeed()
+tv = TvDatafeed('quocbao2005', 'baoduong123@')
 
 # --- PHẦN 1: DỮ LIỆU CƠ SỞ & PHÁI SINH VIỆT NAM (TradingView) ---
 print("1. Đang quét nội tại chứng khoán Việt Nam (VNINDEX, VN30, Phái sinh)...")
@@ -52,7 +52,7 @@ try:
     }
     
     # Lấy Dòng tiền Khối ngoại qua trạm trung chuyển corsproxy
-    url_foreign = "https://finfo-api.vndirect.com.vn/v4/foreign_trading?q=code:VNINDEX~date:gte:2021-01-01&sort=date&size=3000"
+    url_foreign = "https://finfo-api.vndirect.com.vn/v4/foreign_trading?q=code:VNINDEX~date:gte:2016-01-01&sort=date&size=3000"
     bypass_url_f = f"https://corsproxy.io/?{url_foreign}"
     
     res_f = requests.get(bypass_url_f, headers=headers, timeout=15)
@@ -70,7 +70,7 @@ try:
         print("  -> ✅ Lách tường lửa thành công: Đã gom Dòng tiền Khối ngoại!")
         
     # Lấy Dòng tiền Tự doanh qua trạm trung chuyển corsproxy
-    url_prop = "https://finfo-api.vndirect.com.vn/v4/proprietary_trading?q=code:VNINDEX~date:gte:2021-01-01&sort=date&size=1500"
+    url_prop = "https://finfo-api.vndirect.com.vn/v4/proprietary_trading?q=code:VNINDEX~date:gte:2016-01-01&sort=date&size=3000"
     bypass_url_p = f"https://corsproxy.io/?{url_prop}"
     
     res_p = requests.get(bypass_url_p, headers=headers, timeout=15)
