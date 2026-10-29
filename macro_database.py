@@ -14,19 +14,19 @@ print("1. Đang quét nội tại chứng khoán Việt Nam (VNINDEX, VN30, Phá
 local_df_list = []
 
 try:
-    vn_raw = tv.get_hist(symbol='VNINDEX', exchange='HOSE', interval=Interval.in_daily, n_bars=1500)
+    vn_raw = tv.get_hist(symbol='VNINDEX', exchange='HOSE', interval=Interval.in_daily, n_bars=3000)
     if vn_raw is not None and not vn_raw.empty:
         vn_df = vn_raw[['close', 'volume']].copy()
         vn_df.rename(columns={'close': 'VNINDEX', 'volume': 'VN_VOLUME'}, inplace=True)
         local_df_list.append(vn_df)
 
-    vn30_raw = tv.get_hist(symbol='VN30', exchange='HOSE', interval=Interval.in_daily, n_bars=1500)
+    vn30_raw = tv.get_hist(symbol='VN30', exchange='HOSE', interval=Interval.in_daily, n_bars=3000)
     if vn30_raw is not None and not vn30_raw.empty:
         vn30_df = vn30_raw[['close']].copy()
         vn30_df.rename(columns={'close': 'VN30'}, inplace=True)
         local_df_list.append(vn30_df)
 
-    ps_raw = tv.get_hist(symbol='VN30F1M', exchange='HNX', interval=Interval.in_daily, n_bars=1500)
+    ps_raw = tv.get_hist(symbol='VN30F1M', exchange='HNX', interval=Interval.in_daily, n_bars=3000)
     if ps_raw is not None and not ps_raw.empty:
         ps_df = ps_raw[['close']].copy()
         ps_df.rename(columns={'close': 'VN30_F1M'}, inplace=True)
@@ -52,7 +52,7 @@ try:
     }
     
     # Lấy Dòng tiền Khối ngoại qua trạm trung chuyển corsproxy
-    url_foreign = "https://finfo-api.vndirect.com.vn/v4/foreign_trading?q=code:VNINDEX~date:gte:2021-01-01&sort=date&size=1500"
+    url_foreign = "https://finfo-api.vndirect.com.vn/v4/foreign_trading?q=code:VNINDEX~date:gte:2021-01-01&sort=date&size=3000"
     bypass_url_f = f"https://corsproxy.io/?{url_foreign}"
     
     res_f = requests.get(bypass_url_f, headers=headers, timeout=15)
@@ -108,7 +108,7 @@ print("3. Đang quét vệ tinh vĩ mô toàn cầu (Vàng, Dầu, Tỷ giá, B�
 df_list = []
 for sym, exc, col_name in tv_symbols:
     try:
-        data = tv.get_hist(symbol=sym, exchange=exc, interval=Interval.in_daily, n_bars=1500)
+        data = tv.get_hist(symbol=sym, exchange=exc, interval=Interval.in_daily, n_bars=3000)
         if data is not None and not data.empty:
             temp_df = data[['close']].copy()
             temp_df.rename(columns={'close': col_name}, inplace=True)
@@ -127,7 +127,7 @@ else:
 # --- PHẦN 4: HỆ THỐNG THANH KHOẢN FED (FRED) ---
 print("4. Đang đột nhập hệ thống thanh khoản Mỹ (FRED)...")
 end_date = datetime.datetime.now()
-start_date = end_date - datetime.timedelta(days=5*365)
+start_date = end_date - datetime.timedelta(days=10*365)
 try:
     fred_df = web.DataReader(['WALCL', 'WTREGEN', 'RRPONTSYD'], 'fred', start_date, end_date)
     fred_df['FED_LIQUIDITY'] = fred_df['WALCL'] - fred_df['WTREGEN'] - fred_df['RRPONTSYD']
@@ -165,9 +165,9 @@ us_cols_exist = [c for c in us_cols if c in combo_df.columns]
 vn_cols = ['VNINDEX', 'VN_VOLUME', 'VN30', 'VN30_F1M', 'DERIVATIVE_SPREAD', 'VN10Y', 'USD_VND', 'NET_FOREIGN_FLOW', 'NET_PROP_FLOW']
 vn_cols_exist = [c for c in vn_cols if c in combo_df.columns]
 
-update_csv('macro_database5years.csv', combo_df)
-update_csv('us_macro_database5years.csv', combo_df[us_cols_exist])
-update_csv('vn_macro_database5years.csv', combo_df[vn_cols_exist])
-update_csv('macro_database.csv', combo_df.head(60))
+update_csv('markets_database10years.csv', combo_df)
+update_csv('global_markets_database10years.csv', combo_df[us_cols_exist])
+update_csv('vn_markets_database10years.csv', combo_df[vn_cols_exist])
+update_csv('markets_database_now.csv', combo_df.head(60))
 
 print("🎉 HOÀN TẤT! Radar bọc thép lách tường lửa thành công.")
