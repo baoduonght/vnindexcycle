@@ -125,12 +125,27 @@ combo_df.index.name = 'Date'
 
 # --- PHẦN 6: XUẤT XƯỞNG ---
 def update_csv(filename, new_df):
-    new_df.to_csv(filename)
-    print(f"✅ Đã đóng gói: {filename}")
+    if not new_df.empty:
+        new_df.to_csv(filename)
+        print(f"✅ Đã đóng gói: {filename}")
+    else:
+        print(f"⚠️ Cảnh báo: Dữ liệu rỗng, bỏ qua {filename}")
 
+# 1. File tổng hợp (Tất cả dữ liệu VN, Global, FED)
 update_csv('markets_database10years.csv', combo_df)
-update_csv('markets_database_now.csv', combo_df)
-update_csv('vn_markets_database10years.csv', combo_df)
-update_csv('global_markets_database10years.csv', combo_df) 
 
-print("🎉 HOÀN TẤT! Data Pipeline 10 năm đã thông luồng.")
+# 2. File cập nhật nhanh (Chỉ cắt lấy dữ liệu 30 ngày gần nhất để load nhẹ hơn)
+update_csv('markets_database_now.csv', combo_df.head(30))
+
+# 3. File nội địa (Chỉ lưu các cột của thị trường Việt Nam)
+if not local_df.empty:
+    local_df_sorted = local_df.sort_index(ascending=False)
+    update_csv('vn_markets_database10years.csv', local_df_sorted)
+
+# 4. File vĩ mô toàn cầu (Ghép dữ liệu Global từ Yahoo Finance và thanh khoản FED)
+if not global_df.empty or not fred_df.empty:
+    global_macro_df = pd.concat([global_df, fred_df], axis=1).sort_index(ascending=False)
+    global_macro_df.index.name = 'Date'
+    update_csv('global_markets_database10years.csv', global_macro_df)
+
+print("🎉 HOÀN TẤT! Data Pipeline 10 năm đã thông luồng và phân tách chuẩn xác.")
