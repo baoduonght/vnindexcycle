@@ -82,6 +82,11 @@ if local_df_list:
 else:
     local_df = pd.DataFrame()
 
+# ÉP BUỘC MỐC THỜI GIAN BẮT ĐẦU TỪ 1/1/2014 
+# (Đặt ngay trên Phần 2 để các biến bên dưới tự động lấy mốc này)
+start_date = pd.to_datetime('2014-01-01')
+end_date = pd.to_datetime('today')
+
 # =====================================================================
 # --- PHẦN 2, 3, 4: KHỐI NGOẠI, VĨ MÔ TOÀN CẦU & FED ---
 # =====================================================================
@@ -91,7 +96,8 @@ print("2. Đang kéo dữ liệu Dòng tiền, Vĩ mô Thế giới và Thanh kh
 try:
     headers = {'User-Agent': 'Mozilla/5.0'}
     for flow_type, url_endpoint in [('NET_FOREIGN_FLOW', 'foreign_trading'), ('NET_PROP_FLOW', 'proprietary_trading')]:
-        url = f"https://finfo-api.vndirect.com.vn/v4/{url_endpoint}?q=code:VNINDEX~date:gte:2014-01-01&sort=date&size=3000"
+        # Tăng size=4000 để phủ kín 13 năm (từ 2014 đến nay)
+        url = f"https://finfo-api.vndirect.com.vn/v4/{url_endpoint}?q=code:VNINDEX~date:gte:2014-01-01&sort=date&size=4000"
         res = requests.get(url, headers=headers, timeout=15)
         if res.status_code == 200 and 'data' in res.json() and res.json()['data']:
             df = pd.DataFrame(res.json()['data'])
@@ -115,6 +121,7 @@ yf_symbols = {
     'VNQ': 'US_REAL_ESTATE'
 }
 try:
+    # Tải dữ liệu chính xác từ 2014-01-01
     global_df = yf.download(list(yf_symbols.keys()), start=start_date.strftime('%Y-%m-%d'), progress=False)['Close'].rename(columns=yf_symbols)
     global_df = clean_index(global_df)
     
@@ -128,7 +135,8 @@ except Exception:
 
 # VN10Y (Từ TradingView)
 try:
-    vn10y_raw = tv.get_hist(symbol='VN10Y', exchange='TVC', interval=Interval.in_daily, n_bars=3000)
+    # Tăng n_bars lên 4000 để lấy đủ dữ liệu từ 2014
+    vn10y_raw = tv.get_hist(symbol='VN10Y', exchange='TVC', interval=Interval.in_daily, n_bars=4000)
     if vn10y_raw is not None and not vn10y_raw.empty:
         vn10y_df = vn10y_raw[['close']].rename(columns={'close': 'VN10Y'})
         vn10y_df = clean_index(vn10y_df)
@@ -138,13 +146,13 @@ except Exception:
 
 # FED Liquidity
 try:
+    # Kéo mượt mà từ 2014-01-01
     fred_df = web.DataReader(['WALCL', 'WTREGEN', 'RRPONTSYD'], 'fred', start_date, end_date)
     fred_df['FED_LIQUIDITY'] = fred_df['WALCL'] - fred_df['WTREGEN'] - fred_df['RRPONTSYD']
     fred_df = fred_df[['FED_LIQUIDITY']]
     fred_df = clean_index(fred_df)
 except Exception:
     fred_df = pd.DataFrame()
-
 
 # =====================================================================
 # --- PHẦN 5: HỢP NHẤT ---
