@@ -5,7 +5,7 @@ import yfinance as yf
 import datetime
 import requests
 
-print("🚀 Khởi động Siêu Radar Vĩ mô: Bản Tối thượng 10 Năm (Fix 100% Dữ Liệu VN)...")
+print("🚀 Khởi động Siêu Radar Vĩ mô: Bản Tối thượng 10 Năm (Fix US2Y & Phái sinh)...")
 
 tv = TvDatafeed()
 
@@ -22,16 +22,16 @@ print("1. Đang quét chứng khoán Việt Nam (TradingView + DChart Fallback).
 local_df_list = []
 
 def get_vietnam_data(symbol):
-    # Ưu tiên 1: Thử kéo bằng TvDatafeed (Nguồn quen thuộc và ổn định)
+    # Ưu tiên 1: Thử kéo bằng TvDatafeed
     try:
         exchange = 'HNX' if symbol == 'VN30F1M' else 'HOSE'
         raw = tv.get_hist(symbol=symbol, exchange=exchange, interval=Interval.in_daily, n_bars=3000)
         if raw is not None and len(raw) > 100:
             return raw
     except Exception as e:
-        print(f"TvDatafeed lỗi {symbol}: {e}")
+        pass
 
-    # Ưu tiên 2: Gọi TRỰC TIẾP API DChart của VNDirect (Bỏ qua Proxy)
+    # Ưu tiên 2: API dự phòng DChart
     print(f"⚠️ Chuyển sang API dự phòng DChart cho {symbol}...")
     url = f"https://dchart-api.vndirect.com.vn/dchart/history?resolution=D&symbol={symbol}&from={start_ts}&to={end_ts}"
     try:
@@ -68,7 +68,7 @@ if not vn30_raw.empty:
     vn30_df.index = pd.to_datetime(vn30_df.index).normalize()
     local_df_list.append(vn30_df)
 
-# 3. Kéo Phái sinh
+# 3. Kéo Phái sinh VN30F1M
 ps_raw = get_vietnam_data('VN30F1M')
 if not ps_raw.empty:
     ps_df = ps_raw[['close']].copy()
@@ -79,6 +79,7 @@ if not ps_raw.empty:
 # Hợp nhất nội địa
 if local_df_list:
     local_df = pd.concat(local_df_list, axis=1)
+    # Tạo cột chênh lệch phái sinh
     if 'VN30_F1M' in local_df.columns and 'VN30' in local_df.columns:
         local_df['DERIVATIVE_SPREAD'] = local_df['VN30_F1M'] - local_df['VN30']
     local_df = local_df[~local_df.index.duplicated(keep='last')]
@@ -88,7 +89,8 @@ else:
 # =====================================================================
 # --- PHẦN 2: API VNDIRECT (KHỐI NGOẠI & TỰ DOANH) ---
 # =====================================================================
-print("2. Đang kéo Dòng tiền (Đã loại bỏ Proxy gây nghẽn)...")
+# (Giữ nguyên như bản fix proxy đợt trước - Dữ liệu đang chạy tốt)
+print("2. Đang kéo Dòng tiền...")
 try:
     headers = {'User-Agent': 'Mozilla/5.0'}
     
@@ -112,7 +114,7 @@ try:
         p_df.index = pd.to_datetime(p_df.index).normalize()
         local_df = pd.concat([local_df, p_df[~p_df.index.duplicated(keep='last')]], axis=1)
 except Exception as e:
-    print(f"Lỗi phần Dòng tiền VNDirect: {e}")
+    print(f"Lỗi dòng tiền VNDirect: {e}")
 
 # =====================================================================
 # --- PHẦN 3: VỆ TINH VĨ MÔ TOÀN CẦU (YAHOO FINANCE) ---
@@ -121,6 +123,8 @@ print("3. Đang đột nhập hệ thống Yahoo Finance (Vàng, Dầu, Tỷ gi�
 yf_symbols = {
     'DX-Y.NYB': 'DXY',
     '^TNX': 'US10Y',
+    # Bổ sung Lợi suất trái phiếu chính phủ Mỹ kỳ hạn ngắn để vẽ đường cong lợi suất (Yield Curve)
+    '^IRX': 'US2Y', 
     'GC=F': 'GOLD',
     'CL=F': 'OIL',
     'JPY=X': 'JPY_USD',
@@ -132,10 +136,14 @@ try:
     yf_data = yf.download(list(yf_symbols.keys()), start=start_date.strftime('%Y-%m-%d'), progress=False)
     global_df = yf_data['Close'].rename(columns=yf_symbols)
     
-    # Riêng VN10Y không có trên Yahoo, kéo tạm từ TV
+    # Kéo VN10Y từ TradingView nhưng sẽ quản lý riêng
     vn10y_raw = tv.get_hist(symbol='VN10Y', exchange='TVC', interval=Interval.in_daily, n_bars=3000)
     if vn10y_raw is not None and not vn10y_raw.empty:
-        global_df['VN10Y'] = vn10y_raw['close']
+        # Nhét VN10Y tạm vào local_df thay vì global_df để dễ tách biệt
+        vn10y_df = vn10y_raw[['close']].copy()
+        vn10y_df.rename(columns={'close': 'VN10Y'}, inplace=True)
+        vn10y_df.index = pd.to_datetime(vn10y_df.index).normalize()
+        local_df = pd.concat([local_df, vn10y_df], axis=1)
         
     global_df.index = pd.to_datetime(global_df.index).tz_localize(None).normalize()
     global_df = global_df[~global_df.index.duplicated(keep='last')]
@@ -184,8 +192,9 @@ if not local_df.empty:
     update_csv('vn_markets_database10years.csv', local_df_sorted)
 
 if not global_df.empty or not fred_df.empty:
+    # Chỉ ghép Global (Yahoo) và FRED, loại bỏ hoàn toàn các chỉ báo VN
     global_macro_df = pd.concat([global_df, fred_df], axis=1, join='outer').sort_index(ascending=False)
     global_macro_df.index.name = 'Date'
     update_csv('global_markets_database10years.csv', global_macro_df)
 
-print("🎉 HOÀN TẤT! Data Pipeline 10 năm đã thông luồng và phân tách chuẩn xác.")
+print("🎉 HOÀN TẤT! Data Pipeline đã có US2Y, đầy đủ Phái sinh và dọn sạch file Global.")
