@@ -101,27 +101,32 @@ for c in stock_tickers:
 # ==========================================
 # 3. NHÚNG AI - HUẤN LUYỆN RANDOM FOREST
 # ==========================================
-print("3. Thu thập dữ liệu Vĩ mô & Đào tạo AI nhận diện Bull Trap...")
-macro_df = pd.DataFrame()
-for ticker, name in {'DX-Y.NYB': 'DXY', '^TNX': 'US10Y'}.items():
-    temp = yf.download(ticker, start="2012-01-01", progress=False)
-    if isinstance(temp.columns, pd.MultiIndex): temp.columns = [c[0] for c in temp.columns]
-    series = temp['Close'].rename(name)
-    macro_df = pd.DataFrame(series) if macro_df.empty else macro_df.join(series, how='outer')
+print("3. Tải dữ liệu Vĩ mô & Đào tạo AI nhận diện Bull Trap...")
 
-macro_df.index = macro_df.index.tz_localize(None).normalize()
-macro_df.index.name = 'Date'
-macro_df = macro_df.reset_index().ffill().bfill()
+# ĐỌC TRỰC TIẾP TỪ FILE CSV ĐÃ DỌN SẠCH TỪ TRƯỚC
+try:
+    # Lấy DXY và US10Y từ file vĩ mô tổng
+    macro_df = pd.read_csv('global_markets_database10years.csv', parse_dates=['Date'])
+    macro_df = macro_df[['Date', 'DXY', 'US10Y']]
+    # Sắp xếp lại từ cũ đến mới để tính rolling chuẩn xác
+    macro_df = macro_df.sort_values('Date').reset_index(drop=True)
+except FileNotFoundError:
+    print("⚠️ Không tìm thấy file CSV vĩ mô, vui lòng chạy bot cào dữ liệu trước!")
 
-mfi_data = vnindex_df[['Date', 'VN_MFI']].set_index('Date')
-macro_df = macro_df.set_index('Date').join(mfi_data, how='left').reset_index()
+# Gộp MFI vào Vĩ mô (Giữ nguyên logic của bạn)
+mfi_data = vnindex_df[['Date', 'VN_MFI']]
+macro_df = macro_df.merge(mfi_data, on='Date', how='left')
 macro_df['VN_MFI'] = macro_df['VN_MFI'].ffill()
 
+# CHUẨN HÓA Z-SCORE: Công thức xuất sắc của bạn
 macro_cols = ['DXY', 'US10Y']
 for col in macro_cols:
     macro_df[f'Z_{col}'] = (macro_df[col] - macro_df[col].rolling(120).mean()) / macro_df[col].rolling(120).std()
 z_cols = [f'Z_{c}' for c in macro_cols]
 
+# ==========================================
+# GÁN NHÃN VÀ HUẤN LUYỆN (GIỮ NGUYÊN)
+# ==========================================
 df_ml_list = []
 for c in stock_tickers:
     df_c = pd.DataFrame({'Date': stocks_close.index})
@@ -129,19 +134,25 @@ for c in stock_tickers:
     df_c['Vol_Ratio'] = (stocks_volume[f'{c}_V'] / stocks_vol_ma20[f'{c}_V']).values
     df_c['Dist_MA50'] = (stocks_close[c] / stocks_ma50[c]).values
     df_c['RSI'] = calc_rsi(stocks_close[c]).values
+    
+    # Target: Kỳ vọng lợi nhuận > 2% sau 10 phiên (T+10)
     future_return = stocks_close[c].shift(-10) / stocks_close[c] - 1
     df_c['Target'] = (future_return > 0.02).astype(int).values
     df_ml_list.append(df_c)
 
+# Hợp nhất và dọn dẹp các ô NaN do rolling tạo ra
 ml_master = pd.concat(df_ml_list).merge(macro_df, on='Date', how='left').dropna()
 ml_features = ['Vol_Ratio', 'Dist_MA50', 'RSI', 'VN_MFI'] + z_cols
 
+# Phân tách tập Train (Học từ 2014 đến 2023)
 X_train = ml_master[ml_master['Date'] < '2024-01-01'][ml_features]
 y_train = ml_master[ml_master['Date'] < '2024-01-01']['Target']
 
+# Huấn luyện AI với class_weight='balanced'
 rf_model = RandomForestClassifier(n_estimators=100, max_depth=6, class_weight='balanced', random_state=42)
 rf_model.fit(X_train, y_train)
 
+# Chấm điểm phiên mới nhất
 ml_master['AI_Score'] = rf_model.predict_proba(ml_master[ml_features])[:, 1]
 ai_dict = {c: ml_master[ml_master['Ticker'] == c].set_index('Date')['AI_Score'] for c in stock_tickers}
 
