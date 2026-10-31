@@ -2,10 +2,10 @@ name: Quant VN30 Daily Bot
 
 on:
   schedule:
-    - cron: '0 5 * * 1-5'
+    # GitHub dùng giờ UTC. 08:15 UTC tương đương 15:15 giờ Việt Nam (Ngay sau phiên ATC)
+    - cron: '15 8 * * 1-5'
   workflow_dispatch:
 
-# Cấp quyền cho bot tự động ghi đè file lên repo
 permissions:
   contents: write
 
@@ -23,25 +23,33 @@ jobs:
 
       - name: Cài đặt thư viện
         run: |
-          pip install git+https://github.com/rongardF/tvdatafeed.git
-          pip install pandas "numpy<2.0" yfinance scikit-learn requests
+          pip install --upgrade --no-cache-dir git+https://github.com/rongardF/tvdatafeed.git
+          pip install pandas "numpy<2.0" yfinance scikit-learn requests plotly
 
       - name: Thực thi Bot Quét Tín hiệu
         env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          CHAT_ID: ${{ secrets.CHAT_ID }}
+          # Phải khớp tuyệt đối với tên biến os.environ.get() trong file Python
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python quant_bot.py
 
-     # Lệnh kiểm tra, lưu và đẩy file trading_log.csv lên GitHub
       - name: Lưu Nhật ký Giao dịch (Commit & Push)
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           if [ -f trading_log.csv ]; then
             git add trading_log.csv
-            git commit -m "Auto-update: Lưu lịch sử phím lệnh [skip ci]"
-            git push
+            # Kiểm tra xem file CSV có thực sự sinh ra dòng lệnh mới không để tránh lỗi commit rỗng
+            if git diff --staged --quiet; then
+              echo "Không có lệnh mới, bỏ qua commit."
+            else
+              git commit -m "Auto-update: Lưu lịch sử phím lệnh [skip ci]"
+              git push
+            fi
           else
-            echo "Không có tín hiệu mua hôm nay, bỏ qua bước lưu file."
+            echo "Chưa có file trading_log.csv được tạo."
           fi
+          # Lưu sổ lệnh ra file CSV (Dùng cho GitHub Actions đẩy lên kho)
+if not df_trade_log.empty:
+    df_trade_log.to_csv('trading_log.csv', index=False)
