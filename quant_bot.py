@@ -93,6 +93,11 @@ stocks_ma20 = stocks_close.rolling(20).mean()
 stocks_ma50 = stocks_close.rolling(50).mean()
 stocks_vol_ma20 = stocks_volume.rolling(20).mean().shift(1)
 
+# THÊM MỚI: Tính RSI sẵn cho toàn bộ cổ phiếu để trích xuất lúc báo lệnh
+stocks_rsi = pd.DataFrame(index=stocks_close.index)
+for c in stock_tickers:
+    stocks_rsi[c] = calc_rsi(stocks_close[c])
+
 # ==========================================
 # 3. NHÚNG AI - HUẤN LUYỆN RANDOM FOREST
 # ==========================================
@@ -145,7 +150,8 @@ ai_dict = {c: ml_master[ml_master['Ticker'] == c].set_index('Date')['AI_Score'] 
 # ==========================================
 print("4. Chạy Sổ Kế Toán & Trích xuất Lịch sử Mua/Bán của AI...")
 def run_ai_quant_system_with_log():
-    backtest = df_clean[['Date', 'VNINDEX', 'MA50', 'MA100', 'MA200', 'ADX', 'ATR_PCT']].copy()
+    # THÊM 'VN_MFI' vào danh sách backtest để lấy dữ liệu dòng tiền
+    backtest = df_clean[['Date', 'VNINDEX', 'MA50', 'MA100', 'MA200', 'ADX', 'ATR_PCT', 'VN_MFI']].copy()
     MAX_SLOTS = 5
     LIQUIDITY_FEE = 0.003
     DAILY_INTEREST = 0.05 / 252
@@ -162,6 +168,7 @@ def run_ai_quant_system_with_log():
         market_ma200 = backtest['MA200'].iloc[i]
         market_adx = backtest['ADX'].iloc[i]
         market_atr_pct = backtest['ATR_PCT'].iloc[i]
+        market_mfi = backtest['VN_MFI'].iloc[i] # Lấy MFI của phiên hiện tại
 
         if date not in stocks_close.index:
             nav_history[i] = nav_history[i-1] if i > 0 else cash
@@ -191,7 +198,6 @@ def run_ai_quant_system_with_log():
                 elif peak_margin >= 0.12 and curr_price < held[c]['highest'] * 0.94: to_remove.append(c)
                 elif curr_price < stocks_ma20.at[date, c] and profit_margin > 0.05: to_remove.append(c)
 
-            # Đã sửa lỗi Indentation ở đoạn này
             for c in to_remove:
                 sell_price = stocks_close.at[date, c]
                 cash += held[c]['qty'] * sell_price * (1 - LIQUIDITY_FEE)
@@ -218,28 +224,32 @@ def run_ai_quant_system_with_log():
                         if curr_price > prev_high_20 and curr_vol > (prev_vol_ma20 * 1.5):
                             ai_score = ai_dict[c].get(date, 0)
                             if ai_score >= 0.55:
-                                buy_candidates.append((c, ai_score))
+                                # Tính toán độ đột biến Vol và lấy RSI
+                                vol_ratio = curr_vol / prev_vol_ma20 if prev_vol_ma20 > 0 else 0
+                                stock_rsi = stocks_rsi.at[date, c]
+                                buy_candidates.append((c, ai_score, vol_ratio, stock_rsi))
 
                 if buy_candidates:
                     invest_amt = min(allowed_capital_to_invest / empty, cash)
-                    for c, score in buy_candidates:
+                    for c, score, v_ratio, s_rsi in buy_candidates:
                         if invest_amt > 0 and stocks_close.at[date, c] > 0 and cash >= invest_amt:
                             cash -= invest_amt
                             buy_price = stocks_close.at[date, c]
                             qty = (invest_amt * (1 - LIQUIDITY_FEE)) / buy_price
                             held[c] = {'qty': qty, 'buy_price': buy_price, 'highest': buy_price}
-                            trade_log.append({'Date': date, 'Action': 'BUY', 'Ticker': c, 'Price': buy_price, 'AI_Score': round(score, 2)})
+                            
+                            # GHI ĐẦY ĐỦ CÁC CHỈ BÁO VÀO SỔ LỆNH ĐỂ TELEGRAM ĐỌC
+                            trade_log.append({
+                                'Date': date, 'Action': 'BUY', 'Ticker': c, 'Price': buy_price, 
+                                'AI_Score': round(score, 2), 'Vol_Ratio': round(v_ratio, 1),
+                                'RSI': round(s_rsi, 1), 'VN_MFI': round(market_mfi, 1)
+                            })
                             empty -= 1
                         if empty == 0 or cash <= 0: break
 
         nav_history[i] = cash + sum([held[c]['qty'] * stocks_close.at[date, c] for c in held.keys()])
 
     return nav_history, pd.DataFrame(trade_log)
-
-nav_history, df_trade_log = run_ai_quant_system_with_log()
-backtest_result = df_clean[['Date', 'VNINDEX']].copy()
-backtest_result['NAV_AI_Driven'] = nav_history
-
 # ==========================================
 # 5. MODULE BÁO CÁO TÍN HIỆU QUA TELEGRAM
 # ==========================================
@@ -281,7 +291,6 @@ def process_and_send_signals(df_log):
     
     if not df_log.empty:
         latest_trades = df_log[df_log['Date'] == df_log['Date'].max()]
-        # Chỉ báo lệnh nếu ngày ghi sổ trùng với phiên giao dịch gần nhất
         if not latest_trades.empty and df_log['Date'].max() == latest_date:
             for _, row in latest_trades.iterrows():
                 ticker = row['Ticker']
@@ -290,19 +299,25 @@ def process_and_send_signals(df_log):
                 
                 if 'BUY' in action:
                     ai_score = row.get('AI_Score', 0)
+                    vol_ratio = row.get('Vol_Ratio', 0)
+                    rsi = row.get('RSI', 0)
+                    mfi = row.get('VN_MFI', 0)
+                    
                     msg += f"🟢 <b>MUA ĐỘT PHÁ: {ticker}</b> (Giá: {price:,.0f})\n"
+                    msg += f"   + Nổ Volume: <b>{vol_ratio}x</b> trung bình\n"
+                    msg += f"   + Sức mạnh RSI: <b>{rsi}</b>\n"
+                    msg += f"   + Dòng tiền Vĩ mô (MFI): <b>{mfi}</b>\n"
+                    msg += f"   + AI dự báo Win: <b>{ai_score * 100:.1f}%</b>\n\n"
                     buy_count += 1
                     
                 elif 'SELL' in action:
                     profit = row.get('Profit(%)', 0)
                     icon = "🔥" if profit > 0 else "🩸"
-                    msg += f"🔴 <b>BÁN TẤT TOÁN: {ticker}</b> (Lãi/Lỗ: {icon} {profit}%)\n"
+                    msg += f"🔴 <b>BÁN TẤT TOÁN: {ticker}</b> (Lãi/Lỗ: {icon} {profit}%)\n\n"
                     sell_count += 1
 
     if buy_count == 0 and sell_count == 0:
         msg += "<i>⏳ Hệ thống nằm im quan sát, không có lệnh mới.</i>\n\n"
-    else:
-        msg += "\n"
 
     # CHỈ HIỂN THỊ TOP 5 KHI CÓ LỆNH MUA TỪ HỆ THỐNG
     if buy_count > 0:
@@ -331,9 +346,12 @@ def process_and_send_signals(df_log):
             
         msg += "\n"
         
+    # CHỐT LẠI BẰNG FOOTER
     msg += "➖➖➖➖➖➖➖➖➖➖\n"
     msg += "<i>⚠️ Khuyến nghị từ AI Random Forest. Hãy chia đều tỷ trọng.</i>"
     
+    # 🚀 CHỈ GỌI HÀM GỬI ĐÚNG 1 LẦN SAU KHI ĐÃ GÓI XONG TIN NHẮN
+    # Nếu bạn đang dùng code xuất ảnh, hãy đổi thành: send_telegram_photo(chart_path, msg)
     send_telegram_msg(msg)
 
 # Chạy báo cáo
