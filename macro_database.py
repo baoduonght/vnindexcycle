@@ -31,7 +31,7 @@ local_df_list = []
 def get_vietnam_data(symbol):
     try:
         exchange = 'HNX' if symbol == 'VN30F1M' else 'HOSE'
-        raw = tv.get_hist(symbol=symbol, exchange=exchange, interval=Interval.in_daily, n_bars=3000)
+        raw = tv.get_hist(symbol=symbol, exchange=exchange, interval=Interval.in_daily, n_bars=4000)
         if raw is not None and len(raw) > 100:
             return clean_index(raw)
     except Exception:
