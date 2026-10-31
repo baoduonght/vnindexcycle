@@ -245,12 +245,13 @@ backtest_result['NAV_AI_Driven'] = nav_history
 # ==========================================
 print("5. Đang trích xuất tín hiệu mới nhất và đẩy lên Telegram...")
 
-# 🛑 BẠN CHỈ CẦN ĐIỀN TOKEN VÀ CHAT ID VÀO ĐÂY 🛑
 import os
+import requests
 
-# Lấy Token từ GitHub Secrets thay vì gõ chữ cứng vào code
-TELEGRAM_BOT_TOKEN = os.environ.get('8652800746:AAHWydm8a5R18F1f4KAQZQTPG-asA4_Z6D8')
-TELEGRAM_CHAT_ID = os.environ.get('5211115722')
+# Lấy Token từ GitHub Secrets
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+
 def send_telegram_msg(text_message):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
@@ -269,58 +270,78 @@ def send_telegram_msg(text_message):
         print(f"❌ Lỗi kết nối mạng khi gửi Telegram: {e}")
 
 def process_and_send_signals(df_log):
-    if df_log.empty:
-        print("Trạng thái: Không có lịch sử giao dịch nào.")
-        return
-
-    # Lấy ngày giao dịch gần nhất trong sổ lệnh
-    latest_date = df_log['Date'].max()
-    latest_trades = df_log[df_log['Date'] == latest_date]
+    latest_date = stocks_close.index[-1]
     
-    msg = f"🤖 <b>SIÊU RADAR VN30 - TÍN HIỆU HÀNG NGÀY</b> 🤖\n"
-    msg += f"📅 Ngày giao dịch: <b>{latest_date.strftime('%d/%m/%Y')}</b>\n"
+    msg = f"🤖 <b>SIÊU RADAR VN30 - BÁO CÁO HÀNG NGÀY</b> 🤖\n"
+    msg += f"📅 Ngày: <b>{latest_date.strftime('%d/%m/%Y')}</b>\n"
     msg += "➖➖➖➖➖➖➖➖➖➖\n\n"
     
+    msg += "🎯 <b>LỆNH HÀNH ĐỘNG HÔM NAY:</b>\n"
     buy_count, sell_count = 0, 0
-
-    for _, row in latest_trades.iterrows():
-        ticker = row['Ticker']
-        action = row['Action']
-        price = row['Price']
-        
-        if 'BUY' in action:
-            ai_score = row.get('AI_Score', 0)
-            msg += f"🟢 <b>MUA ĐỘT PHÁ: {ticker}</b>\n"
-            msg += f"▪️ Giá khớp: {price:,.0f} VND\n"
-            msg += f"▪️ Xác suất AI (RF): {ai_score * 100:.1f}%\n\n"
-            buy_count += 1
-            
-        elif 'SELL' in action:
-            profit = row.get('Profit(%)', 0)
-            icon = "🔥" if profit > 0 else "🩸"
-            
-            if 'Cắt giảm' in action:
-                reason = "Thị trường sập gãy (Bán tháo)"
-            elif profit > 0:
-                reason = "Chốt lời"
-            else:
-                reason = "Cắt lỗ vi phạm"
+    
+    if not df_log.empty:
+        latest_trades = df_log[df_log['Date'] == df_log['Date'].max()]
+        # Chỉ báo lệnh nếu ngày ghi sổ trùng với phiên giao dịch gần nhất
+        if not latest_trades.empty and df_log['Date'].max() == latest_date:
+            for _, row in latest_trades.iterrows():
+                ticker = row['Ticker']
+                action = row['Action']
+                price = row['Price']
                 
-            msg += f"🔴 <b>BÁN TẤT TOÁN: {ticker}</b>\n"
-            msg += f"▪️ Lý do: {reason}\n"
-            msg += f"▪️ Giá khớp: {price:,.0f} VND\n"
-            msg += f"▪️ Hiệu suất lệnh: {icon} <b>{profit}%</b>\n\n"
-            sell_count += 1
+                if 'BUY' in action:
+                    ai_score = row.get('AI_Score', 0)
+                    msg += f"🟢 <b>MUA ĐỘT PHÁ: {ticker}</b> (Giá: {price:,.0f})\n"
+                    buy_count += 1
+                    
+                elif 'SELL' in action:
+                    profit = row.get('Profit(%)', 0)
+                    icon = "🔥" if profit > 0 else "🩸"
+                    msg += f"🔴 <b>BÁN TẤT TOÁN: {ticker}</b> (Lãi/Lỗ: {icon} {profit}%)\n"
+                    sell_count += 1
 
     if buy_count == 0 and sell_count == 0:
-        msg += "⏳ <i>Hệ thống nằm im quan sát, không có lệnh mới.</i>\n\n"
+        msg += "<i>⏳ Hệ thống nằm im quan sát, không có lệnh mới.</i>\n\n"
+    else:
+        msg += "\n"
+
+    # CHỈ HIỂN THỊ TOP 5 KHI CÓ LỆNH MUA TỪ HỆ THỐNG
+    if buy_count > 0:
+        msg += "➖➖➖➖➖➖➖➖➖➖\n"
+        msg += "🌟 <b>TOP 5 CP VN30 ĐÁNG MUA NHẤT (Tham khảo thêm):</b>\n"
+        msg += "<i>(Đang trong Uptrend & Điểm AI cao nhất)</i>\n\n"
+        
+        top_stocks = []
+        for c in stock_tickers:
+            curr_price = stocks_close.at[latest_date, c]
+            ma50 = stocks_ma50.at[latest_date, c]
+            ai_score = ai_dict[c].get(latest_date, 0)
+            
+            # Chỉ lọc các mã có giá nằm trên MA50
+            if curr_price > ma50:
+                top_stocks.append({'Ticker': c, 'AI_Score': ai_score, 'Price': curr_price})
+                
+        # Xếp hạng lấy 5 mã điểm cao nhất
+        top_5 = sorted(top_stocks, key=lambda x: x['AI_Score'], reverse=True)[:5]
+        
+        if top_5:
+            for i, item in enumerate(top_5, 1):
+                msg += f"{i}. <b>{item['Ticker']}</b> - Giá: {item['Price']:,.0f} VND (AI: {item['AI_Score']*100:.1f}%)\n"
+        else:
+            msg += "⚠️ <i>Không có mã nào giữ được Trend tăng ngoài danh mục bot báo.</i>\n"
+            
+        msg += "\n"
         
     msg += "➖➖➖➖➖➖➖➖➖➖\n"
-    msg += "<i>⚠️ Tín hiệu sinh ra từ Thuật toán Định lượng & AI.</i>"
+    msg += "<i>⚠️ Khuyến nghị từ AI Random Forest. Hãy chia đều tỷ trọng.</i>"
     
     send_telegram_msg(msg)
 
+# Chạy báo cáo
 process_and_send_signals(df_trade_log)
+
+# Lưu sổ lệnh ra file CSV (Dành cho GitHub Actions)
+if not df_trade_log.empty:
+    df_trade_log.to_csv('trading_log.csv', index=False)
 
 print("6. Vẽ biểu đồ...")
 fig = make_subplots(specs=[[{"secondary_y": True}]])
