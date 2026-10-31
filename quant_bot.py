@@ -1,5 +1,4 @@
-!pip install --upgrade --no-cache-dir git+https://github.com/rongardF/tvdatafeed.git -q
-!pip install yfinance scikit-learn -q
+
 import pandas as pd
 import numpy as np
 import yfinance as yf
