@@ -1,4 +1,4 @@
-
+ 
 import pandas as pd
 from tvDatafeed import TvDatafeed, Interval
 import pandas_datareader.data as web
