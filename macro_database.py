@@ -155,10 +155,20 @@ except Exception:
     fred_df = pd.DataFrame()
 
 # =====================================================================
-# --- PHẦN 5: HỢP NHẤT ---
+# --- PHẦN 5: HỢP NHẤT & GỌT RÁC (KHÔNG LẤP ĐẦY ẢO) ---
 # =====================================================================
-print("5. Đang xử lý hợp nhất các mốc thời gian...")
+print("5. Đang xử lý hợp nhất và gọt bỏ dữ liệu thừa...")
 combo_df = pd.concat([local_df, global_df, fred_df], axis=1, join='outer')
+
+# 1. CHÉM BỎ QUÁ KHỨ THỪA: Chỉ giữ dữ liệu từ đúng 01/01/2014 trở đi
+combo_df = combo_df[combo_df.index >= '2014-01-01']
+
+# 2. XÓA NGÀY ẢO: Dùng VN-INDEX làm hệ quy chiếu tuyệt đối. 
+# Ngày nào VN-INDEX không có giá trị (nghỉ lễ, cuối tuần) -> Xóa sổ cả dòng đó.
+if 'VNINDEX' in combo_df.columns:
+    combo_df = combo_df.dropna(subset=['VNINDEX'])
+
+# Sắp xếp lại thời gian từ mới nhất xuống cũ nhất
 combo_df = combo_df.round(4).sort_index(ascending=False)
 combo_df.index.name = 'Date'
 
@@ -169,19 +179,23 @@ print("6. Đang xuất CSV...")
 def update_csv(filename, new_df):
     if not new_df.empty:
         new_df.to_csv(filename)
-        print(f"✅ Đã đóng gói: {filename}")
+        print(f"✅ Đã đóng gói sạch sẽ: {filename}")
 
+# Xuất file tổng
 update_csv('markets_database10years.csv', combo_df)
 update_csv('markets_database_now.csv', combo_df.head(30))
 
-if not local_df.empty:
-    local_df_sorted = local_df.round(4).sort_index(ascending=False)
-    update_csv('vn_markets_database10years.csv', local_df_sorted)
+# Xuất file VN (Trích xuất từ bảng combo_df đã được gọt sạch rác)
+local_cols = local_df.columns.intersection(combo_df.columns)
+if not local_cols.empty:
+    local_df_clean = combo_df[local_cols]
+    update_csv('vn_markets_database10years.csv', local_df_clean)
 
-if not global_df.empty or not fred_df.empty:
-    global_macro_df = pd.concat([global_df, fred_df], axis=1, join='outer')
-    global_macro_df = global_macro_df.round(4).sort_index(ascending=False)
-    global_macro_df.index.name = 'Date'
-    update_csv('global_markets_database10years.csv', global_macro_df)
+# Xuất file Vĩ mô Toàn cầu (Đã được đồng bộ ép theo lịch VN-INDEX)
+global_cols = list(global_df.columns) + list(fred_df.columns)
+global_cols = [c for c in global_cols if c in combo_df.columns]
+if global_cols:
+    global_macro_clean = combo_df[global_cols]
+    update_csv('global_markets_database10years.csv', global_macro_clean)
 
-print("🎉 HOÀN TẤT! Dữ liệu đã thẳng hàng, File VN đã có đủ Tỷ Giá.")
+print("🎉 HOÀN TẤT! Dữ liệu 100% nguyên bản từ 2014, bám sát lịch VN-INDEX.")
