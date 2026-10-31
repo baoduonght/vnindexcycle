@@ -2,7 +2,6 @@ name: Quant VN30 Daily Bot
 
 on:
   schedule:
-    # GitHub dùng giờ UTC. 08:15 UTC tương đương 15:15 giờ Việt Nam (Ngay sau phiên ATC)
     - cron: '15 8 * * 1-5'
   workflow_dispatch:
 
@@ -21,35 +20,29 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Cài đặt thư viện
+      - name: Install Dependencies
         run: |
           pip install --upgrade --no-cache-dir git+https://github.com/rongardF/tvdatafeed.git
           pip install pandas "numpy<2.0" yfinance scikit-learn requests plotly
 
-      - name: Thực thi Bot Quét Tín hiệu
+      - name: Run Quant Bot
         env:
-          # Phải khớp tuyệt đối với tên biến os.environ.get() trong file Python
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          python quant_bot.py
+        run: python quant_bot.py
 
-      - name: Lưu Nhật ký Giao dịch (Commit & Push)
+      - name: Commit and Push Log
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           if [ -f trading_log.csv ]; then
             git add trading_log.csv
-            # Kiểm tra xem file CSV có thực sự sinh ra dòng lệnh mới không để tránh lỗi commit rỗng
             if git diff --staged --quiet; then
-              echo "Không có lệnh mới, bỏ qua commit."
+              echo "Khong co lenh moi, bo qua commit."
             else
-              git commit -m "Auto-update: Lưu lịch sử phím lệnh [skip ci]"
+              git commit -m "Auto-update: Luu lich su phim lenh [skip ci]"
               git push
             fi
           else
-            echo "Chưa có file trading_log.csv được tạo."
+            echo "Chua co file trading_log.csv duoc tao."
           fi
-          # Lưu sổ lệnh ra file CSV (Dùng cho GitHub Actions đẩy lên kho)
-if not df_trade_log.empty:
-    df_trade_log.to_csv('trading_log.csv', index=False)
