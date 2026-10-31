@@ -5,13 +5,21 @@ import yfinance as yf
 import datetime
 import requests
 
-print("🚀 Khởi động Siêu Radar Vĩ mô: Bản Tối thượng (Giữ nguyên NaN thực tế)...")
+print("🚀 Khởi động Siêu Radar Vĩ mô: Bản Tối thượng (Ép chuẩn Thời gian & Đưa Tỷ giá về VN)...")
 
 tv = TvDatafeed()
 end_date = datetime.datetime.now()
 start_date = end_date - datetime.timedelta(days=10*365)
 start_ts = int(start_date.timestamp())
 end_ts = int(end_date.timestamp())
+
+# MÀNG LỌC ĐẶC BIỆT: Triệt tiêu múi giờ (02:00:00) để chống lệch dòng
+def clean_index(df):
+    if not df.empty:
+        # Ép tất cả format về đúng định dạng ngày (bỏ giờ phút)
+        df.index = pd.to_datetime(pd.to_datetime(df.index).strftime('%Y-%m-%d'))
+        df = df[~df.index.duplicated(keep='last')]
+    return df
 
 # =====================================================================
 # --- PHẦN 1: DỮ LIỆU CƠ SỞ & PHÁI SINH VIỆT NAM (HYBRID API) ---
@@ -24,7 +32,7 @@ def get_vietnam_data(symbol):
         exchange = 'HNX' if symbol == 'VN30F1M' else 'HOSE'
         raw = tv.get_hist(symbol=symbol, exchange=exchange, interval=Interval.in_daily, n_bars=3000)
         if raw is not None and len(raw) > 100:
-            return raw
+            return clean_index(raw)
     except Exception:
         pass
 
@@ -36,38 +44,35 @@ def get_vietnam_data(symbol):
             data = res.json()
             if data.get('s') == 'ok':
                 df = pd.DataFrame({
-                    'Date': pd.to_datetime(data['t'], unit='s').dt.normalize(),
+                    'Date': pd.to_datetime(data['t'], unit='s'),
                     'close': data['c'],
                     'volume': data.get('v', 0)
                 })
                 df.set_index('Date', inplace=True)
-                return df
+                return clean_index(df)
     except Exception:
         pass
     return pd.DataFrame()
 
-# 1. Kéo VNINDEX
+# 1. Kéo VNINDEX, VN30, Phái sinh
 vni_raw = get_vietnam_data('VNINDEX')
 if not vni_raw.empty:
     vni_df = vni_raw[['close', 'volume']].copy()
     vni_df.rename(columns={'close': 'VNINDEX', 'volume': 'VN_VOLUME'}, inplace=True)
     local_df_list.append(vni_df)
 
-# 2. Kéo VN30
 vn30_raw = get_vietnam_data('VN30')
 if not vn30_raw.empty:
     vn30_df = vn30_raw[['close']].copy()
     vn30_df.rename(columns={'close': 'VN30'}, inplace=True)
     local_df_list.append(vn30_df)
 
-# 3. Kéo Phái sinh
 ps_raw = get_vietnam_data('VN30F1M')
 if not ps_raw.empty:
     ps_df = ps_raw[['close']].copy()
     ps_df.rename(columns={'close': 'VN30_F1M'}, inplace=True)
     local_df_list.append(ps_df)
 
-# Tiến hành hợp nhất
 if local_df_list:
     local_df = pd.concat(local_df_list, axis=1)
     if 'VN30_F1M' in local_df.columns and 'VN30' in local_df.columns:
@@ -79,7 +84,7 @@ else:
 # =====================================================================
 # --- PHẦN 2, 3, 4: KHỐI NGOẠI, VĨ MÔ TOÀN CẦU & FED ---
 # =====================================================================
-print("2. Đang kéo dữ liệu Dòng tiền nội địa, Vĩ mô Thế giới và Thanh khoản FED...")
+print("2. Đang kéo dữ liệu Dòng tiền, Vĩ mô Thế giới và Thanh khoản FED...")
 
 # Khối ngoại & Tự doanh
 try:
@@ -91,7 +96,7 @@ try:
             df = pd.DataFrame(res.json()['data'])
             df[flow_type] = df['buyVal'] - df['sellVal']
             df = df[['date', flow_type]].rename(columns={'date': 'Date'}).set_index('Date')
-            df.index = pd.to_datetime(df.index).normalize()
+            df = clean_index(df)
             local_df = pd.concat([local_df, df[~df.index.duplicated(keep='last')]], axis=1)
 except Exception:
     pass
@@ -110,8 +115,13 @@ yf_symbols = {
 }
 try:
     global_df = yf.download(list(yf_symbols.keys()), start=start_date.strftime('%Y-%m-%d'), progress=False)['Close'].rename(columns=yf_symbols)
-    global_df.index = pd.to_datetime(global_df.index).tz_localize(None).normalize()
-    global_df = global_df[~global_df.index.duplicated(keep='last')]
+    global_df = clean_index(global_df)
+    
+    # CHUYỂN HỘ KHẨU TỶ GIÁ USD/VND VỀ VN
+    if 'USD_VND' in global_df.columns:
+        local_df = pd.concat([local_df, global_df[['USD_VND']]], axis=1)
+        global_df.drop(columns=['USD_VND'], inplace=True)
+        
 except Exception:
     global_df = pd.DataFrame()
 
@@ -120,7 +130,7 @@ try:
     vn10y_raw = tv.get_hist(symbol='VN10Y', exchange='TVC', interval=Interval.in_daily, n_bars=3000)
     if vn10y_raw is not None and not vn10y_raw.empty:
         vn10y_df = vn10y_raw[['close']].rename(columns={'close': 'VN10Y'})
-        vn10y_df.index = pd.to_datetime(vn10y_df.index).normalize()
+        vn10y_df = clean_index(vn10y_df)
         local_df = pd.concat([local_df, vn10y_df], axis=1)
 except Exception:
     pass
@@ -130,8 +140,7 @@ try:
     fred_df = web.DataReader(['WALCL', 'WTREGEN', 'RRPONTSYD'], 'fred', start_date, end_date)
     fred_df['FED_LIQUIDITY'] = fred_df['WALCL'] - fred_df['WTREGEN'] - fred_df['RRPONTSYD']
     fred_df = fred_df[['FED_LIQUIDITY']]
-    fred_df.index = pd.to_datetime(fred_df.index).normalize()
-    fred_df = fred_df[~fred_df.index.duplicated(keep='last')]
+    fred_df = clean_index(fred_df)
 except Exception:
     fred_df = pd.DataFrame()
 
@@ -139,13 +148,9 @@ except Exception:
 # =====================================================================
 # --- PHẦN 5: HỢP NHẤT ---
 # =====================================================================
-print("5. Đang xử lý hợp nhất (Không tự ý điền dữ liệu ảo)...")
+print("5. Đang xử lý hợp nhất các mốc thời gian...")
 combo_df = pd.concat([local_df, global_df, fred_df], axis=1, join='outer')
-
-# Chỉ làm tròn 4 chữ số thập phân để giảm dung lượng file
-combo_df = combo_df.round(4) 
-
-combo_df = combo_df.sort_index(ascending=False)
+combo_df = combo_df.round(4).sort_index(ascending=False)
 combo_df.index.name = 'Date'
 
 # =====================================================================
@@ -170,4 +175,4 @@ if not global_df.empty or not fred_df.empty:
     global_macro_df.index.name = 'Date'
     update_csv('global_markets_database10years.csv', global_macro_df)
 
-print("🎉 HOÀN TẤT! Pipeline sạch 100%, giữ nguyên các ô trống (NaN).")
+print("🎉 HOÀN TẤT! Dữ liệu đã thẳng hàng, File VN đã có đủ Tỷ Giá.")
