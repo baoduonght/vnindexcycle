@@ -40,12 +40,22 @@ def calc_rsi(series, period=14):
     rs = ema_up / ema_down
     return 100 - (100 / (1 + rs))
 
+# THÊM MỚI: Thuật toán tính MFI
+def calc_mfi(high, low, close, volume, n=14):
+    tp = (high + low + close) / 3
+    rmf = tp * volume
+    diff = tp.diff()
+    pos_mf = rmf.where(diff > 0, 0.0).rolling(n).sum()
+    neg_mf = rmf.where(diff < 0, 0.0).rolling(n).sum()
+    return 100 - (100 / (1 + (pos_mf / neg_mf)))
+
 # ==========================================
 # 1. TẢI VN-INDEX & LẬP BỘ LỌC THỊ TRƯỜNG
 # ==========================================
-print("1. Đang tải Market Proxy (VNINDEX)...")
+print("1. Đang tải Market Proxy (VNINDEX) và tính toán Dòng tiền MFI...")
 vnindex_df = tv.get_hist(symbol='VNINDEX', exchange='HOSE', interval=Interval.in_daily, n_bars=4000).reset_index()
-vnindex_df.rename(columns={'datetime': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'VNINDEX'}, inplace=True)
+# THÊM MỚI: Lấy thêm cột volume từ TradingView để tính MFI
+vnindex_df.rename(columns={'datetime': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'VNINDEX', 'volume': 'Volume'}, inplace=True)
 vnindex_df['Date'] = pd.to_datetime(vnindex_df['Date']).dt.tz_localize(None).dt.normalize()
 
 vnindex_df['MA50'] = vnindex_df['VNINDEX'].rolling(50).mean()
@@ -53,6 +63,10 @@ vnindex_df['MA100'] = vnindex_df['VNINDEX'].rolling(100).mean()
 vnindex_df['MA200'] = vnindex_df['VNINDEX'].rolling(200).mean()
 vnindex_df['ADX'] = calc_adx(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14)
 vnindex_df['ATR_PCT'] = calc_atr(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14) / vnindex_df['VNINDEX']
+
+# THÊM MỚI: Áp dụng hàm tính MFI cho VN-Index
+vnindex_df['VN_MFI'] = calc_mfi(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], vnindex_df['Volume'], 14)
+
 df_clean = vnindex_df.dropna().copy()
 
 # ==========================================
@@ -98,6 +112,11 @@ macro_df.index = macro_df.index.tz_localize(None).normalize()
 macro_df.index.name = 'Date'
 macro_df = macro_df.reset_index().ffill().bfill()
 
+# THÊM MỚI: Ghép cột VN_MFI vào bộ dữ liệu Vĩ mô để chuẩn bị đưa vào AI
+mfi_data = vnindex_df[['Date', 'VN_MFI']].set_index('Date')
+macro_df = macro_df.set_index('Date').join(mfi_data, how='left').reset_index()
+macro_df['VN_MFI'] = macro_df['VN_MFI'].ffill()
+
 macro_cols = ['DXY', 'US10Y']
 for col in macro_cols:
     macro_df[f'Z_{col}'] = (macro_df[col] - macro_df[col].rolling(120).mean()) / macro_df[col].rolling(120).std()
@@ -118,9 +137,10 @@ for c in stock_tickers:
     df_ml_list.append(df_c)
 
 ml_master = pd.concat(df_ml_list).merge(macro_df, on='Date', how='left').dropna()
-ml_features = ['Vol_Ratio', 'Dist_MA50', 'RSI'] + z_cols
 
-# Ép AI học trên tệp dữ liệu trước 2024 để tránh "nhìn lén tương lai"
+# THÊM MỚI: Khai báo VN_MFI vào danh sách Features cho AI học
+ml_features = ['Vol_Ratio', 'Dist_MA50', 'RSI', 'VN_MFI'] + z_cols
+
 X_train = ml_master[ml_master['Date'] < '2024-01-01'][ml_features]
 y_train = ml_master[ml_master['Date'] < '2024-01-01']['Target']
 
@@ -128,7 +148,7 @@ y_train = ml_master[ml_master['Date'] < '2024-01-01']['Target']
 rf_model = RandomForestClassifier(n_estimators=100, max_depth=6, class_weight='balanced', random_state=42)
 rf_model.fit(X_train, y_train)
 
-# Điểm số AI (Probabilities) được lưu sẵn vào từ điển để tra cứu siêu tốc trong lúc Backtest
+# Điểm số AI (Probabilities)
 ml_master['AI_Score'] = rf_model.predict_proba(ml_master[ml_features])[:, 1]
 ai_dict = {c: ml_master[ml_master['Ticker'] == c].set_index('Date')['AI_Score'] for c in stock_tickers}
 
@@ -199,9 +219,7 @@ def run_ai_quant_system():
 
                         if pd.isna(prev_high_20) or pd.isna(prev_vol_ma20): continue
 
-                        # 1. Điều kiện Kỹ thuật: Nổ Volume vượt đỉnh
                         if curr_price > prev_high_20 and curr_vol > (prev_vol_ma20 * 1.5):
-                            # 2. Điều kiện AI: Random Forest chấm điểm xác suất thành công > 55%
                             ai_score = ai_dict[c].get(date, 0)
                             if ai_score >= 0.55:
                                 buy_candidates.append(c)
@@ -227,5 +245,106 @@ print("5. Vẽ biểu đồ...")
 fig = make_subplots(specs=[[{"secondary_y": True}]])
 fig.add_trace(go.Scatter(x=backtest_result['Date'], y=backtest_result['VNINDEX'], name="VN-Index", mode='lines', line=dict(color='#B2B5BE', width=1)), secondary_y=False)
 fig.add_trace(go.Scatter(x=backtest_result['Date'], y=backtest_result['NAV_AI_Driven'], name="NAV (AI Filter + Volatility Sizing)", mode='lines', line=dict(color='#00E676', width=2.5)), secondary_y=True)
-fig.update_layout(title='Đấu trường VN-Index: Hệ Thống AI Nhận Diện Breakout Giả', template='plotly_dark')
+fig.update_layout(title='Đấu trường VN-Index: Hệ Thống AI Nhận Diện Breakout Giả (Có MFI)', template='plotly_dark')
 fig.show()
+print("4. Chạy Sổ Kế Toán & Trích xuất Lịch sử Mua/Bán của AI...")
+
+def run_ai_quant_system_with_log():
+    backtest = df_clean[['Date', 'VNINDEX', 'MA50', 'MA100', 'MA200', 'ADX', 'ATR_PCT']].copy()
+    MAX_SLOTS = 5
+    LIQUIDITY_FEE = 0.003
+    DAILY_INTEREST = 0.05 / 252
+    cash = 1000000000
+    held = {}
+    nav_history = np.zeros(len(backtest))
+    trade_log = [] # 📓 Cuốn sổ ghi chép lịch sử mua bán
+
+    for i in range(len(backtest)):
+        date = backtest['Date'].iloc[i]
+        idx = backtest['VNINDEX'].iloc[i]
+        market_ma50 = backtest['MA50'].iloc[i]
+        market_ma100 = backtest['MA100'].iloc[i]
+        market_ma200 = backtest['MA200'].iloc[i]
+        market_adx = backtest['ADX'].iloc[i]
+        market_atr_pct = backtest['ATR_PCT'].iloc[i]
+
+        if date not in stocks_close.index:
+            nav_history[i] = nav_history[i-1] if i > 0 else cash
+            continue
+
+        cash = cash * (1 + DAILY_INTEREST)
+
+        if idx < market_ma100:
+            for c in list(held.keys()):
+                sell_price = stocks_close.at[date, c]
+                cash += held[c]['qty'] * sell_price * (1 - LIQUIDITY_FEE)
+                profit_pct = (sell_price - held[c]['buy_price']) / held[c]['buy_price'] * 100
+                # Ghi sổ lệnh BÁN (Thị trường sập gãy)
+                trade_log.append({'Date': date, 'Action': 'SELL (Cắt giảm)', 'Ticker': c, 'Price': sell_price, 'Profit(%)': round(profit_pct, 2)})
+            held.clear()
+        else:
+            to_remove = []
+            for c in held.keys():
+                curr_price = stocks_close.at[date, c]
+                buy_price = held[c]['buy_price']
+                held[c]['highest'] = max(held[c]['highest'], curr_price)
+
+                profit_margin = (curr_price - buy_price) / buy_price
+                peak_margin = (held[c]['highest'] - buy_price) / buy_price
+
+                if profit_margin <= -0.08: to_remove.append(c)
+                elif profit_margin >= 0.20: to_remove.append(c)
+                elif peak_margin >= 0.12 and curr_price < held[c]['highest'] * 0.94: to_remove.append(c)
+                elif curr_price < stocks_ma20.at[date, c] and profit_margin > 0.05: to_remove.append(c)
+
+            for c in to_remove:
+                sell_price = stocks_close.at[date, c]
+                cash += held[c]['qty'] * sell_price * (1 - LIQUIDITY_FEE)
+                profit_pct = (sell_price - held[c]['buy_price']) / held[c]['buy_price'] * 100
+                # Ghi sổ lệnh BÁN (Chốt lời / Cắt lỗ)
+                trade_log.append({'Date': date, 'Action': 'SELL', 'Ticker': c, 'Price': sell_price, 'Profit(%)': round(profit_pct, 2)})
+                del held[c]
+
+            max_exposure = 0.3 if (idx < market_ma50 or market_atr_pct > 0.018) else 1.0
+            current_total_nav = cash + sum([held[c]['qty'] * stocks_close.at[date, c] for c in held.keys()])
+            allowed_capital_to_invest = (current_total_nav * max_exposure) - sum([held[c]['qty'] * stocks_close.at[date, c] for c in held.keys()])
+
+            empty = MAX_SLOTS - len(held)
+            if empty > 0 and (idx > market_ma200) and (market_adx > 22) and (allowed_capital_to_invest > 0):
+                buy_candidates = []
+                for c in stock_tickers:
+                    if c not in held:
+                        curr_price = stocks_close.at[date, c]
+                        curr_vol = stocks_volume.at[date, f'{c}_V']
+                        prev_high_20 = stocks_high_20.at[date, c]
+                        prev_vol_ma20 = stocks_vol_ma20.at[date, f'{c}_V']
+
+                        if pd.isna(prev_high_20) or pd.isna(prev_vol_ma20): continue
+
+                        if curr_price > prev_high_20 and curr_vol > (prev_vol_ma20 * 1.5):
+                            ai_score = ai_dict[c].get(date, 0)
+                            if ai_score >= 0.55:
+                                buy_candidates.append((c, ai_score))
+
+                if buy_candidates:
+                    invest_amt = min(allowed_capital_to_invest / empty, cash)
+                    for c, score in buy_candidates:
+                        if invest_amt > 0 and stocks_close.at[date, c] > 0 and cash >= invest_amt:
+                            cash -= invest_amt
+                            buy_price = stocks_close.at[date, c]
+                            qty = (invest_amt * (1 - LIQUIDITY_FEE)) / buy_price
+                            held[c] = {'qty': qty, 'buy_price': buy_price, 'highest': buy_price}
+
+                            # Ghi sổ lệnh MUA
+                            trade_log.append({'Date': date, 'Action': 'BUY', 'Ticker': c, 'Price': buy_price, 'AI_Score': round(score, 2)})
+                            empty -= 1
+                        if empty == 0 or cash <= 0: break
+
+        nav_history[i] = cash + sum([held[c]['qty'] * stocks_close.at[date, c] for c in held.keys()])
+
+    return nav_history, pd.DataFrame(trade_log)
+
+# Chạy hệ thống và lấy Sổ lệnh
+nav_history, df_trade_log = run_ai_quant_system_with_log()
+backtest_result['NAV_AI_Driven'] = nav_history
+
