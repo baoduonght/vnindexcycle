@@ -5,9 +5,8 @@ import yfinance as yf
 import datetime
 import requests
 
-print("🚀 Khởi động Siêu Radar Vĩ mô: Bản Tối thượng 10 Năm (Full Code)...")
+print("🚀 Khởi động Siêu Radar Vĩ mô: Bản Tối thượng 10 Năm (Fix 100% Dữ Liệu VN)...")
 
-# Khởi tạo chế độ Guest bình thường để kéo VN10Y
 tv = TvDatafeed()
 
 # --- Tính toán mốc thời gian 10 năm ---
@@ -17,17 +16,27 @@ start_ts = int(start_date.timestamp())
 end_ts = int(end_date.timestamp())
 
 # =====================================================================
-# --- PHẦN 1: DỮ LIỆU CƠ SỞ & PHÁI SINH VIỆT NAM (API DCHART 10 NĂM) ---
+# --- PHẦN 1: DỮ LIỆU CƠ SỞ & PHÁI SINH VIỆT NAM (HYBRID API) ---
 # =====================================================================
-print("1. Đang quét chứng khoán Việt Nam qua DChart API (Trực tiếp 10 năm)...")
+print("1. Đang quét chứng khoán Việt Nam (TradingView + DChart Fallback)...")
 local_df_list = []
 
 def get_vietnam_data(symbol):
+    # Ưu tiên 1: Thử kéo bằng TvDatafeed (Nguồn quen thuộc và ổn định)
+    try:
+        exchange = 'HNX' if symbol == 'VN30F1M' else 'HOSE'
+        raw = tv.get_hist(symbol=symbol, exchange=exchange, interval=Interval.in_daily, n_bars=3000)
+        if raw is not None and len(raw) > 100:
+            return raw
+    except Exception as e:
+        print(f"TvDatafeed lỗi {symbol}: {e}")
+
+    # Ưu tiên 2: Gọi TRỰC TIẾP API DChart của VNDirect (Bỏ qua Proxy)
+    print(f"⚠️ Chuyển sang API dự phòng DChart cho {symbol}...")
     url = f"https://dchart-api.vndirect.com.vn/dchart/history?resolution=D&symbol={symbol}&from={start_ts}&to={end_ts}"
-    proxy_url = f"https://corsproxy.io/?{url}"
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
-        res = requests.get(proxy_url, headers=headers, timeout=15)
+        res = requests.get(url, headers=headers, timeout=15)
         if res.status_code == 200:
             data = res.json()
             if data.get('s') == 'ok':
@@ -39,23 +48,35 @@ def get_vietnam_data(symbol):
                 df.set_index('Date', inplace=True)
                 return df
     except Exception as e:
-        print(f"Lỗi kéo {symbol} từ API nội địa: {e}")
+        print(f"DChart lỗi {symbol}: {e}")
+        
     return pd.DataFrame()
 
-# 1. Kéo VNINDEX, VN30, Phái sinh
-vni_df = get_vietnam_data('VNINDEX')
-if not vni_df.empty:
-    local_df_list.append(vni_df[['close', 'volume']].rename(columns={'close': 'VNINDEX', 'volume': 'VN_VOLUME'}))
+# 1. Kéo VNINDEX
+vni_raw = get_vietnam_data('VNINDEX')
+if not vni_raw.empty:
+    vni_df = vni_raw[['close', 'volume']].copy()
+    vni_df.rename(columns={'close': 'VNINDEX', 'volume': 'VN_VOLUME'}, inplace=True)
+    vni_df.index = pd.to_datetime(vni_df.index).normalize()
+    local_df_list.append(vni_df)
 
-vn30_df = get_vietnam_data('VN30')
-if not vn30_df.empty:
-    local_df_list.append(vn30_df[['close']].rename(columns={'close': 'VN30'}))
+# 2. Kéo VN30
+vn30_raw = get_vietnam_data('VN30')
+if not vn30_raw.empty:
+    vn30_df = vn30_raw[['close']].copy()
+    vn30_df.rename(columns={'close': 'VN30'}, inplace=True)
+    vn30_df.index = pd.to_datetime(vn30_df.index).normalize()
+    local_df_list.append(vn30_df)
 
-ps_df = get_vietnam_data('VN30F1M')
-if not ps_df.empty:
-    local_df_list.append(ps_df[['close']].rename(columns={'close': 'VN30_F1M'}))
+# 3. Kéo Phái sinh
+ps_raw = get_vietnam_data('VN30F1M')
+if not ps_raw.empty:
+    ps_df = ps_raw[['close']].copy()
+    ps_df.rename(columns={'close': 'VN30_F1M'}, inplace=True)
+    ps_df.index = pd.to_datetime(ps_df.index).normalize()
+    local_df_list.append(ps_df)
 
-# Hợp nhất nội địa Phần 1
+# Hợp nhất nội địa
 if local_df_list:
     local_df = pd.concat(local_df_list, axis=1)
     if 'VN30_F1M' in local_df.columns and 'VN30' in local_df.columns:
@@ -64,18 +85,17 @@ if local_df_list:
 else:
     local_df = pd.DataFrame()
 
-
 # =====================================================================
 # --- PHẦN 2: API VNDIRECT (KHỐI NGOẠI & TỰ DOANH) ---
 # =====================================================================
-print("2. Đang kéo Dòng tiền từ Trạm trung chuyển Proxy...")
+print("2. Đang kéo Dòng tiền (Đã loại bỏ Proxy gây nghẽn)...")
 try:
     headers = {'User-Agent': 'Mozilla/5.0'}
     
     # Khối ngoại 10 năm
     url_f = "https://finfo-api.vndirect.com.vn/v4/foreign_trading?q=code:VNINDEX~date:gte:2014-01-01&sort=date&size=3000"
-    res_f = requests.get(f"https://corsproxy.io/?{url_f}", headers=headers, timeout=15)
-    if res_f.status_code == 200:
+    res_f = requests.get(url_f, headers=headers, timeout=15)
+    if res_f.status_code == 200 and 'data' in res_f.json():
         f_df = pd.DataFrame(res_f.json()['data'])
         f_df['NET_FOREIGN_FLOW'] = f_df['buyVal'] - f_df['sellVal']
         f_df = f_df[['date', 'NET_FOREIGN_FLOW']].rename(columns={'date': 'Date'}).set_index('Date')
@@ -84,7 +104,7 @@ try:
         
     # Tự doanh 10 năm
     url_p = "https://finfo-api.vndirect.com.vn/v4/proprietary_trading?q=code:VNINDEX~date:gte:2014-01-01&sort=date&size=3000"
-    res_p = requests.get(f"https://corsproxy.io/?{url_p}", headers=headers, timeout=15)
+    res_p = requests.get(url_p, headers=headers, timeout=15)
     if res_p.status_code == 200 and 'data' in res_p.json() and res_p.json()['data']:
         p_df = pd.DataFrame(res_p.json()['data'])
         p_df['NET_PROP_FLOW'] = p_df['buyVal'] - p_df['sellVal']
@@ -92,8 +112,7 @@ try:
         p_df.index = pd.to_datetime(p_df.index).normalize()
         local_df = pd.concat([local_df, p_df[~p_df.index.duplicated(keep='last')]], axis=1)
 except Exception as e:
-    print(f"Lỗi phần VNDirect: {e}")
-
+    print(f"Lỗi phần Dòng tiền VNDirect: {e}")
 
 # =====================================================================
 # --- PHẦN 3: VỆ TINH VĨ MÔ TOÀN CẦU (YAHOO FINANCE) ---
@@ -124,7 +143,6 @@ except Exception as e:
     print(f"Lỗi Yahoo Finance: {e}")
     global_df = pd.DataFrame()
 
-
 # =====================================================================
 # --- PHẦN 4: HỆ THỐNG THANH KHOẢN FED (FRED) ---
 # =====================================================================
@@ -139,16 +157,13 @@ except Exception as e:
     print(f"Lỗi FRED: {e}")
     fred_df = pd.DataFrame()
 
-
 # =====================================================================
 # --- PHẦN 5: HỢP NHẤT TỔNG THỂ ---
 # =====================================================================
 print("5. Đang đồng bộ hóa toàn bộ mốc thời gian...")
-# Dùng how='outer' để không làm mất dữ liệu của thị trường nghỉ lễ lệch nhau
 combo_df = pd.concat([local_df, global_df, fred_df], axis=1, join='outer')
 combo_df = combo_df.sort_index(ascending=False)
 combo_df.index.name = 'Date'
-
 
 # =====================================================================
 # --- PHẦN 6: XUẤT XƯỞNG ---
