@@ -129,4 +129,8 @@ def update_csv(filename, new_df):
     print(f"✅ Đã đóng gói: {filename}")
 
 update_csv('markets_database10years.csv', combo_df)
+update_csv('markets_database_now.csv', combo_df)
+update_csv('vn_markets_database10years.csv', combo_df)
+update_csv('global_markets_database10years.csv', combo_df) 
+
 print("🎉 HOÀN TẤT! Data Pipeline 10 năm đã thông luồng.")
