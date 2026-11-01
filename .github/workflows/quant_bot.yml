@@ -20,10 +20,10 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install Dependencies
+      - - name: Install Dependencies
         run: |
           pip install --upgrade --no-cache-dir git+https://github.com/rongardF/tvdatafeed.git
-          pip install pandas "numpy<2.0" yfinance scikit-learn requests plotly
+          pip install pandas "numpy<2.0" yfinance scikit-learn requests plotly xgboost
 
       - name: Run Quant Bot
         env:
