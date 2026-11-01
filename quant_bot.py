@@ -110,10 +110,12 @@ stocks_rsi = pd.DataFrame(index=stocks_close.index)
 for c in stock_tickers:
     stocks_rsi[c] = calc_rsi(stocks_close[c])
 
+import xgboost as xgb
+
 # ==========================================
-# 3. NHÚNG AI - HUẤN LUYỆN & SÁT HẠCH
+# 3. NHÚNG AI - HUẤN LUYỆN & SÁT HẠCH (BẢN XGBOOST)
 # ==========================================
-print("3. Nâng cấp Não bộ AI (Nhúng La bàn VNINDEX & Trị bệnh ngáo Vĩ mô)...")
+print("3. Nâng cấp Não bộ AI (Nhúng La bàn VNINDEX & Động cơ XGBoost)...")
 
 try:
     macro_df = pd.read_csv('global_markets_database10years.csv')
@@ -128,7 +130,6 @@ except Exception as e:
 
 # 🟢 TÍCH HỢP LA BÀN VNINDEX VÀ DÒNG TIỀN MFI
 market_context = vnindex_df[['Date', 'VN_MFI', 'VNINDEX', 'MA200']].copy()
-# Tính khoảng cách của thị trường chung so với nền MA200
 market_context['VN_Dist_MA200'] = market_context['VNINDEX'] / market_context['MA200']
 market_context['Date'] = pd.to_datetime(market_context['Date']).dt.strftime('%Y-%m-%d')
 
@@ -161,7 +162,7 @@ for c in stock_tickers:
 concat_df = pd.concat(df_ml_list)
 ml_master = concat_df.merge(macro_df, on='Date', how='left')
 
-# 🟢 CẬP NHẬT MẮT THẦN: Có thêm la bàn VNINDEX (VN_Dist_MA200)
+# 🟢 MẮT THẦN: Đầy đủ 8 chỉ báo
 ml_features = ['Vol_Ratio', 'Dist_MA50', 'RSI', 'VN_MFI', 'MACD_Hist', 'VN_Dist_MA200'] + z_cols
 
 ml_master = ml_master[ml_master['Date'].isin(fresh_us_dates)]
@@ -179,31 +180,40 @@ y_train = train_data['Target']
 if len(X_train) == 0:
     sys.exit("❌ LỖI TRÍ MẠNG: Tập X_train rỗng.")
 
-# 🟢 TRÓI TAY HỌC VẸT: Siết thuật toán cực mạnh
-rf_model = RandomForestClassifier(
-    n_estimators=100, 
-    max_depth=4,               # Ép AI tư duy đơn giản, tránh suy diễn quá đà
-    min_samples_leaf=15,       # Cấm AI nhận diện các tín hiệu nhiễu vặt vãnh
-    max_features='sqrt',       # Bắt buộc AI phải kết hợp đa chỉ báo (không được nhìn chằm chằm DXY)
-    class_weight='balanced', 
-    random_state=42
-)
-rf_model.fit(X_train, y_train)
-print(f"✅ AI đã học xong từ {len(X_train)} dòng dữ liệu!")
+# 🟢 TÍNH TOÁN TRỌNG SỐ LỆNH MUA (Chống mất cân bằng dữ liệu)
+scale_weight = len(y_train[y_train == 0]) / len(y_train[y_train == 1]) if len(y_train[y_train == 1]) > 0 else 1
 
+# 🟢 KHỞI ĐỘNG ĐỘNG CƠ XGBOOST
+xgb_model = xgb.XGBClassifier(
+    n_estimators=150,              
+    max_depth=4,                   
+    learning_rate=0.05,            
+    subsample=0.8,                 
+    colsample_bytree=0.8,          # Ép bốc thăm ngẫu nhiên chỉ báo để trị bệnh ngáo DXY
+    scale_pos_weight=scale_weight, 
+    random_state=42,
+    eval_metric='logloss'
+)
+
+print("Đang nạp dữ liệu vào Mạng nơ-ron XGBoost...")
+xgb_model.fit(X_train, y_train)
+print(f"✅ XGBoost đã tiến hóa xong qua {len(X_train)} dòng dữ liệu!")
+
+# ==========================================
 # BẢNG ĐIỂM SÁT HẠCH MỚI
+# ==========================================
 test_data = train_data_all[train_data_all['Date'] >= '2024-01-01']
 if not test_data.empty:
     y_test = test_data['Target']
-    y_pred = rf_model.predict(test_data[ml_features])
+    y_pred = xgb_model.predict(test_data[ml_features])
     
     print("\n" + "="*50)
-    print("📊 BẢNG ĐIỂM AI: ĐÃ NHÚNG LA BÀN VNINDEX & TRỊ HỌC VẸT")
+    print("📊 BẢNG ĐIỂM XGBOOST: ĐÃ NHÚNG LA BÀN VNINDEX")
     print("="*50)
     print(classification_report(y_test, y_pred, target_names=['Bỏ qua (0)', 'Đạt chuẩn MUA (1)']))
     
     print("\n🔍 TỶ TRỌNG SỬ DỤNG CHỈ BÁO (FEATURE IMPORTANCE):")
-    importances = rf_model.feature_importances_
+    importances = xgb_model.feature_importances_
     ranked_features = sorted(zip(ml_features, importances), key=lambda x: x[1], reverse=True)
     for feature, imp in ranked_features:
         print(f" 🔹 {feature:<14}: {imp*100:>5.2f}%")
@@ -212,7 +222,7 @@ if not test_data.empty:
 ml_master['AI_Score'] = float('nan')
 valid_rows = ml_master[ml_features].notna().all(axis=1)
 if valid_rows.sum() > 0:
-    ml_master.loc[valid_rows, 'AI_Score'] = rf_model.predict_proba(ml_master.loc[valid_rows, ml_features])[:, 1]
+    ml_master.loc[valid_rows, 'AI_Score'] = xgb_model.predict_proba(ml_master.loc[valid_rows, ml_features])[:, 1]
 
 ai_dict = {c: ml_master[ml_master['Ticker'] == c].set_index('Date')['AI_Score'] for c in stock_tickers}
 
