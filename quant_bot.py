@@ -473,10 +473,10 @@ for idx, row in buy_signals.iterrows():
     except:
         continue
 # ==========================================
-# 5. MÔ PHỎNG P&L: HOLD BẤT CHẤP - CHỈ BÁN KHI VĨ MÔ & VNINDEX ĐỒNG THUẬN XẤU
+# 5. MÔ PHỎNG P&L: TOP-DOWN MACRO & QUẢN TRỊ DANH MỤC (CHỐNG TRÙNG LỆNH)
 # ==========================================
 print("\n" + "="*50)
-print("🛡 MÔ PHỎNG P&L: TOP-DOWN MACRO (CHỈ BÁN THÁO THEO XU HƯỚNG VNI)")
+print("🛡 MÔ PHỎNG P&L: TOP-DOWN MACRO (LỌC TRÙNG MÃ)")
 print("="*50)
 
 if 'MA50' not in vnindex_df.columns:
@@ -485,7 +485,7 @@ if 'MA50' not in vnindex_df.columns:
 sim_data = test_data.copy()
 sim_data['AI_Score'] = xgb_model.predict_proba(sim_data[ml_features])[:, 1]
 
-# 🟢 CHUẨN BỊ BỘ BÁCH KHOA TOÀN THƯ VĨ MÔ ĐỂ TRA CỨU HÀNG NGÀY
+# Chuẩn bị Bách khoa toàn thư Vĩ mô
 vn_trend = vnindex_df[['Date', 'VNINDEX', 'MA50', 'VN_MFI']].copy()
 vn_trend['Date'] = pd.to_datetime(vn_trend['Date']).dt.strftime('%Y-%m-%d')
 macro_temp = macro_df[['Date', 'Z_DXY']].copy()
@@ -493,27 +493,30 @@ vn_trend = vn_trend.merge(macro_temp, on='Date', how='left')
 vn_trend['Z_DXY'] = vn_trend['Z_DXY'].ffill()
 vn_trend_idx = vn_trend.set_index('Date')
 
-sim_data = sim_data.merge(vn_trend[['Date']], on='Date', how='left') # Chỉ lấy Date để lọc
+sim_data = sim_data.merge(vn_trend[['Date']], on='Date', how='left') 
 buy_signals = sim_data[sim_data['AI_Score'] >= 0.75].copy()
 buy_signals = buy_signals.sort_values('Date')
 
-# Cấu hình Luật chơi (Bỏ toàn bộ cắt lỗ/chốt lời cá nhân)
+# Cấu hình Luật chơi
 INITIAL_CAPITAL = 100_000_000
-MAX_SLOTS = 10
+MAX_SLOTS = 5
 SLOT_SIZE = INITIAL_CAPITAL / MAX_SLOTS 
 FEE_TAX = 0.003                         
 
-capital_slots = [pd.Timestamp('2000-01-01')] * MAX_SLOTS
+# 🟢 NÂNG CẤP QUẢN LÝ SLOT: Theo dõi cả Ngày tiền về VÀ Tên cổ phiếu đang giữ
+slot_status = [{'free_date': pd.Timestamp('2000-01-01'), 'ticker': None} for _ in range(MAX_SLOTS)]
+
 trade_logs = []
-blocked_count = 0
+blocked_macro_count = 0
+blocked_duplicate_count = 0
 
 for idx, row in buy_signals.iterrows():
     ticker = row['Ticker']
     buy_date = pd.to_datetime(row['Date'])
+    buy_date_str = buy_date.strftime('%Y-%m-%d')
     
-    # KHI MUA: Vẫn dùng Radar Vĩ mô khắt khe
+    # 1. KIỂM TRA VĨ MÔ
     try:
-        buy_date_str = buy_date.strftime('%Y-%m-%d')
         vn_price = vn_trend_idx.loc[buy_date_str, 'VNINDEX']
         vn_ma50 = vn_trend_idx.loc[buy_date_str, 'MA50']
         z_dxy = vn_trend_idx.loc[buy_date_str, 'Z_DXY']
@@ -523,13 +526,25 @@ for idx, row in buy_signals.iterrows():
     
     if (pd.notna(z_dxy) and z_dxy > 1.0) or \
        (pd.notna(vn_price) and pd.notna(vn_ma50) and vn_price < vn_ma50 and vn_mfi < 40):
-        blocked_count += 1
+        blocked_macro_count += 1
         continue 
 
+    # 2. KIỂM TRA TRÙNG LỆNH (ĐỘC QUYỀN TÍCH LŨY)
+    already_holding = False
+    for slot in slot_status:
+        if slot['ticker'] == ticker and slot['free_date'] > buy_date:
+            already_holding = True
+            break
+            
+    if already_holding:
+        blocked_duplicate_count += 1
+        continue # Bỏ qua ngay lập tức, đã có mã này trong danh mục rồi!
+
+    # 3. TÌM SLOT TRỐNG ĐỂ GIẢI NGÂN
     try:
         available_slot_idx = -1
         for i in range(MAX_SLOTS):
-            if capital_slots[i] <= buy_date:
+            if slot_status[i]['free_date'] <= buy_date:
                 available_slot_idx = i
                 break 
                 
@@ -542,7 +557,7 @@ for idx, row in buy_signals.iterrows():
         sell_price = 0
         sell_reason = ""
         
-        # 🟢 VÒNG LẶP GỒNG LÃI: Mù màu với giá cổ phiếu, chỉ nhìn Vĩ mô (ôm tối đa 1 năm)
+        # Vòng lặp gồng lãi Macro
         for day_offset in range(1, 250):
             check_idx = buy_idx + day_offset
             if check_idx >= len(stocks_close):
@@ -562,7 +577,6 @@ for idx, row in buy_signals.iterrows():
             except:
                 vn_today, ma50_today, mfi_today, dxy_today = 10000, 0, 50, 0 
                 
-            # ĐIỀU KIỆN BÁN THÁO: VNINDEX gãy MA50 ĐỒNG THỜI (Tiền cạn HOẶC DXY bùng nổ)
             if pd.notna(vn_today) and pd.notna(ma50_today) and vn_today < ma50_today:
                 if (pd.notna(mfi_today) and mfi_today < 40) or (pd.notna(dxy_today) and dxy_today > 1.0):
                     sell_idx = check_idx
@@ -577,7 +591,12 @@ for idx, row in buy_signals.iterrows():
             sell_reason = "Hết hạn gồng (1 năm)"
             
         sell_date = stocks_close.index[sell_idx]
-        capital_slots[available_slot_idx] = pd.to_datetime(sell_date)
+        
+        # 🟢 CẬP NHẬT TRẠNG THÁI SLOT (Khóa tiền & Ghi nhớ Tên Mã)
+        slot_status[available_slot_idx] = {
+            'free_date': pd.to_datetime(sell_date),
+            'ticker': ticker
+        }
         
         profit_pct = (sell_price / buy_price) - 1 - FEE_TAX
         profit_vnd = SLOT_SIZE * profit_pct
@@ -603,15 +622,16 @@ if len(trade_logs) > 0:
     final_capital = INITIAL_CAPITAL + total_profit
     roi = (final_capital / INITIAL_CAPITAL - 1) * 100
     
-    print(f"🛑 Số kèo bị chặn từ cửa (Vĩ mô xấu): {blocked_count} lệnh")
-    print(f"🎯 Số lệnh ĐƯỢC MUA: {total_trades} lệnh")
+    print(f"🛑 Số kèo bị chặn do Vĩ mô xấu: {blocked_macro_count} lệnh")
+    print(f"⛔ Số kèo bị chặn do Trùng lặp mã (Đã có hàng): {blocked_duplicate_count} lệnh")
+    print(f"🎯 Số lệnh ĐƯỢC MUA (Thực tế): {total_trades} lệnh")
     print(f"🏆 Tỷ lệ thắng (Win-rate): {win_rate:.1f}%")
     print("-" * 50)
     print(f"💵 VỐN BAN ĐẦU       : {INITIAL_CAPITAL:,.0f} VNĐ")
     print(f"📈 TỔNG LÃI/LỖ RÒNG  : {total_profit:,.0f} VNĐ")
     print(f"🚀 TỶ SUẤT LỢI NHUẬN (ROI): {roi:.2f}%")
     
-    print("\n🔍 X-RAY 10 LỆNH GẦN NHẤT (LÝ DO BÁN):")
+    print("\n🔍 X-RAY 10 LỆNH GẦN NHẤT (SẠCH SẼ, KHÔNG TRÙNG LẶP):")
     print(df_trades[['Buy_Date', 'Sell_Date', 'Ticker', 'Reason', 'Profit_%']].tail(10).to_string(index=False))
 else:
     print("⚠️ Không có lệnh nào khớp và chốt lời thành công.")
