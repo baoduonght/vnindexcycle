@@ -473,10 +473,10 @@ for idx, row in buy_signals.iterrows():
     except:
         continue
 # ==========================================
-# 5. MÔ PHỎNG P&L: TOP-DOWN MACRO & QUẢN TRỊ DANH MỤC (CHỐNG TRÙNG LỆNH)
+# 5. MÔ PHỎNG P&L: TOP-DOWN MACRO (CÓ LÃI KÉP & LỌC TRÙNG MÃ)
 # ==========================================
 print("\n" + "="*50)
-print("🛡 MÔ PHỎNG P&L: TOP-DOWN MACRO (LỌC TRÙNG MÃ)")
+print("🛡 MÔ PHỎNG P&L: TOP-DOWN MACRO + LỌC TRÙNG MÃ + LÃI KÉP")
 print("="*50)
 
 if 'MA50' not in vnindex_df.columns:
@@ -500,11 +500,14 @@ buy_signals = buy_signals.sort_values('Date')
 # Cấu hình Luật chơi
 INITIAL_CAPITAL = 100_000_000
 MAX_SLOTS = 5
-SLOT_SIZE = INITIAL_CAPITAL / MAX_SLOTS 
 FEE_TAX = 0.003                         
 
-# 🟢 NÂNG CẤP QUẢN LÝ SLOT: Theo dõi cả Ngày tiền về VÀ Tên cổ phiếu đang giữ
-slot_status = [{'free_date': pd.Timestamp('2000-01-01'), 'ticker': None} for _ in range(MAX_SLOTS)]
+# 🟢 NÂNG CẤP QUẢN LÝ SLOT: Thêm 'capital' để theo dõi vốn thực tế của từng khe (Lãi Kép)
+slot_status = [{
+    'free_date': pd.Timestamp('2000-01-01'), 
+    'ticker': None, 
+    'capital': INITIAL_CAPITAL / MAX_SLOTS # Khởi điểm mỗi slot 20 củ
+} for _ in range(MAX_SLOTS)]
 
 trade_logs = []
 blocked_macro_count = 0
@@ -529,7 +532,7 @@ for idx, row in buy_signals.iterrows():
         blocked_macro_count += 1
         continue 
 
-    # 2. KIỂM TRA TRÙNG LỆNH (ĐỘC QUYỀN TÍCH LŨY)
+    # 2. KIỂM TRA TRÙNG LỆNH
     already_holding = False
     for slot in slot_status:
         if slot['ticker'] == ticker and slot['free_date'] > buy_date:
@@ -538,7 +541,7 @@ for idx, row in buy_signals.iterrows():
             
     if already_holding:
         blocked_duplicate_count += 1
-        continue # Bỏ qua ngay lập tức, đã có mã này trong danh mục rồi!
+        continue 
 
     # 3. TÌM SLOT TRỐNG ĐỂ GIẢI NGÂN
     try:
@@ -592,14 +595,17 @@ for idx, row in buy_signals.iterrows():
             
         sell_date = stocks_close.index[sell_idx]
         
-        # 🟢 CẬP NHẬT TRẠNG THÁI SLOT (Khóa tiền & Ghi nhớ Tên Mã)
+        # 🟢 TÍNH LÃI KÉP & CẬP NHẬT TRẠNG THÁI SLOT
+        profit_pct = (sell_price / buy_price) - 1 - FEE_TAX
+        current_capital = slot_status[available_slot_idx]['capital'] # Lấy đúng số vốn hiện có của slot này
+        profit_vnd = current_capital * profit_pct
+        new_capital = current_capital + profit_vnd # Nhồi lãi (hoặc trừ lỗ)
+        
         slot_status[available_slot_idx] = {
             'free_date': pd.to_datetime(sell_date),
-            'ticker': ticker
+            'ticker': ticker,
+            'capital': new_capital # Ghi nhận vốn mới cho vòng sau
         }
-        
-        profit_pct = (sell_price / buy_price) - 1 - FEE_TAX
-        profit_vnd = SLOT_SIZE * profit_pct
         
         trade_logs.append({
             'Buy_Date': buy_date_str,
@@ -607,7 +613,8 @@ for idx, row in buy_signals.iterrows():
             'Ticker': ticker,
             'Reason': sell_reason,
             'Profit_%': round(profit_pct * 100, 2),
-            'Profit_VND': profit_vnd
+            'Profit_VND': profit_vnd,
+            'Slot_Capital': round(new_capital, 0)
         })
     except:
         continue
@@ -618,20 +625,23 @@ if len(trade_logs) > 0:
     total_trades = len(df_trades)
     winning_trades = len(df_trades[df_trades['Profit_VND'] > 0])
     win_rate = winning_trades / total_trades * 100 if total_trades > 0 else 0
-    total_profit = df_trades['Profit_VND'].sum()
-    final_capital = INITIAL_CAPITAL + total_profit
+    
+    # 🟢 TỔNG KẾT TÀI SẢN TỪ 5 SLOT
+    final_capital = sum(slot['capital'] for slot in slot_status)
+    total_profit = final_capital - INITIAL_CAPITAL
     roi = (final_capital / INITIAL_CAPITAL - 1) * 100
     
     print(f"🛑 Số kèo bị chặn do Vĩ mô xấu: {blocked_macro_count} lệnh")
-    print(f"⛔ Số kèo bị chặn do Trùng lặp mã (Đã có hàng): {blocked_duplicate_count} lệnh")
+    print(f"⛔ Số kèo bị chặn do Trùng lặp mã: {blocked_duplicate_count} lệnh")
     print(f"🎯 Số lệnh ĐƯỢC MUA (Thực tế): {total_trades} lệnh")
     print(f"🏆 Tỷ lệ thắng (Win-rate): {win_rate:.1f}%")
     print("-" * 50)
     print(f"💵 VỐN BAN ĐẦU       : {INITIAL_CAPITAL:,.0f} VNĐ")
     print(f"📈 TỔNG LÃI/LỖ RÒNG  : {total_profit:,.0f} VNĐ")
+    print(f"🏦 TỔNG TÀI SẢN (NAV): {final_capital:,.0f} VNĐ")
     print(f"🚀 TỶ SUẤT LỢI NHUẬN (ROI): {roi:.2f}%")
     
-    print("\n🔍 X-RAY 10 LỆNH GẦN NHẤT (SẠCH SẼ, KHÔNG TRÙNG LẶP):")
-    print(df_trades[['Buy_Date', 'Sell_Date', 'Ticker', 'Reason', 'Profit_%']].tail(10).to_string(index=False))
+    print("\n🔍 X-RAY 10 LỆNH GẦN NHẤT (CÓ THEO DÕI VỐN LÃI KÉP):")
+    print(df_trades[['Buy_Date', 'Sell_Date', 'Ticker', 'Profit_%', 'Slot_Capital']].tail(10).to_string(index=False))
 else:
     print("⚠️ Không có lệnh nào khớp và chốt lời thành công.")
