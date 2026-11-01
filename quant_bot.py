@@ -113,7 +113,7 @@ for c in stock_tickers:
 # ==========================================
 # 3. NHÚNG AI - HUẤN LUYỆN & SÁT HẠCH
 # ==========================================
-print("3. Nâng cấp Não bộ AI (Tích hợp MACD & Nâng chuẩn Target sóng lớn)...")
+print("3. Nâng cấp Não bộ AI (Hạ chuẩn Target xuống 3.5% cho VN30)...")
 
 try:
     macro_df = pd.read_csv('global_markets_database10years.csv')
@@ -147,11 +147,9 @@ for c in stock_tickers:
     df_c['Vol_Ratio'] = (stocks_volume[f'{c}_V'] / stocks_vol_ma20[f'{c}_V']).values
     df_c['Dist_MA50'] = (stocks_close[c] / stocks_ma50[c]).values
     df_c['RSI'] = calc_rsi(stocks_close[c]).values
-    
-    # 🟢 CẤP VŨ KHÍ MỚI: Truyền MACD Histogram vào não AI
     df_c['MACD_Hist'] = calc_macd_hist(stocks_close[c]).values
     
-    # 🟢 NÂNG CHUẨN SÓNG LỚN: Kỳ vọng tăng > 5% trong vòng 15 phiên (T+15)
+    # 🟢 HẠ CHUẨN THỰC TẾ: Kỳ vọng tăng > 3.5% trong vòng 15 phiên (T+15)
     future_return = stocks_close[c].shift(-15) / stocks_close[c] - 1
     df_c['Target'] = (future_return > 0.035).astype(int).values
     df_ml_list.append(df_c)
@@ -159,7 +157,7 @@ for c in stock_tickers:
 concat_df = pd.concat(df_ml_list)
 ml_master = concat_df.merge(macro_df, on='Date', how='left')
 
-# Cập nhật danh sách "Mắt thần" (Features) của AI
+# Các biến số đầu vào (Features) của AI
 ml_features = ['Vol_Ratio', 'Dist_MA50', 'RSI', 'VN_MFI', 'MACD_Hist'] + z_cols
 
 ml_master = ml_master[ml_master['Date'].isin(fresh_us_dates)]
@@ -188,7 +186,7 @@ if not test_data.empty:
     y_pred = rf_model.predict(test_data[ml_features])
     
     print("\n" + "="*50)
-    print("📊 BẢNG ĐIỂM AI: ĐÁNH SÓNG LỚN (> 5% TRONG T+15)")
+    print("📊 BẢNG ĐIỂM AI: ĐÁNH SÓNG VN30 (> 3.5% TRONG T+15)")
     print("="*50)
     print(classification_report(y_test, y_pred, target_names=['Bỏ qua (0)', 'Đạt chuẩn MUA (1)']))
     
@@ -205,6 +203,7 @@ if valid_rows.sum() > 0:
     ml_master.loc[valid_rows, 'AI_Score'] = rf_model.predict_proba(ml_master.loc[valid_rows, ml_features])[:, 1]
 
 ai_dict = {c: ml_master[ml_master['Ticker'] == c].set_index('Date')['AI_Score'] for c in stock_tickers}
+
 
 # ==========================================
 # 4. CHẠY BACKTEST (SỔ KẾ TOÁN)
