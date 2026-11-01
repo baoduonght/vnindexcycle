@@ -496,7 +496,7 @@ buy_signals = buy_signals.sort_values('Date')
 
 # Cấu hình Luật chơi mới
 INITIAL_CAPITAL = 100_000_000
-MAX_SLOTS = 5
+MAX_SLOTS = 10
 SLOT_SIZE = INITIAL_CAPITAL / MAX_SLOTS 
 FEE_TAX = 0.003                         
 HARD_STOP_PCT = -0.10       # 🟢 NỚI LỎNG: Cắt lỗ cứng nếu âm 10% từ điểm mua để chống rũ nền
