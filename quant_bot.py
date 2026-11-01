@@ -422,11 +422,11 @@ try:
     print("✅ Hoàn tất toàn bộ chu trình!")
 except:
     pass
-   # ==========================================
-# 5. MÔ PHỎNG P&L: TOP-DOWN MACRO (CÓ LÃI KÉP & LỌC TRÙNG MÃ)
+  # ==========================================
+# 5. MÔ PHỎNG P&L: TOP-DOWN MACRO (MAX 10 SLOT + LỌC TRÙNG + LÃI KÉP + GỬI BANK TỰ ĐỘNG)
 # ==========================================
 print("\n" + "="*50)
-print("🛡 MÔ PHỎNG P&L: TOP-DOWN MACRO + LỌC TRÙNG MÃ + LÃI KÉP")
+print("🛡 MÔ PHỎNG P&L: QUẢN TRỊ DANH MỤC TOÀN DIỆN (CỔ PHIẾU + GỬI BANK 5%/NĂM)")
 print("="*50)
 
 if 'MA50' not in vnindex_df.columns:
@@ -447,21 +447,27 @@ sim_data = sim_data.merge(vn_trend[['Date']], on='Date', how='left')
 buy_signals = sim_data[sim_data['AI_Score'] >= 0.75].copy()
 buy_signals = buy_signals.sort_values('Date')
 
-# Cấu hình Luật chơi
+# 🟢 ĐIỀU CHỈNH LUẬT CHƠI
 INITIAL_CAPITAL = 100_000_000
-MAX_SLOTS = 10
+MAX_SLOTS = 10  
 FEE_TAX = 0.003                         
+BANK_RATE_YEARLY = 0.05                 # Lãi suất NH rảnh rỗi: 5%/năm
+DAILY_RATE = BANK_RATE_YEARLY / 365     # Lãi suất theo ngày
 
-# 🟢 NÂNG CẤP QUẢN LÝ SLOT: Thêm 'capital' để theo dõi vốn thực tế của từng khe (Lãi Kép)
+# Ngày bắt đầu và kết thúc mô phỏng
+sim_start_date = pd.to_datetime(test_data['Date'].min())
+sim_end_date = pd.to_datetime(test_data['Date'].max())
+
+# Quản lý 10 khe vốn (Thêm 'last_active_date' để tính ngày rảnh rỗi gửi NH)
 slot_status = [{
-    'free_date': pd.Timestamp('2000-01-01'), 
+    'free_date': sim_start_date, 
     'ticker': None, 
-    'capital': INITIAL_CAPITAL / MAX_SLOTS # Khởi điểm mỗi slot 20 củ
+    'capital': INITIAL_CAPITAL / MAX_SLOTS,
+    'last_active_date': sim_start_date 
 } for _ in range(MAX_SLOTS)]
 
 trade_logs = []
-blocked_macro_count = 0
-blocked_duplicate_count = 0
+total_bank_interest = 0
 
 for idx, row in buy_signals.iterrows():
     ticker = row['Ticker']
@@ -474,12 +480,10 @@ for idx, row in buy_signals.iterrows():
         vn_ma50 = vn_trend_idx.loc[buy_date_str, 'MA50']
         z_dxy = vn_trend_idx.loc[buy_date_str, 'Z_DXY']
         vn_mfi = vn_trend_idx.loc[buy_date_str, 'VN_MFI']
-    except:
-        continue
+    except: continue
     
     if (pd.notna(z_dxy) and z_dxy > 1.0) or \
        (pd.notna(vn_price) and pd.notna(vn_ma50) and vn_price < vn_ma50 and vn_mfi < 40):
-        blocked_macro_count += 1
         continue 
 
     # 2. KIỂM TRA TRÙNG LỆNH
@@ -488,12 +492,9 @@ for idx, row in buy_signals.iterrows():
         if slot['ticker'] == ticker and slot['free_date'] > buy_date:
             already_holding = True
             break
-            
-    if already_holding:
-        blocked_duplicate_count += 1
-        continue 
+    if already_holding: continue 
 
-    # 3. TÌM SLOT TRỐNG ĐỂ GIẢI NGÂN
+    # 3. TÌM SLOT TRỐNG VÀ GIẢI NGÂN
     try:
         available_slot_idx = -1
         for i in range(MAX_SLOTS):
@@ -503,6 +504,13 @@ for idx, row in buy_signals.iterrows():
                 
         if available_slot_idx == -1: continue 
             
+        # 🟢 TÍNH TIỀN LÃI NGÂN HÀNG TRONG THỜI GIAN CHỜ MUA (Idle Cash)
+        idle_days = (buy_date - slot_status[available_slot_idx]['last_active_date']).days
+        if idle_days > 0:
+            idle_interest = slot_status[available_slot_idx]['capital'] * DAILY_RATE * idle_days
+            slot_status[available_slot_idx]['capital'] += idle_interest
+            total_bank_interest += idle_interest
+
         buy_idx = stocks_close.index.get_loc(buy_date_str)
         buy_price = stocks_close[ticker].iloc[buy_idx]
         
@@ -545,16 +553,18 @@ for idx, row in buy_signals.iterrows():
             
         sell_date = stocks_close.index[sell_idx]
         
-        # 🟢 TÍNH LÃI KÉP & CẬP NHẬT TRẠNG THÁI SLOT
+        # CẬP NHẬT TIỀN TỪ CỔ PHIẾU
         profit_pct = (sell_price / buy_price) - 1 - FEE_TAX
-        current_capital = slot_status[available_slot_idx]['capital'] # Lấy đúng số vốn hiện có của slot này
-        profit_vnd = current_capital * profit_pct
-        new_capital = current_capital + profit_vnd # Nhồi lãi (hoặc trừ lỗ)
+        current_capital = slot_status[available_slot_idx]['capital'] 
+        trade_profit_vnd = current_capital * profit_pct
+        new_capital = current_capital + trade_profit_vnd 
         
+        # TIỀN NHẢ VỀ LẠI THÀNH TIỀN MẶT CHỜ GỬI BANK
         slot_status[available_slot_idx] = {
             'free_date': pd.to_datetime(sell_date),
             'ticker': ticker,
-            'capital': new_capital # Ghi nhận vốn mới cho vòng sau
+            'capital': new_capital,
+            'last_active_date': pd.to_datetime(sell_date) # Bắt đầu đếm rảnh rỗi từ ngày bán
         }
         
         trade_logs.append({
@@ -562,36 +572,41 @@ for idx, row in buy_signals.iterrows():
             'Sell_Date': sell_date.strftime('%Y-%m-%d'),
             'Ticker': ticker,
             'Reason': sell_reason,
-            'Profit_%': round(profit_pct * 100, 2),
-            'Profit_VND': profit_vnd,
+            'Stock_Profit_%': round(profit_pct * 100, 2),
+            'Stock_Profit_VND': trade_profit_vnd,
             'Slot_Capital': round(new_capital, 0)
         })
     except:
         continue
 
+# 🟢 CHỐT SỔ CUỐI CÙNG: CỘNG LÃI BANK CHO CÁC NGÀY RẢNH RỖI CÒN LẠI ĐẾN HIỆN TẠI
+for slot in slot_status:
+    remaining_idle_days = (sim_end_date - slot['last_active_date']).days
+    if remaining_idle_days > 0:
+        final_interest = slot['capital'] * DAILY_RATE * remaining_idle_days
+        slot['capital'] += final_interest
+        total_bank_interest += final_interest
+
 if len(trade_logs) > 0:
     df_trades = pd.DataFrame(trade_logs)
-    
     total_trades = len(df_trades)
-    winning_trades = len(df_trades[df_trades['Profit_VND'] > 0])
+    winning_trades = len(df_trades[df_trades['Stock_Profit_VND'] > 0])
     win_rate = winning_trades / total_trades * 100 if total_trades > 0 else 0
     
-    # 🟢 TỔNG KẾT TÀI SẢN TỪ 5 SLOT
     final_capital = sum(slot['capital'] for slot in slot_status)
     total_profit = final_capital - INITIAL_CAPITAL
     roi = (final_capital / INITIAL_CAPITAL - 1) * 100
     
-    print(f"🛑 Số kèo bị chặn do Vĩ mô xấu: {blocked_macro_count} lệnh")
-    print(f"⛔ Số kèo bị chặn do Trùng lặp mã: {blocked_duplicate_count} lệnh")
     print(f"🎯 Số lệnh ĐƯỢC MUA (Thực tế): {total_trades} lệnh")
-    print(f"🏆 Tỷ lệ thắng (Win-rate): {win_rate:.1f}%")
+    print(f"🏆 Tỷ lệ thắng lệnh cổ phiếu (Win-rate): {win_rate:.1f}%")
     print("-" * 50)
     print(f"💵 VỐN BAN ĐẦU       : {INITIAL_CAPITAL:,.0f} VNĐ")
-    print(f"📈 TỔNG LÃI/LỖ RÒNG  : {total_profit:,.0f} VNĐ")
-    print(f"🏦 TỔNG TÀI SẢN (NAV): {final_capital:,.0f} VNĐ")
-    print(f"🚀 TỶ SUẤT LỢI NHUẬN (ROI): {roi:.2f}%")
+    print(f"🏦 LÃI TỪ GỬI BANK 5%: +{total_bank_interest:,.0f} VNĐ (Tiền đẻ ra tiền khi rảnh)")
+    print(f"📈 TỔNG LÃI/LỖ RÒNG  : {total_profit:,.0f} VNĐ (Bao gồm cả Bank + Cổ phiếu)")
+    print(f"💎 TỔNG TÀI SẢN (NAV): {final_capital:,.0f} VNĐ")
+    print(f"🚀 TỶ SUẤT LỢI NHUẬN (ROI TOÀN DIỆN): {roi:.2f}%")
     
-    print("\n🔍 X-RAY 10 LỆNH GẦN NHẤT (CÓ THEO DÕI VỐN LÃI KÉP):")
-    print(df_trades[['Buy_Date', 'Sell_Date', 'Ticker', 'Profit_%', 'Slot_Capital']].tail(10).to_string(index=False))
+    print("\n🔍 X-RAY 10 LỆNH GẦN NHẤT (DANH MỤC 10 SLOT):")
+    print(df_trades[['Buy_Date', 'Sell_Date', 'Ticker', 'Reason', 'Stock_Profit_%', 'Slot_Capital']].tail(10).to_string(index=False))
 else:
     print("⚠️ Không có lệnh nào khớp và chốt lời thành công.")
