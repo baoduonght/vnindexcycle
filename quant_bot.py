@@ -499,7 +499,7 @@ buy_signals = buy_signals.sort_values('Date')
 
 # Cấu hình Luật chơi (Bỏ toàn bộ cắt lỗ/chốt lời cá nhân)
 INITIAL_CAPITAL = 100_000_000
-MAX_SLOTS = 5
+MAX_SLOTS = 10
 SLOT_SIZE = INITIAL_CAPITAL / MAX_SLOTS 
 FEE_TAX = 0.003                         
 
