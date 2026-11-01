@@ -113,7 +113,7 @@ for c in stock_tickers:
 # ==========================================
 # 3. NHÚNG AI - HUẤN LUYỆN & SÁT HẠCH
 # ==========================================
-print("3. Nâng cấp Não bộ AI (Hạ chuẩn Target xuống 3.5% cho VN30)...")
+print("3. Nâng cấp Não bộ AI (Nhúng La bàn VNINDEX & Trị bệnh ngáo Vĩ mô)...")
 
 try:
     macro_df = pd.read_csv('global_markets_database10years.csv')
@@ -126,11 +126,15 @@ try:
 except Exception as e:
     sys.exit(f"🛑 LỖI ĐỌC FILE VĨ MÔ: {e}")
 
-mfi_data = vnindex_df[['Date', 'VN_MFI']].copy()
-mfi_data['Date'] = pd.to_datetime(mfi_data['Date']).dt.strftime('%Y-%m-%d')
+# 🟢 TÍCH HỢP LA BÀN VNINDEX VÀ DÒNG TIỀN MFI
+market_context = vnindex_df[['Date', 'VN_MFI', 'VNINDEX', 'MA200']].copy()
+# Tính khoảng cách của thị trường chung so với nền MA200
+market_context['VN_Dist_MA200'] = market_context['VNINDEX'] / market_context['MA200']
+market_context['Date'] = pd.to_datetime(market_context['Date']).dt.strftime('%Y-%m-%d')
 
-macro_df = macro_df.merge(mfi_data, on='Date', how='left')
+macro_df = macro_df.merge(market_context[['Date', 'VN_MFI', 'VN_Dist_MA200']], on='Date', how='left')
 macro_df['VN_MFI'] = macro_df['VN_MFI'].ffill()
+macro_df['VN_Dist_MA200'] = macro_df['VN_Dist_MA200'].ffill()
 
 macro_cols = ['DXY', 'US10Y']
 for col in macro_cols:
@@ -149,7 +153,7 @@ for c in stock_tickers:
     df_c['RSI'] = calc_rsi(stocks_close[c]).values
     df_c['MACD_Hist'] = calc_macd_hist(stocks_close[c]).values
     
-    # 🟢 HẠ CHUẨN THỰC TẾ: Kỳ vọng tăng > 3.5% trong vòng 15 phiên (T+15)
+    # Target: Kỳ vọng tăng > 3.5% trong vòng 15 phiên (T+15)
     future_return = stocks_close[c].shift(-15) / stocks_close[c] - 1
     df_c['Target'] = (future_return > 0.035).astype(int).values
     df_ml_list.append(df_c)
@@ -157,8 +161,8 @@ for c in stock_tickers:
 concat_df = pd.concat(df_ml_list)
 ml_master = concat_df.merge(macro_df, on='Date', how='left')
 
-# Các biến số đầu vào (Features) của AI
-ml_features = ['Vol_Ratio', 'Dist_MA50', 'RSI', 'VN_MFI', 'MACD_Hist'] + z_cols
+# 🟢 CẬP NHẬT MẮT THẦN: Có thêm la bàn VNINDEX (VN_Dist_MA200)
+ml_features = ['Vol_Ratio', 'Dist_MA50', 'RSI', 'VN_MFI', 'MACD_Hist', 'VN_Dist_MA200'] + z_cols
 
 ml_master = ml_master[ml_master['Date'].isin(fresh_us_dates)]
 ml_master_clean = ml_master.dropna(subset=ml_features).copy()
@@ -175,7 +179,15 @@ y_train = train_data['Target']
 if len(X_train) == 0:
     sys.exit("❌ LỖI TRÍ MẠNG: Tập X_train rỗng.")
 
-rf_model = RandomForestClassifier(n_estimators=100, max_depth=6, class_weight='balanced', random_state=42)
+# 🟢 TRÓI TAY HỌC VẸT: Siết thuật toán cực mạnh
+rf_model = RandomForestClassifier(
+    n_estimators=100, 
+    max_depth=4,               # Ép AI tư duy đơn giản, tránh suy diễn quá đà
+    min_samples_leaf=15,       # Cấm AI nhận diện các tín hiệu nhiễu vặt vãnh
+    max_features='sqrt',       # Bắt buộc AI phải kết hợp đa chỉ báo (không được nhìn chằm chằm DXY)
+    class_weight='balanced', 
+    random_state=42
+)
 rf_model.fit(X_train, y_train)
 print(f"✅ AI đã học xong từ {len(X_train)} dòng dữ liệu!")
 
@@ -186,7 +198,7 @@ if not test_data.empty:
     y_pred = rf_model.predict(test_data[ml_features])
     
     print("\n" + "="*50)
-    print("📊 BẢNG ĐIỂM AI: ĐÁNH SÓNG VN30 (> 3.5% TRONG T+15)")
+    print("📊 BẢNG ĐIỂM AI: ĐÃ NHÚNG LA BÀN VNINDEX & TRỊ HỌC VẸT")
     print("="*50)
     print(classification_report(y_test, y_pred, target_names=['Bỏ qua (0)', 'Đạt chuẩn MUA (1)']))
     
@@ -194,7 +206,7 @@ if not test_data.empty:
     importances = rf_model.feature_importances_
     ranked_features = sorted(zip(ml_features, importances), key=lambda x: x[1], reverse=True)
     for feature, imp in ranked_features:
-        print(f" 🔹 {feature:<12}: {imp*100:>5.2f}%")
+        print(f" 🔹 {feature:<14}: {imp*100:>5.2f}%")
     print("="*50 + "\n")
 
 ml_master['AI_Score'] = float('nan')
