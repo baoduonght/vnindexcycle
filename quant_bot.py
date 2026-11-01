@@ -610,3 +610,11 @@ if len(trade_logs) > 0:
     print(df_trades[['Buy_Date', 'Sell_Date', 'Ticker', 'Reason', 'Stock_Profit_%', 'Slot_Capital']].tail(10).to_string(index=False))
 else:
     print("⚠️ Không có lệnh nào khớp và chốt lời thành công.")
+    # 1. Bỏ giới hạn hiển thị của Pandas để in toàn bộ các dòng ra màn hình
+import pandas as pd
+pd.set_option('display.max_rows', None) 
+print(df_trades[['Buy_Date', 'Sell_Date', 'Ticker', 'Reason', 'Stock_Profit_%', 'Slot_Capital']])
+
+# 2. Xuất toàn bộ sổ lệnh ra file CSV để mở bằng Excel
+df_trades.to_csv('Lich_Su_Lenh_Toan_Tap_2024.csv', index=False, encoding='utf-8-sig')
+print("✅ Đã xuất file Lich_Su_Lenh_Toan_Tap_2024.csv thành công!")
