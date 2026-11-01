@@ -100,6 +100,8 @@ for c in stock_tickers:
 
 import sys
 
+import sys
+
 # ==========================================
 # 3. NHÚNG AI - HUẤN LUYỆN & CHẤM ĐIỂM (MÀNG LỌC KÉP VN-US)
 # ==========================================
@@ -114,7 +116,7 @@ try:
     macro_df['US10Y'] = pd.to_numeric(macro_df['US10Y'], errors='coerce')
     macro_df['Date'] = pd.to_datetime(macro_df['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
     
-    # 🟢 MÀNG LỌC 1: Lấy danh sách các ngày thị trường Mỹ THỰC SỰ GIAO DỊCH
+    # Lấy danh sách các ngày thị trường Mỹ THỰC SỰ GIAO DỊCH
     fresh_us_dates = macro_df.dropna(subset=['DXY', 'US10Y'])['Date'].tolist()
     macro_df = macro_df.sort_values('Date').reset_index(drop=True)
 except Exception as e:
@@ -129,7 +131,6 @@ macro_df['VN_MFI'] = macro_df['VN_MFI'].ffill()
 
 macro_cols = ['DXY', 'US10Y']
 for col in macro_cols:
-    # Ffill tạm thời HẬU TRƯỜNG để hàm rolling có số liệu tính toán trung bình
     macro_df[col] = macro_df[col].ffill()
     macro_df[f'Z_{col}'] = (macro_df[col] - macro_df[col].rolling(120).mean()) / macro_df[col].rolling(120).std()
 z_cols = [f'Z_{c}' for c in macro_cols]
@@ -154,20 +155,16 @@ ml_master = concat_df.merge(macro_df, on='Date', how='left')
 ml_features = ['Vol_Ratio', 'Dist_MA50', 'RSI', 'VN_MFI'] + z_cols
 
 # ==========================================
-# 🟢 KÍCH HOẠT MÀNG LỌC KÉP TRƯỚC KHI CHO AI HỌC
+# 🟢 KÍCH HOẠT MÀNG LỌC KÉP 
 # ==========================================
-# 1. Đá văng những ngày Mỹ nghỉ lễ (Thiếu Data US)
 ml_master = ml_master[ml_master['Date'].isin(fresh_us_dates)]
 
-# 2. Đá văng những ngày API Việt Nam bị lỗi, trả về NaN ở Volume/RSI (Thiếu Data VN)
-# Chỉ giữ lại bảng dữ liệu "Siêu Sạch" (Hoàn hảo 100% chỉ báo của CẢ 2 THỊ TRƯỜNG)
+# 4. HUẤN LUYỆN AI (HỌC TỪ DATA THẬT 100%)
 ml_master_clean = ml_master.dropna(subset=ml_features).copy()
 
 if ml_master_clean.empty:
     sys.exit("⚠️ LỖI ĐỒNG BỘ: Cả Mỹ và VN đều không đủ Data sạch. Bot buộc phải đứng ngoài!")
 
-# 4. HUẤN LUYỆN AI (HỌC TỪ DATA THẬT 100%)
-# Dùng bảng Siêu Sạch để học, chỉ cần lọc thêm Target bị khuyết (do T+10 của ngày hiện tại)
 train_data = ml_master_clean.dropna(subset=['Target'])
 train_data = train_data[train_data['Date'] < '2024-01-01']
 
@@ -182,13 +179,20 @@ rf_model = RandomForestClassifier(n_estimators=100, max_depth=6, class_weight='b
 rf_model.fit(X_train, y_train)
 print(f"✅ AI đã học xong từ {len(X_train)} dòng dữ liệu ĐỒNG BỘ CHUẨN MỰC của cả VN và US!")
 
-# 5. XUẤT TÍN HIỆU
-# Chỉ chấm điểm AI cho những ngày vượt qua được màng lọc kép
-ml_master_clean['AI_Score'] = rf_model.predict_proba(ml_master_clean[ml_features])[:, 1]
+# ==========================================
+# 5. XUẤT TÍN HIỆU (BẢN BỌC THÉP CHỐNG KEYERROR)
+# ==========================================
+# Khởi tạo sẵn cột AI_Score trống để vĩnh viễn không bị KeyError
+ml_master['AI_Score'] = float('nan')
 
-# Ghép điểm AI trở lại bảng gốc. 
-# Nếu mã cổ phiếu nào hôm nay bị khuyết VN Data hoặc US Data -> Nhận giá trị NaN -> KHÔNG MUA BÁN.
-ml_master = ml_master.merge(ml_master_clean[['Date', 'Ticker', 'AI_Score']], on=['Date', 'Ticker'], how='left')
+# Quét tìm những dòng hội tụ đủ 100% dữ liệu (không có NaN ở các cột features)
+valid_rows = ml_master[ml_features].notna().all(axis=1)
+
+# Chấm điểm và điền thẳng điểm số vào các ô hợp lệ
+if valid_rows.sum() > 0:
+    ml_master.loc[valid_rows, 'AI_Score'] = rf_model.predict_proba(ml_master.loc[valid_rows, ml_features])[:, 1]
+
+# Chuyển đổi thành Dictionary để đẩy sang Bước 4 (df_trade_log)
 ai_dict = {c: ml_master[ml_master['Ticker'] == c].set_index('Date')['AI_Score'] for c in stock_tickers}
 # ==========================================
 # 4. HUẤN LUYỆN AI (HỌC TỪ DỮ LIỆU SẠCH 100%)
