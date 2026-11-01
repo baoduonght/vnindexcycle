@@ -1,4 +1,3 @@
-
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -7,7 +6,10 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from tvDatafeed import TvDatafeed, Interval
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report
 import warnings
+import sys
+import os
 warnings.filterwarnings('ignore')
 
 tv = TvDatafeed()
@@ -52,7 +54,10 @@ def calc_mfi(high, low, close, volume, n=14):
 # 1. TẢI VN-INDEX & LẬP BỘ LỌC THỊ TRƯỜNG
 # ==========================================
 print("1. Đang tải Market Proxy (VNINDEX) và tính toán Dòng tiền MFI...")
-vnindex_df = tv.get_hist(symbol='VNINDEX', exchange='HOSE', interval=Interval.in_daily, n_bars=4000).reset_index()
+vnindex_df = tv.get_hist(symbol='VNINDEX', exchange='HOSE', interval=Interval.in_daily, n_bars=4000)
+if vnindex_df is None or vnindex_df.empty:
+    sys.exit("❌ LỖI: API TradingView không trả về dữ liệu VNINDEX. Hãy chạy lại sau.")
+vnindex_df = vnindex_df.reset_index()
 vnindex_df.rename(columns={'datetime': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'VNINDEX', 'volume': 'Volume'}, inplace=True)
 vnindex_df['Date'] = pd.to_datetime(vnindex_df['Date']).dt.tz_localize(None).dt.normalize()
 
@@ -93,36 +98,28 @@ stocks_ma20 = stocks_close.rolling(20).mean()
 stocks_ma50 = stocks_close.rolling(50).mean()
 stocks_vol_ma20 = stocks_volume.rolling(20).mean().shift(1)
 
-# THÊM MỚI: Tính RSI sẵn cho toàn bộ cổ phiếu để trích xuất lúc báo lệnh
 stocks_rsi = pd.DataFrame(index=stocks_close.index)
 for c in stock_tickers:
     stocks_rsi[c] = calc_rsi(stocks_close[c])
 
-import sys
-
-import sys
-
 # ==========================================
-# 3. NHÚNG AI - HUẤN LUYỆN & CHẤM ĐIỂM (MÀNG LỌC KÉP VN-US)
+# 3. NHÚNG AI - HUẤN LUYỆN & SÁT HẠCH (MÀNG LỌC KÉP)
 # ==========================================
-print("3. Tải dữ liệu & Đào tạo AI (Chỉ chạy khi 100% ĐỒNG BỘ Data tươi từ VN và US)...")
+print("3. Tải dữ liệu & Đào tạo AI (Yêu cầu 100% ĐỒNG BỘ Data VN-US)...")
 
-# 1. ĐỌC VÀ CHỐT LỊCH GIAO DỊCH MỸ (US)
 try:
     macro_df = pd.read_csv('global_markets_database10years.csv')
     macro_df = macro_df[['Date', 'DXY', 'US10Y']]
-    
     macro_df['DXY'] = pd.to_numeric(macro_df['DXY'], errors='coerce')
     macro_df['US10Y'] = pd.to_numeric(macro_df['US10Y'], errors='coerce')
     macro_df['Date'] = pd.to_datetime(macro_df['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
     
-    # Lấy danh sách các ngày thị trường Mỹ THỰC SỰ GIAO DỊCH
+    # 🟢 Lưu danh sách ngày Mỹ có giao dịch thật
     fresh_us_dates = macro_df.dropna(subset=['DXY', 'US10Y'])['Date'].tolist()
     macro_df = macro_df.sort_values('Date').reset_index(drop=True)
 except Exception as e:
     sys.exit(f"🛑 LỖI ĐỌC FILE VĨ MÔ: {e}")
 
-# 2. XỬ LÝ TOÁN HỌC (Z-SCORE)
 mfi_data = vnindex_df[['Date', 'VN_MFI']].copy()
 mfi_data['Date'] = pd.to_datetime(mfi_data['Date']).dt.strftime('%Y-%m-%d')
 
@@ -131,11 +128,10 @@ macro_df['VN_MFI'] = macro_df['VN_MFI'].ffill()
 
 macro_cols = ['DXY', 'US10Y']
 for col in macro_cols:
-    macro_df[col] = macro_df[col].ffill()
+    macro_df[col] = macro_df[col].ffill() # Ffill tạm cho toán học
     macro_df[f'Z_{col}'] = (macro_df[col] - macro_df[col].rolling(120).mean()) / macro_df[col].rolling(120).std()
 z_cols = [f'Z_{c}' for c in macro_cols]
 
-# 3. TẠO FEATURES CỔ PHIẾU (VN)
 df_ml_list = []
 clean_dates = pd.to_datetime(stocks_close.index).strftime('%Y-%m-%d')
 
@@ -154,19 +150,15 @@ concat_df = pd.concat(df_ml_list)
 ml_master = concat_df.merge(macro_df, on='Date', how='left')
 ml_features = ['Vol_Ratio', 'Dist_MA50', 'RSI', 'VN_MFI'] + z_cols
 
-# ==========================================
-# 🟢 KÍCH HOẠT MÀNG LỌC KÉP 
-# ==========================================
+# 🟢 Kích hoạt Màng Lọc Kép
 ml_master = ml_master[ml_master['Date'].isin(fresh_us_dates)]
-
-# 4. HUẤN LUYỆN AI (HỌC TỪ DATA THẬT 100%)
 ml_master_clean = ml_master.dropna(subset=ml_features).copy()
 
 if ml_master_clean.empty:
     sys.exit("⚠️ LỖI ĐỒNG BỘ: Cả Mỹ và VN đều không đủ Data sạch. Bot buộc phải đứng ngoài!")
 
-train_data = ml_master_clean.dropna(subset=['Target'])
-train_data = train_data[train_data['Date'] < '2024-01-01']
+train_data_all = ml_master_clean.dropna(subset=['Target'])
+train_data = train_data_all[train_data_all['Date'] < '2024-01-01']
 
 X_train = train_data[ml_features]
 y_train = train_data['Target']
@@ -174,71 +166,45 @@ y_train = train_data['Target']
 if len(X_train) == 0:
     sys.exit("❌ LỖI TRÍ MẠNG: Tập X_train rỗng. Hãy kiểm tra lại API TradingView và CSV.")
 
-from sklearn.ensemble import RandomForestClassifier
 rf_model = RandomForestClassifier(n_estimators=100, max_depth=6, class_weight='balanced', random_state=42)
 rf_model.fit(X_train, y_train)
 print(f"✅ AI đã học xong từ {len(X_train)} dòng dữ liệu ĐỒNG BỘ CHUẨN MỰC của cả VN và US!")
 
 # ==========================================
-# 5. XUẤT TÍN HIỆU (BẢN BỌC THÉP CHỐNG KEYERROR)
+# 🟢 MODULE SÁT HẠCH AI (TỪ 2024 ĐẾN NAY)
 # ==========================================
-# Khởi tạo sẵn cột AI_Score trống để vĩnh viễn không bị KeyError
+test_data = train_data_all[train_data_all['Date'] >= '2024-01-01']
+if not test_data.empty:
+    y_test = test_data['Target']
+    y_pred = rf_model.predict(test_data[ml_features])
+    
+    print("\n" + "="*50)
+    print("📊 BẢNG ĐIỂM SÁT HẠCH AI (01/2024 - HIỆN TẠI)")
+    print("="*50)
+    print(classification_report(y_test, y_pred, target_names=['Bỏ qua (0)', 'Đạt chuẩn MUA (1)']))
+    
+    print("\n🔍 TỶ TRỌNG SỬ DỤNG CHỈ BÁO (FEATURE IMPORTANCE):")
+    importances = rf_model.feature_importances_
+    ranked_features = sorted(zip(ml_features, importances), key=lambda x: x[1], reverse=True)
+    for feature, imp in ranked_features:
+        print(f" 🔹 {feature:<12}: {imp*100:>5.2f}%")
+    print("="*50 + "\n")
+else:
+    print("\n⚠️ Không có dữ liệu test từ năm 2024 trở đi.\n")
+
+# Chấm điểm phiên hiện tại
 ml_master['AI_Score'] = float('nan')
-
-# Quét tìm những dòng hội tụ đủ 100% dữ liệu (không có NaN ở các cột features)
 valid_rows = ml_master[ml_features].notna().all(axis=1)
-
-# Chấm điểm và điền thẳng điểm số vào các ô hợp lệ
 if valid_rows.sum() > 0:
     ml_master.loc[valid_rows, 'AI_Score'] = rf_model.predict_proba(ml_master.loc[valid_rows, ml_features])[:, 1]
 
-# Chuyển đổi thành Dictionary để đẩy sang Bước 4 (df_trade_log)
 ai_dict = {c: ml_master[ml_master['Ticker'] == c].set_index('Date')['AI_Score'] for c in stock_tickers}
-# ==========================================
-# 4. HUẤN LUYỆN AI (HỌC TỪ DỮ LIỆU SẠCH 100%)
-# ==========================================
-# Lọc bỏ mọi dòng khuyết Feature hoặc Target để đảm bảo AI học chuẩn
-train_data = ml_master.dropna(subset=ml_features + ['Target'])
-train_data = train_data[train_data['Date'] < '2024-01-01']
-
-X_train = train_data[ml_features]
-y_train = train_data['Target']
-
-if len(X_train) == 0:
-    missing_report = ml_master[ml_features].isna().sum()
-    print(f"\n🔍 BÁO CÁO CỘT LỖI GÂY TRỐNG DỮ LIỆU:\n{missing_report[missing_report > 0]}")
-    sys.exit("❌ LỖI TRÍ MẠNG: X_train rỗng. Dữ liệu Vĩ mô hoặc Volume cổ phiếu đang bị khuyết hoàn toàn!")
-
-from sklearn.ensemble import RandomForestClassifier
-rf_model = RandomForestClassifier(n_estimators=100, max_depth=6, class_weight='balanced', random_state=42)
-
-print("Đang nạp dữ liệu vào mạng nơ-ron Random Forest...")
-rf_model.fit(X_train, y_train)
-print(f"✅ AI đã huấn luyện xong trên {len(X_train)} dòng dữ liệu chuẩn!")
 
 # ==========================================
-# 5. DỰ ĐOÁN & XUẤT TÍN HIỆU (KHÔNG VAY MƯỢN DỮ LIỆU)
-# ==========================================
-# CHỈ LẤY những dòng hội tụ đủ 100% các biến số (cả VN và Vĩ mô)
-ml_master_predict = ml_master.dropna(subset=ml_features).copy()
-
-if ml_master_predict.empty:
-    sys.exit("⚠️ Dữ liệu trống trơn. Không thể chạy dự đoán.")
-
-# Chấm điểm AI dựa trên tập dữ liệu hoàn hảo
-ml_master_predict['AI_Score'] = rf_model.predict_proba(ml_master_predict[ml_features])[:, 1]
-
-# Ghép điểm AI_Score trả lại bảng ml_master gốc (các ngày khuyết dữ liệu sẽ tự động mang giá trị NaN)
-ml_master = ml_master.merge(ml_master_predict[['Date', 'Ticker', 'AI_Score']], on=['Date', 'Ticker'], how='left')
-
-# Trích xuất sang Bước 4. Nếu hôm nay thiếu Vĩ mô -> AI_Score = NaN -> Bot im lặng đứng ngoài thị trường
-ai_dict = {c: ml_master[ml_master['Ticker'] == c].set_index('Date')['AI_Score'] for c in stock_tickers}
-# ==========================================
-# 4. CHẠY BACKTEST (TÍCH HỢP AI CHẤM ĐIỂM)
+# 4. CHẠY BACKTEST (SỔ KẾ TOÁN)
 # ==========================================
 print("4. Chạy Sổ Kế Toán & Trích xuất Lịch sử Mua/Bán của AI...")
 def run_ai_quant_system_with_log():
-    # THÊM 'VN_MFI' vào danh sách backtest để lấy dữ liệu dòng tiền
     backtest = df_clean[['Date', 'VNINDEX', 'MA50', 'MA100', 'MA200', 'ADX', 'ATR_PCT', 'VN_MFI']].copy()
     MAX_SLOTS = 5
     LIQUIDITY_FEE = 0.003
@@ -256,7 +222,7 @@ def run_ai_quant_system_with_log():
         market_ma200 = backtest['MA200'].iloc[i]
         market_adx = backtest['ADX'].iloc[i]
         market_atr_pct = backtest['ATR_PCT'].iloc[i]
-        market_mfi = backtest['VN_MFI'].iloc[i] # Lấy MFI của phiên hiện tại
+        market_mfi = backtest['VN_MFI'].iloc[i] 
 
         if date not in stocks_close.index:
             nav_history[i] = nav_history[i-1] if i > 0 else cash
@@ -311,8 +277,9 @@ def run_ai_quant_system_with_log():
 
                         if curr_price > prev_high_20 and curr_vol > (prev_vol_ma20 * 1.5):
                             ai_score = ai_dict[c].get(date, 0)
+                            if pd.isna(ai_score): ai_score = 0
+                            
                             if ai_score >= 0.55:
-                                # Tính toán độ đột biến Vol và lấy RSI
                                 vol_ratio = curr_vol / prev_vol_ma20 if prev_vol_ma20 > 0 else 0
                                 stock_rsi = stocks_rsi.at[date, c]
                                 buy_candidates.append((c, ai_score, vol_ratio, stock_rsi))
@@ -326,7 +293,6 @@ def run_ai_quant_system_with_log():
                             qty = (invest_amt * (1 - LIQUIDITY_FEE)) / buy_price
                             held[c] = {'qty': qty, 'buy_price': buy_price, 'highest': buy_price}
                             
-                            # GHI ĐẦY ĐỦ CÁC CHỈ BÁO VÀO SỔ LỆNH ĐỂ TELEGRAM ĐỌC
                             trade_log.append({
                                 'Date': date, 'Action': 'BUY', 'Ticker': c, 'Price': buy_price, 
                                 'AI_Score': round(score, 2), 'Vol_Ratio': round(v_ratio, 1),
@@ -338,19 +304,27 @@ def run_ai_quant_system_with_log():
         nav_history[i] = cash + sum([held[c]['qty'] * stocks_close.at[date, c] for c in held.keys()])
 
     return nav_history, pd.DataFrame(trade_log)
+
+# KÍCH HOẠT CHẠY BACKTEST
+nav_history, df_trade_log = run_ai_quant_system_with_log()
+
+# Tạo dataframe lưu kết quả NAV để vẽ biểu đồ
+backtest_result = df_clean[['Date', 'VNINDEX']].copy()
+backtest_result['NAV_AI_Driven'] = nav_history
+
 # ==========================================
 # 5. MODULE BÁO CÁO TÍN HIỆU QUA TELEGRAM
 # ==========================================
 print("5. Đang trích xuất tín hiệu mới nhất và đẩy lên Telegram...")
-
-import os
-import requests
-
-# Lấy Token từ GitHub Secrets
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
 def send_telegram_msg(text_message):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("⚠️ Bỏ qua gửi Telegram vì chưa có TOKEN. Log tin nhắn:\n")
+        print(text_message)
+        return
+        
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
@@ -407,7 +381,6 @@ def process_and_send_signals(df_log):
     if buy_count == 0 and sell_count == 0:
         msg += "<i>⏳ Hệ thống nằm im quan sát, không có lệnh mới.</i>\n\n"
 
-    # CHỈ HIỂN THỊ TOP 5 KHI CÓ LỆNH MUA TỪ HỆ THỐNG
     if buy_count > 0:
         msg += "➖➖➖➖➖➖➖➖➖➖\n"
         msg += "🌟 <b>TOP 5 CP VN30 ĐÁNG MUA NHẤT (Tham khảo thêm):</b>\n"
@@ -418,40 +391,42 @@ def process_and_send_signals(df_log):
             curr_price = stocks_close.at[latest_date, c]
             ma50 = stocks_ma50.at[latest_date, c]
             ai_score = ai_dict[c].get(latest_date, 0)
+            if pd.isna(ai_score): ai_score = 0
             
-            # Chỉ lọc các mã có giá nằm trên MA50
             if curr_price > ma50:
                 top_stocks.append({'Ticker': c, 'AI_Score': ai_score, 'Price': curr_price})
                 
-        # Xếp hạng lấy 5 mã điểm cao nhất
         top_5 = sorted(top_stocks, key=lambda x: x['AI_Score'], reverse=True)[:5]
         
         if top_5:
             for i, item in enumerate(top_5, 1):
-                msg += f"{i}. <b>{item['Ticker']}</b> - Giá: {item['Price']:,.0f} VND (AI: {item['AI_Score']*100:.1f}%)\n"
+                msg += f"{i}. <b>{item['Ticker']}</b> - Giá: {item['Price']:,.0f} (AI: {item['AI_Score']*100:.1f}%)\n"
         else:
             msg += "⚠️ <i>Không có mã nào giữ được Trend tăng ngoài danh mục bot báo.</i>\n"
             
         msg += "\n"
         
-    # CHỐT LẠI BẰNG FOOTER
     msg += "➖➖➖➖➖➖➖➖➖➖\n"
     msg += "<i>⚠️ Khuyến nghị từ AI Random Forest. Hãy chia đều tỷ trọng.</i>"
     
-    # 🚀 CHỈ GỌI HÀM GỬI ĐÚNG 1 LẦN SAU KHI ĐÃ GÓI XONG TIN NHẮN
-    # Nếu bạn đang dùng code xuất ảnh, hãy đổi thành: send_telegram_photo(chart_path, msg)
     send_telegram_msg(msg)
 
-# Chạy báo cáo
 process_and_send_signals(df_trade_log)
 
-# Lưu sổ lệnh ra file CSV (Dành cho GitHub Actions)
 if not df_trade_log.empty:
     df_trade_log.to_csv('trading_log.csv', index=False)
 
+# ==========================================
+# 6. VẼ BIỂU ĐỒ (DÀNH CHO CHẠY TRÊN MÁY TÍNH)
+# ==========================================
 print("6. Vẽ biểu đồ...")
-fig = make_subplots(specs=[[{"secondary_y": True}]])
-fig.add_trace(go.Scatter(x=backtest_result['Date'], y=backtest_result['VNINDEX'], name="VN-Index", mode='lines', line=dict(color='#B2B5BE', width=1)), secondary_y=False)
-fig.add_trace(go.Scatter(x=backtest_result['Date'], y=backtest_result['NAV_AI_Driven'], name="NAV (AI Filter + Volatility Sizing)", mode='lines', line=dict(color='#00E676', width=2.5)), secondary_y=True)
-fig.update_layout(title='Đấu trường VN-Index: Hệ Thống AI Nhận Diện Breakout Giả (Có MFI)', template='plotly_dark')
-fig.show()
+try:
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(go.Scatter(x=backtest_result['Date'], y=backtest_result['VNINDEX'], name="VN-Index", mode='lines', line=dict(color='#B2B5BE', width=1)), secondary_y=False)
+    fig.add_trace(go.Scatter(x=backtest_result['Date'], y=backtest_result['NAV_AI_Driven'], name="NAV (AI Filter + Volatility Sizing)", mode='lines', line=dict(color='#00E676', width=2.5)), secondary_y=True)
+    fig.update_layout(title='Đấu trường VN-Index: Hệ Thống AI Nhận Diện Breakout Giả (Có MFI)', template='plotly_dark')
+    # Uncomment dòng dưới nếu chạy trên máy cá nhân để hiển thị biểu đồ
+    # fig.show()
+    print("✅ Hoàn tất toàn bộ chu trình!")
+except Exception as e:
+    print(f"⚠️ Không thể vẽ biểu đồ trên môi trường server: {e}")
