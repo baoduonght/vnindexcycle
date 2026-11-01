@@ -159,7 +159,7 @@ for c in stock_tickers:
     
     # 🟢 TARGET MỚI TỪ BÁC: Kỳ vọng tăng > 5% trong vòng 30 phiên (T+30)
     future_return = stocks_close[c].shift(-30) / stocks_close[c] - 1
-    df_c['Target'] = (future_return > 0.035).astype(int).values
+    df_c['Target'] = (future_return > 0.02).astype(int).values
     df_ml_list.append(df_c)
 
 concat_df = pd.concat(df_ml_list)
