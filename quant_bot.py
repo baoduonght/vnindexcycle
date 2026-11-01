@@ -200,17 +200,23 @@ xgb_model.fit(X_train, y_train)
 print(f"✅ XGBoost đã tiến hóa xong qua {len(X_train)} dòng dữ liệu!")
 
 # ==========================================
-# BẢNG ĐIỂM SÁT HẠCH MỚI
+# BẢNG ĐIỂM SÁT HẠCH XGBOOST (CHẾ ĐỘ SNIPER)
 # ==========================================
 test_data = train_data_all[train_data_all['Date'] >= '2024-01-01']
 if not test_data.empty:
     y_test = test_data['Target']
-    y_pred = xgb_model.predict(test_data[ml_features])
+    
+    # Lấy điểm xác suất (Probability) thay vì kết quả 0/1 mặc định
+    y_probs = xgb_model.predict_proba(test_data[ml_features])[:, 1]
+    
+    # 🟢 KÍCH HOẠT SNIPER MODE: Ép ngưỡng tự tin lên 75% mới báo MUA
+    SNIPER_THRESHOLD = 0.75
+    y_pred_sniper = (y_probs >= SNIPER_THRESHOLD).astype(int)
     
     print("\n" + "="*50)
-    print("📊 BẢNG ĐIỂM XGBOOST: ĐÃ NHÚNG LA BÀN VNINDEX")
+    print(f"📊 BẢNG ĐIỂM XGBOOST - SNIPER MODE (NGƯỠNG {SNIPER_THRESHOLD*100}%)")
     print("="*50)
-    print(classification_report(y_test, y_pred, target_names=['Bỏ qua (0)', 'Đạt chuẩn MUA (1)']))
+    print(classification_report(y_test, y_pred_sniper, target_names=['Bỏ qua (0)', 'Đạt chuẩn MUA (1)']))
     
     print("\n🔍 TỶ TRỌNG SỬ DỤNG CHỈ BÁO (FEATURE IMPORTANCE):")
     importances = xgb_model.feature_importances_
@@ -218,14 +224,6 @@ if not test_data.empty:
     for feature, imp in ranked_features:
         print(f" 🔹 {feature:<14}: {imp*100:>5.2f}%")
     print("="*50 + "\n")
-
-ml_master['AI_Score'] = float('nan')
-valid_rows = ml_master[ml_features].notna().all(axis=1)
-if valid_rows.sum() > 0:
-    ml_master.loc[valid_rows, 'AI_Score'] = xgb_model.predict_proba(ml_master.loc[valid_rows, ml_features])[:, 1]
-
-ai_dict = {c: ml_master[ml_master['Ticker'] == c].set_index('Date')['AI_Score'] for c in stock_tickers}
-
 
 # ==========================================
 # 4. CHẠY BACKTEST (SỔ KẾ TOÁN)
