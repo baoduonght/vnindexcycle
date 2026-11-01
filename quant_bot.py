@@ -157,9 +157,9 @@ for c in stock_tickers:
     df_c['RSI'] = calc_rsi(stocks_close[c]).values
     df_c['MACD_Hist'] = calc_macd_hist(stocks_close[c]).values
     
-    # Target: Kỳ vọng tăng > 3.5% trong vòng 15 phiên (T+15)
-    future_return = stocks_close[c].shift(-15) / stocks_close[c] - 1
-    df_c['Target'] = (future_return > 0.035).astype(int).values
+    # 🟢 TARGET MỚI TỪ BÁC: Kỳ vọng tăng > 5% trong vòng 30 phiên (T+30)
+    future_return = stocks_close[c].shift(-30) / stocks_close[c] - 1
+    df_c['Target'] = (future_return > 0.05).astype(int).values
     df_ml_list.append(df_c)
 
 concat_df = pd.concat(df_ml_list)
