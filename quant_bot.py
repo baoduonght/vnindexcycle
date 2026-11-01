@@ -422,3 +422,80 @@ try:
     print("✅ Hoàn tất toàn bộ chu trình!")
 except:
     pass
+    # ==========================================
+# 5. MÔ PHỎNG THỰC CHIẾN 100 TRIỆU TỪ 2024
+# ==========================================
+print("\n" + "="*50)
+print("💰 MÔ PHỎNG ĐÁNH THỰC CHIẾN VỚI 100 TRIỆU (TỪ 01/2024)")
+print("="*50)
+
+# 1. Lấy lại các lệnh báo MUA từ hệ thống Sniper
+sim_data = test_data.copy()
+sim_data['AI_Score'] = xgb_model.predict_proba(sim_data[ml_features])[:, 1]
+buy_signals = sim_data[sim_data['AI_Score'] >= 0.75].copy()
+
+# 2. Cài đặt luật chơi
+INITIAL_CAPITAL = 100_000_000  # Vốn khởi điểm: 100 củ
+SLOT_SIZE = 20_000_000         # Đánh 20 củ / 1 lệnh
+HOLD_DAYS = 15                 # CHÚ Ý: Bác tự sửa số 15 này khớp với số T+ bác cài ở trên nhé!
+FEE_TAX = 0.003                # Phí giao dịch + Thuế (0.3% / vòng)
+
+trade_logs = []
+
+for idx, row in buy_signals.iterrows():
+    ticker = row['Ticker']
+    buy_date = row['Date']
+    
+    try:
+        buy_idx = stocks_close.index.get_loc(buy_date)
+        
+        # Chỉ tính những lệnh đã đủ thời gian Hold (đã chốt xong)
+        if buy_idx + HOLD_DAYS < len(stocks_close):
+            buy_price = stocks_close[ticker].iloc[buy_idx]
+            sell_price = stocks_close[ticker].iloc[buy_idx + HOLD_DAYS]
+            sell_date = stocks_close.index[buy_idx + HOLD_DAYS].strftime('%Y-%m-%d')
+            
+            # Tính % lợi nhuận (đã trừ phí thuế)
+            profit_pct = (sell_price / buy_price) - 1 - FEE_TAX
+            
+            # Quy ra tiền thật
+            profit_vnd = SLOT_SIZE * profit_pct
+            
+            trade_logs.append({
+                'Buy_Date': buy_date,
+                'Sell_Date': sell_date,
+                'Ticker': ticker,
+                'Buy_Pr': round(buy_price, 2),
+                'Sell_Pr': round(sell_price, 2),
+                'Profit_%': round(profit_pct * 100, 2),
+                'Profit_VND': profit_vnd
+            })
+    except:
+        continue
+
+# 3. Kế toán tổng hợp sổ sách
+if len(trade_logs) > 0:
+    df_trades = pd.DataFrame(trade_logs)
+    df_trades = df_trades.sort_values('Buy_Date')
+    
+    total_trades = len(df_trades)
+    winning_trades = len(df_trades[df_trades['Profit_VND'] > 0])
+    win_rate = winning_trades / total_trades * 100
+    
+    total_profit = df_trades['Profit_VND'].sum()
+    final_capital = INITIAL_CAPITAL + total_profit
+    roi = (final_capital / INITIAL_CAPITAL - 1) * 100
+    
+    print(f"🎯 Tổng số lệnh đã đánh: {total_trades} lệnh")
+    print(f"🏆 Tỷ lệ thắng (Win-rate) thực tế: {win_rate:.1f}%")
+    print(f"💸 Phí & Thuế đã trừ: 0.3%/vòng")
+    print("-" * 50)
+    print(f"💵 VỐN BAN ĐẦU       : {INITIAL_CAPITAL:,.0f} VNĐ")
+    print(f"📈 TỔNG LÃI/LỖ RÒNG  : {total_profit:,.0f} VNĐ")
+    print(f"🏦 TỔNG TÀI SẢN (NAV): {final_capital:,.0f} VNĐ")
+    print(f"🚀 TỶ SUẤT LỢI NHUẬN (ROI): {roi:.2f}% so với đầu 2024")
+    
+    print("\n🔍 BẢNG KÊ 5 LỆNH GẦN NHẤT:")
+    print(df_trades[['Buy_Date', 'Sell_Date', 'Ticker', 'Profit_%', 'Profit_VND']].tail(5).to_string(index=False))
+else:
+    print("⚠️ Không có lệnh nào khớp điều kiện hoặc chưa đủ ngày chốt lời.")
