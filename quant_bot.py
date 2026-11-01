@@ -112,8 +112,11 @@ for c in stock_tickers:
 
 import xgboost as xgb
 
+import xgboost as xgb
+from sklearn.metrics import classification_report
+
 # ==========================================
-# 3. NHÚNG AI - HUẤN LUYỆN & SÁT HẠCH (BẢN XGBOOST)
+# 3. NHÚNG AI - HUẤN LUYỆN & SÁT HẠCH (BẢN XGBOOST SNIPER)
 # ==========================================
 print("3. Nâng cấp Não bộ AI (Nhúng La bàn VNINDEX & Động cơ XGBoost)...")
 
@@ -224,6 +227,14 @@ if not test_data.empty:
     for feature, imp in ranked_features:
         print(f" 🔹 {feature:<14}: {imp*100:>5.2f}%")
     print("="*50 + "\n")
+
+# 🟢 CHỐT ĐUÔI: ĐIỀN ĐIỂM SỐ ĐỂ XUẤT RA TELEGRAM (Không được xóa)
+ml_master['AI_Score'] = float('nan')
+valid_rows = ml_master[ml_features].notna().all(axis=1)
+if valid_rows.sum() > 0:
+    ml_master.loc[valid_rows, 'AI_Score'] = xgb_model.predict_proba(ml_master.loc[valid_rows, ml_features])[:, 1]
+
+ai_dict = {c: ml_master[ml_master['Ticker'] == c].set_index('Date')['AI_Score'] for c in stock_tickers}
 
 # ==========================================
 # 4. CHẠY BACKTEST (SỔ KẾ TOÁN)
