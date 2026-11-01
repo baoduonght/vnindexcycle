@@ -151,6 +151,39 @@ ml_features = ['Vol_Ratio', 'Dist_MA50', 'RSI', 'VN_MFI'] + z_cols
 print(f"📊 Tracking: Tổng {len(ml_master)} dòng dữ liệu thô ban đầu.")
 
 # ==========================================
+# 3. NHÚNG AI - HUẤN LUYỆN & CHẤM ĐIỂM (STRICT MODE)
+# ==========================================
+print("3. Tải dữ liệu Vĩ mô từ Yahoo & Đào tạo AI (Strict Mode - Không vay mượn dữ liệu)...")
+
+# 1. ĐỌC DỮ LIỆU VĨ MÔ TỪ FILE CSV
+try:
+    macro_df = pd.read_csv('global_markets_database10years.csv')
+    if 'Date' not in macro_df.columns:
+        raise ValueError("File CSV thiếu cột 'Date'.")
+        
+    macro_df = macro_df[['Date', 'DXY', 'US10Y']]
+    
+    # 🟢 FIX 1: Ép cưỡng chế DXY và US10Y về định dạng Số (Numeric).
+    # Xử lý triệt để lỗi đọc nhầm thành chữ khiến hàm rolling(120) bị NaN toàn tập
+    macro_df['DXY'] = pd.to_numeric(macro_df['DXY'], errors='coerce')
+    macro_df['US10Y'] = pd.to_numeric(macro_df['US10Y'], errors='coerce')
+    
+    # 🟢 FIX 2: X-Quang file CSV để kiểm tra độ dài và định dạng gốc
+    print(f"\n🔍 [CHẨN ĐOÁN CSV] - File Vĩ mô đang có {len(macro_df)} dòng.")
+    print(macro_df.head(3))
+    print("-" * 50)
+    
+    # Chốt chặn: Nếu file cào bị lỗi ít hơn 120 dòng -> Ngắt luôn từ đây
+    if len(macro_df) < 120:
+        sys.exit("❌ LỖI GỐC: File CSV vĩ mô quá ngắn (< 120 dòng). Không thể tính Z-Score. Hãy chạy lại file cào dữ liệu Yahoo!")
+        
+    # Ép chuẩn định dạng ngày 'YYYY-MM-DD' (tự động dịch lỗi ngày tháng nếu có)
+    macro_df['Date'] = pd.to_datetime(macro_df['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
+    macro_df = macro_df.sort_values('Date').reset_index(drop=True)
+except Exception as e:
+    sys.exit(f"🛑 LỖI VĨ MÔ YAHOO: {e}. Hãy kiểm tra file global_markets_database10years.csv!")
+
+# ==========================================
 # 4. HUẤN LUYỆN AI (HỌC TỪ DỮ LIỆU SẠCH 100%)
 # ==========================================
 # Lọc bỏ mọi dòng khuyết Feature hoặc Target để đảm bảo AI học chuẩn
