@@ -499,8 +499,6 @@ INITIAL_CAPITAL = 100_000_000
 MAX_SLOTS = 10
 SLOT_SIZE = INITIAL_CAPITAL / MAX_SLOTS 
 FEE_TAX = 0.003                         
-HARD_STOP_PCT = -0.10       # 🟢 NỚI LỎNG: Cắt lỗ cứng nếu âm 10% từ điểm mua để chống rũ nền
-TRAILING_STOP_PCT = 0.05    # Giữ nguyên: Chốt lời động nếu giá rơi 5% từ đỉnh cao nhất
 
 capital_slots = [pd.Timestamp('2000-01-01')] * MAX_SLOTS
 trade_logs = []
