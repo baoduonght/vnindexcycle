@@ -100,36 +100,43 @@ for c in stock_tickers:
 
 import sys
 
-# ==========================================
-# 3. NHÚNG AI - HUẤN LUYỆN & CHẤM ĐIỂM (STRICT MODE)
-# ==========================================
-print("3. Tải dữ liệu Vĩ mô từ Yahoo & Đào tạo AI (Strict Mode - Không vay mượn dữ liệu)...")
+import sys
 
-# 1. ĐỌC DỮ LIỆU VĨ MÔ
+# ==========================================
+# 3. NHÚNG AI - HUẤN LUYỆN & CHẤM ĐIỂM (MÀNG LỌC KÉP VN-US)
+# ==========================================
+print("3. Tải dữ liệu & Đào tạo AI (Chỉ chạy khi 100% ĐỒNG BỘ Data tươi từ VN và US)...")
+
+# 1. ĐỌC VÀ CHỐT LỊCH GIAO DỊCH MỸ (US)
 try:
     macro_df = pd.read_csv('global_markets_database10years.csv')
-    if 'Date' not in macro_df.columns:
-        raise ValueError("File CSV thiếu cột 'Date'.")
-        
     macro_df = macro_df[['Date', 'DXY', 'US10Y']]
-    macro_df['Date'] = pd.to_datetime(macro_df['Date']).dt.strftime('%Y-%m-%d')
+    
+    macro_df['DXY'] = pd.to_numeric(macro_df['DXY'], errors='coerce')
+    macro_df['US10Y'] = pd.to_numeric(macro_df['US10Y'], errors='coerce')
+    macro_df['Date'] = pd.to_datetime(macro_df['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
+    
+    # 🟢 MÀNG LỌC 1: Lấy danh sách các ngày thị trường Mỹ THỰC SỰ GIAO DỊCH
+    fresh_us_dates = macro_df.dropna(subset=['DXY', 'US10Y'])['Date'].tolist()
     macro_df = macro_df.sort_values('Date').reset_index(drop=True)
 except Exception as e:
-    sys.exit(f"🛑 LỖI VĨ MÔ YAHOO: {e}. Hãy kiểm tra file global_markets_database10years.csv!")
+    sys.exit(f"🛑 LỖI ĐỌC FILE VĨ MÔ: {e}")
 
-# 2. XỬ LÝ MFI VÀ Z-SCORE
+# 2. XỬ LÝ TOÁN HỌC (Z-SCORE)
 mfi_data = vnindex_df[['Date', 'VN_MFI']].copy()
 mfi_data['Date'] = pd.to_datetime(mfi_data['Date']).dt.strftime('%Y-%m-%d')
 
 macro_df = macro_df.merge(mfi_data, on='Date', how='left')
-macro_df['VN_MFI'] = macro_df['VN_MFI'].ffill() # Cùng hệ quy chiếu VNINDEX nên ffill an toàn
+macro_df['VN_MFI'] = macro_df['VN_MFI'].ffill()
 
 macro_cols = ['DXY', 'US10Y']
 for col in macro_cols:
+    # Ffill tạm thời HẬU TRƯỜNG để hàm rolling có số liệu tính toán trung bình
+    macro_df[col] = macro_df[col].ffill()
     macro_df[f'Z_{col}'] = (macro_df[col] - macro_df[col].rolling(120).mean()) / macro_df[col].rolling(120).std()
 z_cols = [f'Z_{c}' for c in macro_cols]
 
-# 3. TẠO FEATURES CỔ PHIẾU
+# 3. TẠO FEATURES CỔ PHIẾU (VN)
 df_ml_list = []
 clean_dates = pd.to_datetime(stocks_close.index).strftime('%Y-%m-%d')
 
@@ -140,7 +147,6 @@ for c in stock_tickers:
     df_c['Dist_MA50'] = (stocks_close[c] / stocks_ma50[c]).values
     df_c['RSI'] = calc_rsi(stocks_close[c]).values
     
-    # Target: Tăng > 2% sau 10 phiên
     future_return = stocks_close[c].shift(-10) / stocks_close[c] - 1
     df_c['Target'] = (future_return > 0.02).astype(int).values
     df_ml_list.append(df_c)
@@ -148,41 +154,44 @@ for c in stock_tickers:
 concat_df = pd.concat(df_ml_list)
 ml_master = concat_df.merge(macro_df, on='Date', how='left')
 ml_features = ['Vol_Ratio', 'Dist_MA50', 'RSI', 'VN_MFI'] + z_cols
-print(f"📊 Tracking: Tổng {len(ml_master)} dòng dữ liệu thô ban đầu.")
 
 # ==========================================
-# 3. NHÚNG AI - HUẤN LUYỆN & CHẤM ĐIỂM (STRICT MODE)
+# 🟢 KÍCH HOẠT MÀNG LỌC KÉP TRƯỚC KHI CHO AI HỌC
 # ==========================================
-print("3. Tải dữ liệu Vĩ mô từ Yahoo & Đào tạo AI (Strict Mode - Không vay mượn dữ liệu)...")
+# 1. Đá văng những ngày Mỹ nghỉ lễ (Thiếu Data US)
+ml_master = ml_master[ml_master['Date'].isin(fresh_us_dates)]
 
-# 1. ĐỌC DỮ LIỆU VĨ MÔ TỪ FILE CSV
-try:
-    macro_df = pd.read_csv('global_markets_database10years.csv')
-    if 'Date' not in macro_df.columns:
-        raise ValueError("File CSV thiếu cột 'Date'.")
-        
-    macro_df = macro_df[['Date', 'DXY', 'US10Y']]
-    
-    # 🟢 FIX 1: Ép cưỡng chế DXY và US10Y về định dạng Số (Numeric).
-    # Xử lý triệt để lỗi đọc nhầm thành chữ khiến hàm rolling(120) bị NaN toàn tập
-    macro_df['DXY'] = pd.to_numeric(macro_df['DXY'], errors='coerce')
-    macro_df['US10Y'] = pd.to_numeric(macro_df['US10Y'], errors='coerce')
-    
-    # 🟢 FIX 2: X-Quang file CSV để kiểm tra độ dài và định dạng gốc
-    print(f"\n🔍 [CHẨN ĐOÁN CSV] - File Vĩ mô đang có {len(macro_df)} dòng.")
-    print(macro_df.head(3))
-    print("-" * 50)
-    
-    # Chốt chặn: Nếu file cào bị lỗi ít hơn 120 dòng -> Ngắt luôn từ đây
-    if len(macro_df) < 120:
-        sys.exit("❌ LỖI GỐC: File CSV vĩ mô quá ngắn (< 120 dòng). Không thể tính Z-Score. Hãy chạy lại file cào dữ liệu Yahoo!")
-        
-    # Ép chuẩn định dạng ngày 'YYYY-MM-DD' (tự động dịch lỗi ngày tháng nếu có)
-    macro_df['Date'] = pd.to_datetime(macro_df['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
-    macro_df = macro_df.sort_values('Date').reset_index(drop=True)
-except Exception as e:
-    sys.exit(f"🛑 LỖI VĨ MÔ YAHOO: {e}. Hãy kiểm tra file global_markets_database10years.csv!")
+# 2. Đá văng những ngày API Việt Nam bị lỗi, trả về NaN ở Volume/RSI (Thiếu Data VN)
+# Chỉ giữ lại bảng dữ liệu "Siêu Sạch" (Hoàn hảo 100% chỉ báo của CẢ 2 THỊ TRƯỜNG)
+ml_master_clean = ml_master.dropna(subset=ml_features).copy()
 
+if ml_master_clean.empty:
+    sys.exit("⚠️ LỖI ĐỒNG BỘ: Cả Mỹ và VN đều không đủ Data sạch. Bot buộc phải đứng ngoài!")
+
+# 4. HUẤN LUYỆN AI (HỌC TỪ DATA THẬT 100%)
+# Dùng bảng Siêu Sạch để học, chỉ cần lọc thêm Target bị khuyết (do T+10 của ngày hiện tại)
+train_data = ml_master_clean.dropna(subset=['Target'])
+train_data = train_data[train_data['Date'] < '2024-01-01']
+
+X_train = train_data[ml_features]
+y_train = train_data['Target']
+
+if len(X_train) == 0:
+    sys.exit("❌ LỖI TRÍ MẠNG: Tập X_train rỗng. Hãy kiểm tra lại API TradingView và CSV.")
+
+from sklearn.ensemble import RandomForestClassifier
+rf_model = RandomForestClassifier(n_estimators=100, max_depth=6, class_weight='balanced', random_state=42)
+rf_model.fit(X_train, y_train)
+print(f"✅ AI đã học xong từ {len(X_train)} dòng dữ liệu ĐỒNG BỘ CHUẨN MỰC của cả VN và US!")
+
+# 5. XUẤT TÍN HIỆU
+# Chỉ chấm điểm AI cho những ngày vượt qua được màng lọc kép
+ml_master_clean['AI_Score'] = rf_model.predict_proba(ml_master_clean[ml_features])[:, 1]
+
+# Ghép điểm AI trở lại bảng gốc. 
+# Nếu mã cổ phiếu nào hôm nay bị khuyết VN Data hoặc US Data -> Nhận giá trị NaN -> KHÔNG MUA BÁN.
+ml_master = ml_master.merge(ml_master_clean[['Date', 'Ticker', 'AI_Score']], on=['Date', 'Ticker'], how='left')
+ai_dict = {c: ml_master[ml_master['Ticker'] == c].set_index('Date')['AI_Score'] for c in stock_tickers}
 # ==========================================
 # 4. HUẤN LUYỆN AI (HỌC TỪ DỮ LIỆU SẠCH 100%)
 # ==========================================
