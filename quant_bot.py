@@ -567,7 +567,7 @@ for idx, row in buy_signals.iterrows():
             if current_return <= HARD_STOP_PCT:
                 sell_idx = check_idx
                 sell_price = current_price
-                sell_reason = "Cắt lỗ cứng (-2%)"
+                sell_reason = "Cắt lỗ cứng (-10%)"
                 break
                 
             # ĐIỀU KIỆN 2: Thị trường chung đảo chiều gãy MA50 -> Xả hàng chạy ngay
