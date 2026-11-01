@@ -541,28 +541,28 @@ for idx, row in buy_signals.iterrows():
         continue
 
 # ==========================================
-# 5. MÔ PHỎNG THỰC CHIẾN 100 TRIỆU (GIỚI HẠN CỨNG 5 SLOT CỔ PHIẾU)
+# 5. MÔ PHỎNG THỰC CHIẾN (CÓ CẮT LỖ SỚM -3% & NHỒI LÃI KÉP)
 # ==========================================
 print("\n" + "="*50)
-print("💰 MÔ PHỎNG ĐÁNH THỰC CHIẾN VỚI 100 TRIỆU (MAX 5 MÃ - TỪ 01/2024)")
+print("💰 MÔ PHỎNG THỰC CHIẾN: LÃI KÉP + CẮT LỖ TỰ ĐỘNG (-3%)")
 print("="*50)
 
-# 1. Lấy lại các lệnh báo MUA từ hệ thống Sniper và SẮP XẾP THEO THỜI GIAN
 sim_data = test_data.copy()
 sim_data['AI_Score'] = xgb_model.predict_proba(sim_data[ml_features])[:, 1]
 buy_signals = sim_data[sim_data['AI_Score'] >= 0.75].copy()
-buy_signals = buy_signals.sort_values('Date') # Rất quan trọng: Xếp theo thời gian để mua lần lượt
+buy_signals = buy_signals.sort_values('Date') 
 
-# 2. Cài đặt luật chơi khắt khe
+# Luật chơi khắt khe & Tối ưu
 INITIAL_CAPITAL = 100_000_000
 MAX_SLOTS = 5
-SLOT_SIZE = INITIAL_CAPITAL / MAX_SLOTS # 20 củ / 1 slot
-HOLD_DAYS = 15                          # Khớp với T+15
-FEE_TAX = 0.003                         # 0.3% phí + thuế
+HOLD_DAYS = 15                          
+FEE_TAX = 0.003                         # 0.3% phí + thuế mỗi vòng
+STOP_LOSS_PCT = -0.03                   # Kích hoạt cắt lỗ nếu âm >= 3%
 
-# Quản lý 5 slot vốn (Lưu giữ ngày tiền về tài khoản)
-# Ngày khởi tạo đặt ở quá khứ để mặc định 5 slot đều có sẵn tiền
-capital_slots = [pd.Timestamp('2000-01-01')] * MAX_SLOTS
+# Quản lý 5 Slot vốn độc lập (Lịch sử ngày tiền về & Số tiền hiện có của từng Slot)
+capital_dates = [pd.Timestamp('2000-01-01')] * MAX_SLOTS
+capital_amounts = [INITIAL_CAPITAL / MAX_SLOTS] * MAX_SLOTS 
+
 trade_logs = []
 
 for idx, row in buy_signals.iterrows():
@@ -570,40 +570,68 @@ for idx, row in buy_signals.iterrows():
     buy_date = pd.to_datetime(row['Date'])
     
     try:
-        # Kiểm tra xem có Slot vốn nào đang rảnh vào ngày Buy_Date không
         available_slot_idx = -1
         for i in range(MAX_SLOTS):
-            if capital_slots[i] <= buy_date:
+            if capital_dates[i] <= buy_date:
                 available_slot_idx = i
-                break # Tiền rảnh, lấy luôn slot này!
+                break 
                 
-        # NẾU KHÔNG CÓ TIỀN (FULL 5 SLOT) -> ĐỨNG NHÌN, BỎ QUA KÈO NÀY
+        # Bỏ qua nếu full cả 5 slot
         if available_slot_idx == -1:
             continue
             
         buy_idx = stocks_close.index.get_loc(buy_date.strftime('%Y-%m-%d'))
+        buy_price = stocks_close[ticker].iloc[buy_idx]
         
-        # Chỉ tính lệnh nếu đủ ngày chốt
-        if buy_idx + HOLD_DAYS < len(stocks_close):
-            buy_price = stocks_close[ticker].iloc[buy_idx]
-            sell_price = stocks_close[ticker].iloc[buy_idx + HOLD_DAYS]
-            sell_date = stocks_close.index[buy_idx + HOLD_DAYS]
+        sell_idx = -1
+        sell_price = 0
+        is_cut_loss = False
+        
+        # 🟢 LÕI CẮT LỖ: Quét từng ngày từ T+1 đến T+15
+        for day_offset in range(1, HOLD_DAYS + 1):
+            check_idx = buy_idx + day_offset
+            if check_idx >= len(stocks_close):
+                break
+                
+            check_price = stocks_close[ticker].iloc[check_idx]
+            current_return = (check_price / buy_price) - 1
             
-            # Đóng băng khe tiền này lại đến đúng ngày Sell_Date mới được mua tiếp
-            capital_slots[available_slot_idx] = pd.to_datetime(sell_date)
-            
-            profit_pct = (sell_price / buy_price) - 1 - FEE_TAX
-            profit_vnd = SLOT_SIZE * profit_pct
-            
-            trade_logs.append({
-                'Buy_Date': buy_date.strftime('%Y-%m-%d'),
-                'Sell_Date': sell_date.strftime('%Y-%m-%d'),
-                'Ticker': ticker,
-                'Buy_Pr': round(buy_price, 2),
-                'Sell_Pr': round(sell_price, 2),
-                'Profit_%': round(profit_pct * 100, 2),
-                'Profit_VND': profit_vnd
-            })
+            if current_return <= STOP_LOSS_PCT:
+                # Trảm ngay lập tức tại ngày vi phạm
+                sell_idx = check_idx
+                sell_price = check_price
+                is_cut_loss = True
+                break
+                
+        # Nếu sống sót qua T+15 mà không bị cắt lỗ thì chốt lời/lỗ theo đúng hạn
+        if not is_cut_loss:
+            sell_idx = buy_idx + HOLD_DAYS
+            if sell_idx < len(stocks_close):
+                sell_price = stocks_close[ticker].iloc[sell_idx]
+            else:
+                continue # Chưa đủ ngày dữ liệu thực tế
+                
+        sell_date = stocks_close.index[sell_idx]
+        
+        # 🟢 LÕI LÃI KÉP: Tính toán tiền thực tế trên số vốn của khe đang dùng
+        profit_pct = (sell_price / buy_price) - 1 - FEE_TAX
+        current_slot_money = capital_amounts[available_slot_idx]
+        profit_vnd = current_slot_money * profit_pct
+        
+        # Cộng dồn lãi/lỗ vào đúng khe tiền đó (Compound)
+        capital_amounts[available_slot_idx] = current_slot_money + profit_vnd
+        # Cập nhật ngày tiền nhả ra
+        capital_dates[available_slot_idx] = pd.to_datetime(sell_date)
+        
+        trade_logs.append({
+            'Buy_Date': buy_date.strftime('%Y-%m-%d'),
+            'Sell_Date': sell_date.strftime('%Y-%m-%d'),
+            'Ticker': ticker,
+            'Slot': available_slot_idx + 1,
+            'Type': 'CUT LOSS' if is_cut_loss else 'HOLD',
+            'Profit_%': round(profit_pct * 100, 2),
+            'Profit_VND': profit_vnd
+        })
     except:
         continue
 
@@ -615,20 +643,20 @@ if len(trade_logs) > 0:
     winning_trades = len(df_trades[df_trades['Profit_VND'] > 0])
     win_rate = winning_trades / total_trades * 100 if total_trades > 0 else 0
     
-    total_profit = df_trades['Profit_VND'].sum()
-    final_capital = INITIAL_CAPITAL + total_profit
+    final_capital = sum(capital_amounts)
+    total_profit = final_capital - INITIAL_CAPITAL
     roi = (final_capital / INITIAL_CAPITAL - 1) * 100
     
-    print(f"🎯 Tổng số lệnh đã ĐƯỢC MUA (sau khi lọc vốn): {total_trades} lệnh")
-    print(f"🏆 Tỷ lệ thắng (Win-rate) thực tế: {win_rate:.1f}%")
-    print(f"💸 Phí & Thuế đã trừ: 0.3%/vòng")
+    print(f"🎯 Tổng số lệnh đã được đánh: {total_trades} lệnh (Tăng vòng quay vốn nhờ cắt sớm)")
+    print(f"🏆 Tỷ lệ lệnh có lãi: {win_rate:.1f}%")
+    print(f"🛡 Đã kích hoạt cắt lỗ sớm (-3%): {len(df_trades[df_trades['Type'] == 'CUT LOSS'])} lệnh")
     print("-" * 50)
     print(f"💵 VỐN BAN ĐẦU       : {INITIAL_CAPITAL:,.0f} VNĐ")
     print(f"📈 TỔNG LÃI/LỖ RÒNG  : {total_profit:,.0f} VNĐ")
     print(f"🏦 TỔNG TÀI SẢN (NAV): {final_capital:,.0f} VNĐ")
     print(f"🚀 TỶ SUẤT LỢI NHUẬN (ROI): {roi:.2f}% so với đầu 2024")
     
-    print("\n🔍 BẢNG KÊ 5 LỆNH GẦN NHẤT:")
-    print(df_trades[['Buy_Date', 'Sell_Date', 'Ticker', 'Profit_%', 'Profit_VND']].tail(5).to_string(index=False))
+    print("\n🔍 LỊCH SỬ 10 LỆNH GẦN NHẤT:")
+    print(df_trades[['Buy_Date', 'Sell_Date', 'Ticker', 'Type', 'Profit_%', 'Profit_VND']].tail(10).to_string(index=False))
 else:
     print("⚠️ Không có lệnh nào được khớp điều kiện.")
