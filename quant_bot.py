@@ -473,10 +473,10 @@ for idx, row in buy_signals.iterrows():
     except:
         continue
 # ==========================================
-# 5. MÔ PHỎNG P&L: GỒNG LÃI THEO XU HƯỚNG (TRAILING STOP & MARKET EXIT)
+# 5. MÔ PHỎNG P&L: GỒNG LÃI THEO XU HƯỚNG (CẮT LỖ -10%)
 # ==========================================
 print("\n" + "="*50)
-print("🛡 MÔ PHỎNG P&L: GỒNG LÃI THEO XU HƯỚNG & CẮT LỖ ĐỘNG")
+print("🛡 MÔ PHỎNG P&L: GỒNG LÃI XU HƯỚNG & CẮT LỖ MỞ RỘNG -10%")
 print("="*50)
 
 if 'MA50' not in vnindex_df.columns:
@@ -499,8 +499,8 @@ INITIAL_CAPITAL = 100_000_000
 MAX_SLOTS = 5
 SLOT_SIZE = INITIAL_CAPITAL / MAX_SLOTS 
 FEE_TAX = 0.003                         
-HARD_STOP_PCT = -0.04       # 1. Cắt lỗ cứng nếu âm 4% từ điểm mua (bảo vệ vốn ban đầu)
-TRAILING_STOP_PCT = 0.05    # 2. Chốt lời động nếu giá rơi 5% từ đỉnh cao nhất đã đạt được
+HARD_STOP_PCT = -0.10       # 🟢 NỚI LỎNG: Cắt lỗ cứng nếu âm 10% từ điểm mua để chống rũ nền
+TRAILING_STOP_PCT = 0.05    # Giữ nguyên: Chốt lời động nếu giá rơi 5% từ đỉnh cao nhất
 
 capital_slots = [pd.Timestamp('2000-01-01')] * MAX_SLOTS
 trade_logs = []
@@ -538,7 +538,7 @@ for idx, row in buy_signals.iterrows():
         sell_price = 0
         sell_reason = ""
         
-        # 🟢 VÒNG LẶP GỒNG LÃI: Quét từng ngày sau khi mua (Tối đa 120 phiên ~ 6 tháng)
+        # 🟢 VÒNG LẶP GỒNG LÃI: Quét từng ngày sau khi mua (Tối đa 120 phiên)
         for day_offset in range(1, 120):
             check_idx = buy_idx + day_offset
             if check_idx >= len(stocks_close):
@@ -550,41 +550,38 @@ for idx, row in buy_signals.iterrows():
             current_date_str = stocks_close.index[check_idx].strftime('%Y-%m-%d')
             current_price = stocks_close[ticker].iloc[check_idx]
             
-            # Cập nhật đỉnh giá mới để tính Trailing Stop
             if current_price > highest_price:
                 highest_price = current_price
                 
-            # Lấy VNINDEX của ngày hôm đó
             try:
                 vn_today = vn_trend_idx.loc[current_date_str, 'VNINDEX']
                 ma50_today = vn_trend_idx.loc[current_date_str, 'MA50']
             except:
-                vn_today, ma50_today = 10000, 0 # Safe fallback
+                vn_today, ma50_today = 10000, 0 
                 
             current_return = (current_price / buy_price) - 1
             
-            # ĐIỀU KIỆN 1: Cắt lỗ cứng (Sai thời điểm, rớt 4% cắt ngay)
+            # ĐIỀU KIỆN 1: Cắt lỗ cứng -10% (Chấp nhận rung lắc mạnh)
             if current_return <= HARD_STOP_PCT:
                 sell_idx = check_idx
                 sell_price = current_price
-                sell_reason = "Cắt lỗ cứng (-20%)"
+                sell_reason = "Cắt lỗ cứng (-10%)"
                 break
                 
-            # ĐIỀU KIỆN 2: Thị trường chung đảo chiều gãy MA50 -> Xả hàng chạy ngay
+            # ĐIỀU KIỆN 2: Thị trường chung đảo chiều gãy MA50
             if pd.notna(vn_today) and pd.notna(ma50_today) and vn_today < ma50_today:
                 sell_idx = check_idx
                 sell_price = current_price
                 sell_reason = "VNINDEX gãy MA50"
                 break
                 
-            # ĐIỀU KIỆN 3: Cổ phiếu suy yếu, quay đầu rớt 5% từ đỉnh cao nhất
+            # ĐIỀU KIỆN 3: Cổ phiếu quay đầu rớt 5% từ đỉnh
             if current_price <= highest_price * (1 - TRAILING_STOP_PCT):
                 sell_idx = check_idx
                 sell_price = current_price
                 sell_reason = "Trailing Stop (Đảo chiều)"
                 break
                 
-        # Nếu gồng qua 120 ngày chưa chạm tín hiệu bán -> Ép chốt sổ
         if sell_idx == -1:
             sell_idx = buy_idx + 119
             if sell_idx >= len(stocks_close): sell_idx = len(stocks_close) - 1
