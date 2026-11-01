@@ -99,102 +99,92 @@ for c in stock_tickers:
     stocks_rsi[c] = calc_rsi(stocks_close[c])
 
 # ==========================================
-# 3. NHÚNG AI - HUẤN LUYỆN RANDOM FOREST
+# 3. NHÚNG AI - HUẤN LUYỆN RANDOM FOREST (BẢN FIX TẬN GỐC)
 # ==========================================
-print("3. Tải dữ liệu Vĩ mô & Đào tạo AI nhận diện Bull Trap (Bản Pure Data)...")
+print("3. Tải dữ liệu Vĩ mô từ Yahoo (CSV) & Đào tạo AI nhận diện Bull Trap...")
 
-# ĐỌC TRỰC TIẾP TỪ FILE CSV VĨ MÔ ĐÃ LƯU
+# 1. KIỂM TRA VÀ ĐỌC FILE VĨ MÔ YAHOO
 try:
     macro_df = pd.read_csv('global_markets_database10years.csv')
+    if 'Date' not in macro_df.columns:
+        raise ValueError("File CSV thiếu cột 'Date' chuẩn!")
+        
     macro_df = macro_df[['Date', 'DXY', 'US10Y']]
-    
-    # 🟢 Ép Date về chuẩn String 'YYYY-MM-DD' để ghép bảng khớp 100%
     macro_df['Date'] = pd.to_datetime(macro_df['Date']).dt.strftime('%Y-%m-%d')
     macro_df = macro_df.sort_values('Date').reset_index(drop=True)
-except FileNotFoundError:
-    print("⚠️ Không tìm thấy file CSV vĩ mô. Vui lòng kiểm tra lại bước cào dữ liệu!")
-    macro_df = pd.DataFrame()
+except Exception as e:
+    print(f"❌ LỖI ĐỌC FILE VĨ MÔ YAHOO: {e}")
+    raise e # Ép bot dừng hẳn để bác phải đi kiểm tra lại file nguồn
 
-if not macro_df.empty:
-    # Gộp dòng tiền MFI vào Vĩ mô (Ép chuẩn thời gian tương tự)
-    mfi_data = vnindex_df[['Date', 'VN_MFI']].copy()
-    mfi_data['Date'] = pd.to_datetime(mfi_data['Date']).dt.strftime('%Y-%m-%d')
+# 2. XỬ LÝ DÒNG TIỀN MFI VÀ Z-SCORE CHO VĨ MÔ
+mfi_data = vnindex_df[['Date', 'VN_MFI']].copy()
+mfi_data['Date'] = pd.to_datetime(mfi_data['Date']).dt.strftime('%Y-%m-%d')
+
+macro_df = macro_df.merge(mfi_data, on='Date', how='left')
+macro_df['VN_MFI'] = macro_df['VN_MFI'].ffill()
+
+macro_cols = ['DXY', 'US10Y']
+for col in macro_cols:
+    # Tính Z-Score so với MA 120 phiên
+    macro_df[f'Z_{col}'] = (macro_df[col] - macro_df[col].rolling(120).mean()) / macro_df[col].rolling(120).std()
+z_cols = [f'Z_{c}' for c in macro_cols]
+
+# 3. TẠO TẬP DỮ LIỆU CỔ PHIẾU (FEATURES)
+df_ml_list = []
+clean_dates = pd.to_datetime(stocks_close.index).strftime('%Y-%m-%d')
+
+for c in stock_tickers:
+    df_c = pd.DataFrame({'Date': clean_dates})
+    df_c['Ticker'] = c
+    df_c['Vol_Ratio'] = (stocks_volume[f'{c}_V'] / stocks_vol_ma20[f'{c}_V']).values
+    df_c['Dist_MA50'] = (stocks_close[c] / stocks_ma50[c]).values
+    df_c['RSI'] = calc_rsi(stocks_close[c]).values
     
-    macro_df = macro_df.merge(mfi_data, on='Date', how='left')
-    # VN_MFI lấy từ VNINDEX nên lấp đầy (ffill) ở đây là an toàn vì cùng lịch VN
-    macro_df['VN_MFI'] = macro_df['VN_MFI'].ffill()
+    # Target: Kỳ vọng lợi nhuận > 2% sau 10 phiên (T+10)
+    future_return = stocks_close[c].shift(-10) / stocks_close[c] - 1
+    df_c['Target'] = (future_return > 0.02).astype(int).values
+    df_ml_list.append(df_c)
 
-    # CHUẨN HÓA Z-SCORE CHO VĨ MÔ (Tính độ lệch so với MA 120 phiên)
-    macro_cols = ['DXY', 'US10Y']
-    for col in macro_cols:
-        macro_df[f'Z_{col}'] = (macro_df[col] - macro_df[col].rolling(120).mean()) / macro_df[col].rolling(120).std()
-    z_cols = [f'Z_{c}' for c in macro_cols]
+concat_df = pd.concat(df_ml_list)
 
-    # ==========================================
-    # GÁN NHÃN VÀ HỢP NHẤT DỮ LIỆU CHỨNG KHOÁN
-    # ==========================================
-    df_ml_list = []
-    
-    # 🟢 Ép lịch chứng khoán VN về chuẩn String 'YYYY-MM-DD'
-    clean_dates = pd.to_datetime(stocks_close.index).strftime('%Y-%m-%d')
+# 4. HỢP NHẤT VÀ KIỂM TRA SỨC KHỎE DỮ LIỆU (DATA INTEGRITY CHECK)
+ml_master = concat_df.merge(macro_df, on='Date', how='left')
 
-    for c in stock_tickers:
-        df_c = pd.DataFrame({'Date': clean_dates})
-        df_c['Ticker'] = c
-        df_c['Vol_Ratio'] = (stocks_volume[f'{c}_V'] / stocks_vol_ma20[f'{c}_V']).values
-        df_c['Dist_MA50'] = (stocks_close[c] / stocks_ma50[c]).values
-        df_c['RSI'] = calc_rsi(stocks_close[c]).values
-        
-        # Target: Kỳ vọng lợi nhuận > 2% sau 10 phiên (T+10)
-        future_return = stocks_close[c].shift(-10) / stocks_close[c] - 1
-        df_c['Target'] = (future_return > 0.02).astype(int).values
-        df_ml_list.append(df_c)
+print(f"📊 Tracking dữ liệu: Tổng số dòng trước khi kiểm tra = {len(ml_master)}")
 
-    # Gộp tất cả mã cổ phiếu lại
-    concat_df = pd.concat(df_ml_list)
-    
-    # Ghép (Merge) bảng cổ phiếu với bảng vĩ mô. 
-    # how='left' giúp tự động loại bỏ các ngày VN nghỉ lễ trong bảng macro_df
-    ml_master = concat_df.merge(macro_df, on='Date', how='left')
-    
-    print(f"📊 Tracking dữ liệu: Có {len(ml_master)} dòng trước khi dọn rác...")
-    
-    # DỌN RÁC KHẮT KHE (PURE DATA): 
-    # Lệnh này sẽ chém bay: 
-    # 1. Những ngày VN giao dịch nhưng Mỹ nghỉ lễ (DXY trống)
-    # 2. 120 ngày đầu tiên bị trống do tính rolling Z-Score và 10 ngày cuối do tính Target T+10
-    ml_master = ml_master.dropna()
-    print(f"📊 Tracking dữ liệu: Còn lại {len(ml_master)} dòng SẠCH 100% sau khi dọn rác!")
+# Khám bệnh nghiêm ngặt: In ra số lượng NaN của từng cột để kiểm tra xem API/File có bị thủng không
+missing_counts = ml_master.isna().sum()
+print("🔍 Kiểm tra số lượng giá trị trống (NaN) theo từng cột:")
+print(missing_counts)
 
-    ml_features = ['Vol_Ratio', 'Dist_MA50', 'RSI', 'VN_MFI'] + z_cols
+# LỌC SẠCH DỮ LIỆU THẬT (Pure Data): 
+# Chỉ loại bỏ những dòng bị thiếu dữ liệu thực sự, không lấp đầy ảo.
+# Lưu ý: Các dòng cuối cùng của bảng (phiên hiện tại) bị khuyết 'Target' do tính T+10 
+# sẽ được tách riêng ra để dự đoán, không bị xóa nhầm ở bước này.
+ml_master_clean = ml_master.dropna(subset=['Vol_Ratio', 'Dist_MA50', 'RSI', 'VN_MFI', 'Z_DXY', 'Z_US10Y'])
+print(f"📊 Tracking dữ liệu: Còn lại {len(ml_master_clean)} dòng sạch hoàn toàn sau khi lọc!")
 
-    # ==========================================
-    # HUẤN LUYỆN AI (TRAINING)
-    # ==========================================
-    # Phân tách tập Train (Học từ 2014 đến 2023)
-    X_train = ml_master[ml_master['Date'] < '2024-01-01'][ml_features]
-    y_train = ml_master[ml_master['Date'] < '2024-01-01']['Target']
+ml_features = ['Vol_Ratio', 'Dist_MA50', 'RSI', 'VN_MFI'] + z_cols
 
-    # Chốt chặn an toàn: Kiểm tra xem tập Train có bị rỗng không
-    if len(X_train) == 0:
-        print("❌ LỖI NGHIÊM TRỌNG: Tập X_train trống rỗng! Hãy kiểm tra lại file CSV!")
-    else:
-        from sklearn.ensemble import RandomForestClassifier
-        # Khởi tạo thuật toán AI
-        rf_model = RandomForestClassifier(n_estimators=100, max_depth=6, class_weight='balanced', random_state=42)
-        
-        print("Đang nạp dữ liệu vào mạng nơ-ron Random Forest...")
-        rf_model.fit(X_train, y_train)
-        print("✅ AI đã hoàn tất quá trình huấn luyện từ dữ liệu thực thật!")
+# 5. HUẤN LUYỆN AI (TRAINING TRÊN DỮ LIỆU CHUẨN TỪ 2014 ĐẾN 2023)
+train_data = ml_master_clean[ml_master_clean['Date'] < '2024-01-01']
+X_train = train_data[ml_features]
+y_train = train_data['Target']
 
-        # ==========================================
-        # CHẤM ĐIỂM DỮ LIỆU HIỆN TẠI (PREDICT)
-        # ==========================================
-        # Chấm điểm xác suất tăng giá cho toàn bộ lịch sử
-        ml_master['AI_Score'] = rf_model.predict_proba(ml_master[ml_features])[:, 1]
-        
-        # Trích xuất điểm AI của từng mã cổ phiếu để đưa sang Bước 4 (df_trade_log)
-        ai_dict = {c: ml_master[ml_master['Ticker'] == c].set_index('Date')['AI_Score'] for c in stock_tickers}
+if len(X_train) == 0:
+    raise ValueError("❌ LỖI TRÍ MẠNG: Tập X_train hoàn toàn trống rỗng! Dữ liệu vĩ mô hoặc chứng khoán không khớp ngày tháng.")
+
+from sklearn.ensemble import RandomForestClassifier
+rf_model = RandomForestClassifier(n_estimators=100, max_depth=6, class_weight='balanced', random_state=42)
+
+print("Đang huấn luyện mô hình Random Forest...")
+rf_model.fit(X_train, y_train)
+print("✅ AI đã huấn luyện thành công!")
+
+# 6. CHẤM ĐIỂM TOÀN BỘ BẢNG (KỂ CẢ PHIÊN HIỆN TẠI ĐỂ XUẤT TÍN HIỆU)
+# Dùng bảng ml_master gốc (chỉ cần các cột feature không bị thiếu) để chấm điểm ngày mới nhất
+ml_master['AI_Score'] = rf_model.predict_proba(ml_master[ml_features])[:, 1]
+ai_dict = {c: ml_master[ml_master['Ticker'] == c].set_index('Date')['AI_Score'] for c in stock_tickers}
 
 # ==========================================
 # 4. CHẠY BACKTEST (TÍCH HỢP AI CHẤM ĐIỂM)
