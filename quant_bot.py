@@ -474,35 +474,56 @@ for idx, row in buy_signals.iterrows():
         continue
 
 # ==========================================
-# 5. MÔ PHỎNG THỰC CHIẾN 100 TRIỆU (CẮT LỖ SỚM -3%)
+# 5. MÔ PHỎNG P&L: BỘ LỌC THÉP VNINDEX (MA50) & Z_DXY
 # ==========================================
 print("\n" + "="*50)
-print("💰 MÔ PHỎNG THỰC CHIẾN TỪ 01/2024: MAX 5 SLOT & CẮT LỖ -3%")
+print("🛡 MÔ PHỎNG THỰC CHIẾN TỪ 01/2024: LỌC CỨNG XU HƯỚNG VNINDEX")
 print("="*50)
 
-# Lấy tín hiệu mua và sắp xếp theo ngày
+# 1. Bổ sung chỉ báo MA50 cho VNINDEX
+if 'MA50' not in vnindex_df.columns:
+    vnindex_df['MA50'] = vnindex_df['VNINDEX'].rolling(50).mean()
+
+# 2. Chuẩn bị dữ liệu kiểm định
 sim_data = test_data.copy()
 sim_data['AI_Score'] = xgb_model.predict_proba(sim_data[ml_features])[:, 1]
-buy_signals = sim_data[sim_data['AI_Score'] >= 0.75].copy()
-buy_signals = buy_signals.sort_values('Date') 
 
-# Cấu hình vốn và luật cắt lỗ
+# Ghép VNINDEX và MA50 vào tập mô phỏng
+vn_trend = vnindex_df[['Date', 'VNINDEX', 'MA50']].copy()
+vn_trend['Date'] = pd.to_datetime(vn_trend['Date']).dt.strftime('%Y-%m-%d')
+sim_data = sim_data.merge(vn_trend, on='Date', how='left')
+
+# Lọc các tín hiệu AI > 0.75
+buy_signals = sim_data[sim_data['AI_Score'] >= 0.75].copy()
+buy_signals = buy_signals.sort_values('Date')
+
+# Cấu hình Vốn & Luật chơi
 INITIAL_CAPITAL = 100_000_000
 MAX_SLOTS = 5
-SLOT_SIZE = INITIAL_CAPITAL / MAX_SLOTS 
-HOLD_DAYS = 15                          
-FEE_TAX = 0.003                         
-STOP_LOSS_PCT = -0.07 # Kích hoạt bán ngay nếu chạm -3%
+SLOT_SIZE = INITIAL_CAPITAL / MAX_SLOTS # 20 triệu / 1 slot
+HOLD_DAYS = 15                          # Giữ T+15
+FEE_TAX = 0.003                         # 0.3% phí + thuế
 
-# Quản lý Slot vốn (Ngày tiền về)
 capital_slots = [pd.Timestamp('2000-01-01')] * MAX_SLOTS
 trade_logs = []
+blocked_by_market_count = 0
 
 for idx, row in buy_signals.iterrows():
     ticker = row['Ticker']
     buy_date = pd.to_datetime(row['Date'])
     
+    # 🔴 LUẬT THÉP VĨ MÔ & XU HƯỚNG CHUNG
+    vn_price = row.get('VNINDEX', 0)
+    vn_ma50 = row.get('MA50', 0)
+    z_dxy = row.get('Z_DXY', 0)
+    
+    # ĐIỀU KIỆN PHONG TỎA: VNINDEX thủng MA50 HOẶC DXY quá nóng (Z_DXY > 1.0)
+    if (pd.notna(vn_price) and pd.notna(vn_ma50) and vn_price < vn_ma50) or (pd.notna(z_dxy) and z_dxy > 1.0):
+        blocked_by_market_count += 1
+        continue # PHONG TỎA TÀI KHOẢN - TỪ CHỐI MUA TOÀN BỘ RỔ VN30 HÔM NAY!
+
     try:
+        # Kiểm tra slot vốn trống
         available_slot_idx = -1
         for i in range(MAX_SLOTS):
             if capital_slots[i] <= buy_date:
@@ -510,57 +531,33 @@ for idx, row in buy_signals.iterrows():
                 break 
                 
         if available_slot_idx == -1:
-            continue
+            continue # Hết slot vốn
             
         buy_idx = stocks_close.index.get_loc(buy_date.strftime('%Y-%m-%d'))
-        buy_price = stocks_close[ticker].iloc[buy_idx]
         
-        sell_idx = -1
-        sell_price = 0
-        is_cut_loss = False
-        
-        # 🟢 LÕI CẮT LỖ -3%: Quét giá từng ngày trong thời gian hold
-        for day_offset in range(1, HOLD_DAYS + 1):
-            check_idx = buy_idx + day_offset
-            if check_idx >= len(stocks_close):
-                break
-                
-            check_price = stocks_close[ticker].iloc[check_idx]
-            current_return = (check_price / buy_price) - 1
+        if buy_idx + HOLD_DAYS < len(stocks_close):
+            buy_price = stocks_close[ticker].iloc[buy_idx]
+            sell_price = stocks_close[ticker].iloc[buy_idx + HOLD_DAYS]
+            sell_date = stocks_close.index[buy_idx + HOLD_DAYS]
             
-            if current_return <= STOP_LOSS_PCT:
-                sell_idx = check_idx
-                sell_price = check_price
-                is_cut_loss = True
-                break
-                
-        # Nếu sống sót qua vòng kiểm tra cắt lỗ, chốt ở T+15
-        if not is_cut_loss:
-            sell_idx = buy_idx + HOLD_DAYS
-            if sell_idx < len(stocks_close):
-                sell_price = stocks_close[ticker].iloc[sell_idx]
-            else:
-                continue 
-                
-        sell_date = stocks_close.index[sell_idx]
-        capital_slots[available_slot_idx] = pd.to_datetime(sell_date)
-        
-        profit_pct = (sell_price / buy_price) - 1 - FEE_TAX
-        profit_vnd = SLOT_SIZE * profit_pct
-        
-        trade_logs.append({
-            'Buy_Date': buy_date.strftime('%Y-%m-%d'),
-            'Sell_Date': sell_date.strftime('%Y-%m-%d'),
-            'Ticker': ticker,
-            'Slot': available_slot_idx + 1,
-            'Type': 'CUT LOSS' if is_cut_loss else 'HOLD',
-            'Profit_%': round(profit_pct * 100, 2),
-            'Profit_VND': profit_vnd
-        })
+            capital_slots[available_slot_idx] = pd.to_datetime(sell_date)
+            
+            profit_pct = (sell_price / buy_price) - 1 - FEE_TAX
+            profit_vnd = SLOT_SIZE * profit_pct
+            
+            trade_logs.append({
+                'Buy_Date': buy_date.strftime('%Y-%m-%d'),
+                'Sell_Date': sell_date.strftime('%Y-%m-%d'),
+                'Ticker': ticker,
+                'VNINDEX': round(vn_price, 1) if pd.notna(vn_price) else 0,
+                'Z_DXY': round(z_dxy, 2) if pd.notna(z_dxy) else 0,
+                'Profit_%': round(profit_pct * 100, 2),
+                'Profit_VND': profit_vnd
+            })
     except:
         continue
 
-# 3. Kế toán 
+# 3. Kế toán tổng hợp sổ sách
 if len(trade_logs) > 0:
     df_trades = pd.DataFrame(trade_logs)
     
@@ -572,16 +569,17 @@ if len(trade_logs) > 0:
     final_capital = INITIAL_CAPITAL + total_profit
     roi = (final_capital / INITIAL_CAPITAL - 1) * 100
     
-    print(f"🎯 Tổng số lệnh đã được khớp (sau khi cắt lỗ): {total_trades} lệnh")
-    print(f"🏆 Tỷ lệ thắng thực tế: {win_rate:.1f}%")
-    print(f"🛡 Đã kích hoạt cắt lỗ sớm (-3%): {len(df_trades[df_trades['Type'] == 'CUT LOSS'])} lệnh")
+    print(f"🛑 Số kèo AI báo MUA nhưng bị PHONG TỎA (VNINDEX/DXY xấu): {blocked_by_market_count} lệnh")
+    print(f"🎯 Số lệnh THỰC SỰ ĐƯỢC MUA khi thị trường đồng thuận: {total_trades} lệnh")
+    print(f"🏆 Tỷ lệ thắng (Win-rate) khi đánh thuận xu hướng: {win_rate:.1f}%")
+    print(f"💸 Phí & Thuế đã trừ: 0.3%/vòng")
     print("-" * 50)
     print(f"💵 VỐN BAN ĐẦU       : {INITIAL_CAPITAL:,.0f} VNĐ")
     print(f"📈 TỔNG LÃI/LỖ RÒNG  : {total_profit:,.0f} VNĐ")
     print(f"🏦 TỔNG TÀI SẢN (NAV): {final_capital:,.0f} VNĐ")
     print(f"🚀 TỶ SUẤT LỢI NHUẬN (ROI): {roi:.2f}% so với đầu 2024")
     
-    print("\n🔍 BẢNG KÊ 5 LỆNH GẦN NHẤT:")
-    print(df_trades[['Buy_Date', 'Sell_Date', 'Ticker', 'Type', 'Profit_%', 'Profit_VND']].tail(5).to_string(index=False))
+    print("\n🔍 BẢNG KÊ 10 LỆNH GẦN NHẤT KHI THỊ TRƯỜNG ĐỒNG THUẬN UPTREND:")
+    print(df_trades[['Buy_Date', 'Sell_Date', 'Ticker', 'VNINDEX', 'Z_DXY', 'Profit_%', 'Profit_VND']].tail(10).to_string(index=False))
 else:
-    print("⚠️ Không có lệnh nào được khớp điều kiện.")
+    print("⚠️ Không có lệnh nào thỏa mãn đồng thời VNINDEX Uptrend & AI Sniper > 75%.")
