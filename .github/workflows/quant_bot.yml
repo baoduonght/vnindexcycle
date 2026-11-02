@@ -35,22 +35,21 @@ jobs:
           pip install pandas numpy yfinance requests xgboost scikit-learn plotly
           pip install git+https://github.com/rongardF/tvdatafeed.git
 
-      # ==========================================
-      # NHÁNH 1: LUYỆN ĐAN & LƯU BỘ NHỚ (CHỈ CHẠY THỨ 7)
+     # ==========================================
+      # NHÁNH 1: LUYỆN ĐAN & LƯU BỘ NHỚ (CHỈ CHẠY THỨ 7 HOẶC BẤM TEST TAY)
       # ==========================================
       - name: 🧠 Mở Lò Luyện Đan (train_bot.py)
-        if: github.event.schedule == '0 2 * * 6'
+        if: github.event.schedule == '0 2 * * 6' || github.event_name == 'workflow_dispatch'
         run: python train_bot.py
 
       - name: 💾 Lưu Não Bộ Mới Lên Github (.json)
-        if: github.event.schedule == '0 2 * * 6'
+        if: github.event.schedule == '0 2 * * 6' || github.event_name == 'workflow_dispatch'
         run: |
           git config --global user.name "Quant AutoBot"
           git config --global user.email "bot@quant.com"
           git add xgboost_ultimate.json
           git commit -m "🤖 [Auto-Update] Đã đúc xong não bộ AI tuần mới" || echo "Không có sự thay đổi để commit"
           git push
-
       # ==========================================
       # NHÁNH 2: NGẮM BẮN & BÁO CÁO (CHẠY T2-T6 HOẶC BẤM TEST TAY)
       # ==========================================
