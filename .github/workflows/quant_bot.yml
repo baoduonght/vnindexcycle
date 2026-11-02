@@ -4,7 +4,7 @@ on:
   schedule:
     # 🎯 NHÁNH THỰC CHIẾN: Chạy quant_bot.py vào 15:15 chiều Thứ 2 đến Thứ 6
     # Giờ VN (UTC+7) là 15:15 -> Giờ UTC là 08:15
-    - cron: '15 8 * * 1-5'
+    - cron: '30 8 * * 1-5'
     
     # 🧠 NHÁNH HỌC TẬP: Chạy train_bot.py vào 09:00 sáng Thứ 7
     # Giờ VN (UTC+7) là 09:00 -> Giờ UTC là 02:00
