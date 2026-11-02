@@ -5,13 +5,13 @@ import requests
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from tvDatafeed import TvDatafeed, Interval
-from sklearn.ensemble import RandomForestClassifier
+import xgboost as xgb
 from sklearn.metrics import classification_report
 import warnings
 import sys
 import os
-warnings.filterwarnings('ignore')
 
+warnings.filterwarnings('ignore')
 tv = TvDatafeed()
 
 # ==========================================
@@ -50,7 +50,6 @@ def calc_mfi(high, low, close, volume, n=14):
     neg_mf = rmf.where(diff < 0, 0.0).rolling(n).sum()
     return 100 - (100 / (1 + (pos_mf / neg_mf)))
 
-# 🟢 HÀM MỚI: TÍNH ĐỘNG LƯỢNG MACD HISTOGRAM
 def calc_macd_hist(series, fast=12, slow=26, signal=9):
     ema_fast = series.ewm(span=fast, adjust=False).mean()
     ema_slow = series.ewm(span=slow, adjust=False).mean()
@@ -79,7 +78,7 @@ vnindex_df['VN_MFI'] = calc_mfi(vnindex_df['High'], vnindex_df['Low'], vnindex_d
 df_clean = vnindex_df.dropna().copy()
 
 # ==========================================
-# 2. TẢI DỮ LIỆU VN30 & CHỈ BÁO KỸ THUẬT CÁ NHÂN
+# 2. TẢI DỮ LIỆU VN30 & CHỈ BÁO KỸ THUẬT
 # ==========================================
 print("2. Đang tải rổ VN30 & Tính toán màng lọc...")
 stock_tickers = ['FPT', 'HPG', 'SSI', 'MWG', 'PNJ', 'TCB', 'MBB', 'VPB', 'ACB', 'VCB']
@@ -110,15 +109,10 @@ stocks_rsi = pd.DataFrame(index=stocks_close.index)
 for c in stock_tickers:
     stocks_rsi[c] = calc_rsi(stocks_close[c])
 
-import xgboost as xgb
-
-import xgboost as xgb
-from sklearn.metrics import classification_report
-
 # ==========================================
-# 3. NHÚNG AI - HUẤN LUYỆN & SÁT HẠCH (BẢN XGBOOST SNIPER)
+# 3. NÃO BỘ AI XGBOOST (HYBRID TRAINING)
 # ==========================================
-print("3. Nâng cấp Não bộ AI (Nhúng La bàn VNINDEX & Động cơ XGBoost)...")
+print("3. Khởi tạo Não bộ AI (Học 10 năm + Trọng số x3 từ 2024)...")
 
 try:
     macro_df = pd.read_csv('global_markets_database10years.csv')
@@ -131,7 +125,6 @@ try:
 except Exception as e:
     sys.exit(f"🛑 LỖI ĐỌC FILE VĨ MÔ: {e}")
 
-# 🟢 TÍCH HỢP LA BÀN VNINDEX VÀ DÒNG TIỀN MFI
 market_context = vnindex_df[['Date', 'VN_MFI', 'VNINDEX', 'MA200']].copy()
 market_context['VN_Dist_MA200'] = market_context['VNINDEX'] / market_context['MA200']
 market_context['Date'] = pd.to_datetime(market_context['Date']).dt.strftime('%Y-%m-%d')
@@ -157,7 +150,6 @@ for c in stock_tickers:
     df_c['RSI'] = calc_rsi(stocks_close[c]).values
     df_c['MACD_Hist'] = calc_macd_hist(stocks_close[c]).values
     
-    # 🟢 TARGET MỚI TỪ BÁC: Kỳ vọng tăng > 5% trong vòng 30 phiên (T+30)
     future_return = stocks_close[c].shift(-30) / stocks_close[c] - 1
     df_c['Target'] = (future_return > 0.02).astype(int).values
     df_ml_list.append(df_c)
@@ -165,70 +157,42 @@ for c in stock_tickers:
 concat_df = pd.concat(df_ml_list)
 ml_master = concat_df.merge(macro_df, on='Date', how='left')
 
-# 🟢 MẮT THẦN: Đầy đủ 8 chỉ báo
 ml_features = ['Vol_Ratio', 'Dist_MA50', 'RSI', 'VN_MFI', 'MACD_Hist', 'VN_Dist_MA200'] + z_cols
-
 ml_master = ml_master[ml_master['Date'].isin(fresh_us_dates)]
 ml_master_clean = ml_master.dropna(subset=ml_features).copy()
 
 if ml_master_clean.empty:
     sys.exit("⚠️ LỖI ĐỒNG BỘ: Bot đứng ngoài do thiếu Data VN-US.")
 
-train_data_all = ml_master_clean.dropna(subset=['Target'])
-train_data = train_data_all[train_data_all['Date'] < '2024-01-01']
+# 🟢 KHỞI TẠO BỘ DỮ LIỆU ĐÀO TẠO VÀ TRỌNG SỐ THỜI GIAN
+train_data_all = ml_master_clean.dropna(subset=['Target']).copy()
+train_data_all['Weight'] = np.where(train_data_all['Date'] >= '2024-01-01', 3.0, 1.0)
 
-X_train = train_data[ml_features]
-y_train = train_data['Target']
+X_train = train_data_all[ml_features]
+y_train = train_data_all['Target']
+w_train = train_data_all['Weight']
 
 if len(X_train) == 0:
     sys.exit("❌ LỖI TRÍ MẠNG: Tập X_train rỗng.")
 
-# 🟢 TÍNH TOÁN TRỌNG SỐ LỆNH MUA (Chống mất cân bằng dữ liệu)
 scale_weight = len(y_train[y_train == 0]) / len(y_train[y_train == 1]) if len(y_train[y_train == 1]) > 0 else 1
 
-# 🟢 KHỞI ĐỘNG ĐỘNG CƠ XGBOOST
 xgb_model = xgb.XGBClassifier(
     n_estimators=150,              
     max_depth=4,                   
     learning_rate=0.05,            
     subsample=0.8,                 
-    colsample_bytree=0.8,          # Ép bốc thăm ngẫu nhiên chỉ báo để trị bệnh ngáo DXY
+    colsample_bytree=0.8,          
     scale_pos_weight=scale_weight, 
     random_state=42,
     eval_metric='logloss'
 )
 
-print("Đang nạp dữ liệu vào Mạng nơ-ron XGBoost...")
-xgb_model.fit(X_train, y_train)
-print(f"✅ XGBoost đã tiến hóa xong qua {len(X_train)} dòng dữ liệu!")
+print("Đang nạp dữ liệu vào Mạng nơ-ron XGBoost (Kết hợp Trọng số thời gian x3)...")
+xgb_model.fit(X_train, y_train, sample_weight=w_train)
+print(f"✅ XGBoost đã tiến hóa xong qua {len(X_train)} dòng dữ liệu (Đã Mix 10 năm + 2024)!")
 
-# ==========================================
-# BẢNG ĐIỂM SÁT HẠCH XGBOOST (CHẾ ĐỘ SNIPER)
-# ==========================================
-test_data = train_data_all[train_data_all['Date'] >= '2024-01-01']
-if not test_data.empty:
-    y_test = test_data['Target']
-    
-    # Lấy điểm xác suất (Probability) thay vì kết quả 0/1 mặc định
-    y_probs = xgb_model.predict_proba(test_data[ml_features])[:, 1]
-    
-    # 🟢 KÍCH HOẠT SNIPER MODE: Ép ngưỡng tự tin lên 75% mới báo MUA
-    SNIPER_THRESHOLD = 0.75
-    y_pred_sniper = (y_probs >= SNIPER_THRESHOLD).astype(int)
-    
-    print("\n" + "="*50)
-    print(f"📊 BẢNG ĐIỂM XGBOOST - SNIPER MODE (NGƯỠNG {SNIPER_THRESHOLD*100}%)")
-    print("="*50)
-    print(classification_report(y_test, y_pred_sniper, target_names=['Bỏ qua (0)', 'Đạt chuẩn MUA (1)']))
-    
-    print("\n🔍 TỶ TRỌNG SỬ DỤNG CHỈ BÁO (FEATURE IMPORTANCE):")
-    importances = xgb_model.feature_importances_
-    ranked_features = sorted(zip(ml_features, importances), key=lambda x: x[1], reverse=True)
-    for feature, imp in ranked_features:
-        print(f" 🔹 {feature:<14}: {imp*100:>5.2f}%")
-    print("="*50 + "\n")
-
-# 🟢 CHỐT ĐUÔI: ĐIỀN ĐIỂM SỐ ĐỂ XUẤT RA TELEGRAM (Không được xóa)
+# Gắn AI Score
 ml_master['AI_Score'] = float('nan')
 valid_rows = ml_master[ml_features].notna().all(axis=1)
 if valid_rows.sum() > 0:
@@ -237,15 +201,15 @@ if valid_rows.sum() > 0:
 ai_dict = {c: ml_master[ml_master['Ticker'] == c].set_index('Date')['AI_Score'] for c in stock_tickers}
 
 # ==========================================
-# 4. CHẠY BACKTEST (SỔ KẾ TOÁN)
+# 4. CHẠY BACKTEST (10 SLOTS + LÃI BANK 5%)
 # ==========================================
-print("4. Chạy Sổ Kế Toán & Trích xuất Lịch sử Mua/Bán của AI...")
+print("4. Chạy Sổ Kế Toán (10 Khe Vốn + Lãi Bank) & Trích xuất Lịch sử...")
 def run_ai_quant_system_with_log():
     backtest = df_clean[['Date', 'VNINDEX', 'MA50', 'MA100', 'MA200', 'ADX', 'ATR_PCT', 'VN_MFI']].copy()
-    MAX_SLOTS = 5
+    MAX_SLOTS = 10
     LIQUIDITY_FEE = 0.003
-    DAILY_INTEREST = 0.05 / 252
-    cash = 1000000000
+    DAILY_INTEREST = 0.05 / 252 # Bank 5%/năm
+    cash = 100_000_000 # Vốn khởi điểm 100 củ
     held = {}
     nav_history = np.zeros(len(backtest))
     trade_log = [] 
@@ -264,14 +228,16 @@ def run_ai_quant_system_with_log():
             nav_history[i] = nav_history[i-1] if i > 0 else cash
             continue
 
+        # Tiền nhàn rỗi trong cash được cộng lãi ngân hàng hàng ngày
         cash = cash * (1 + DAILY_INTEREST)
 
+        # CƠ CHẾ CẮT MÁU MACRO: Gãy MA100 (hoặc MA50 tùy chiến thuật bác chọn)
         if idx < market_ma100:
             for c in list(held.keys()):
                 sell_price = stocks_close.at[date, c]
                 cash += held[c]['qty'] * sell_price * (1 - LIQUIDITY_FEE)
                 profit_pct = (sell_price - held[c]['buy_price']) / held[c]['buy_price'] * 100
-                trade_log.append({'Date': date, 'Action': 'SELL (Cắt giảm)', 'Ticker': c, 'Price': sell_price, 'Profit(%)': round(profit_pct, 2)})
+                trade_log.append({'Date': date, 'Action': 'SELL (Cắt giảm Vĩ Mô)', 'Ticker': c, 'Price': sell_price, 'Profit(%)': round(profit_pct, 2)})
             held.clear()
         else:
             to_remove = []
@@ -315,8 +281,7 @@ def run_ai_quant_system_with_log():
                             ai_score = ai_dict[c].get(date, 0)
                             if pd.isna(ai_score): ai_score = 0
                             
-                            # 🟢 SIẾT KỶ LUẬT THÉP: Điểm AI phải tuyệt đối tự tin (> 65%) mới xét mua
-                            if ai_score >= 0.65:
+                            if ai_score >= 0.65: # Ngưỡng Sniper
                                 vol_ratio = curr_vol / prev_vol_ma20 if prev_vol_ma20 > 0 else 0
                                 stock_rsi = stocks_rsi.at[date, c]
                                 buy_candidates.append((c, ai_score, vol_ratio, stock_rsi))
@@ -366,10 +331,8 @@ def send_telegram_msg(text_message):
         "parse_mode": "HTML",
         "disable_web_page_preview": True
     }
-    try:
-        requests.post(url, json=payload, timeout=10)
-    except:
-        pass
+    try: requests.post(url, json=payload, timeout=10)
+    except: pass
 
 def process_and_send_signals(df_log):
     latest_date = stocks_close.index[-1]
@@ -401,10 +364,10 @@ def process_and_send_signals(df_log):
                     sell_count += 1
 
     if buy_count == 0 and sell_count == 0:
-        msg += "<i>⏳ Hệ thống nằm im quan sát, không có lệnh mới.</i>\n\n"
+        msg += "<i>⏳ Hệ thống nằm im quan sát (Hoặc đang ăn lãi Bank 5%), không có lệnh mới.</i>\n\n"
 
     msg += "➖➖➖➖➖➖➖➖➖➖\n"
-    msg += "<i>⚠️ Khuyến nghị từ AI Random Forest.</i>"
+    msg += "<i>⚠️ Khuyến nghị từ AI XGBoost Tối Thượng.</i>"
     
     send_telegram_msg(msg)
 
@@ -417,204 +380,8 @@ print("6. Vẽ biểu đồ...")
 try:
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     fig.add_trace(go.Scatter(x=backtest_result['Date'], y=backtest_result['VNINDEX'], name="VN-Index", mode='lines', line=dict(color='#B2B5BE', width=1)), secondary_y=False)
-    fig.add_trace(go.Scatter(x=backtest_result['Date'], y=backtest_result['NAV_AI_Driven'], name="NAV (AI Filter + Sizing)", mode='lines', line=dict(color='#00E676', width=2.5)), secondary_y=True)
-    fig.update_layout(title='AI Quant System', template='plotly_dark')
+    fig.add_trace(go.Scatter(x=backtest_result['Date'], y=backtest_result['NAV_AI_Driven'], name="NAV (10 Slots + Bank 5%)", mode='lines', line=dict(color='#00E676', width=2.5)), secondary_y=True)
+    fig.update_layout(title='AI Quant System (Ultimate)', template='plotly_dark')
     print("✅ Hoàn tất toàn bộ chu trình!")
 except:
     pass
-  # ==========================================
-# 5. MÔ PHỎNG P&L: TOP-DOWN MACRO (MAX 10 SLOT + LỌC TRÙNG + LÃI KÉP + GỬI BANK TỰ ĐỘNG)
-# ==========================================
-print("\n" + "="*50)
-print("🛡 MÔ PHỎNG P&L: QUẢN TRỊ DANH MỤC TOÀN DIỆN (CỔ PHIẾU + GỬI BANK 5%/NĂM)")
-print("="*50)
-
-if 'MA50' not in vnindex_df.columns:
-    vnindex_df['MA50'] = vnindex_df['VNINDEX'].rolling(50).mean()
-
-sim_data = test_data.copy()
-sim_data['AI_Score'] = xgb_model.predict_proba(sim_data[ml_features])[:, 1]
-
-# Chuẩn bị Bách khoa toàn thư Vĩ mô
-vn_trend = vnindex_df[['Date', 'VNINDEX', 'MA50', 'VN_MFI']].copy()
-vn_trend['Date'] = pd.to_datetime(vn_trend['Date']).dt.strftime('%Y-%m-%d')
-macro_temp = macro_df[['Date', 'Z_DXY']].copy()
-vn_trend = vn_trend.merge(macro_temp, on='Date', how='left')
-vn_trend['Z_DXY'] = vn_trend['Z_DXY'].ffill()
-vn_trend_idx = vn_trend.set_index('Date')
-
-sim_data = sim_data.merge(vn_trend[['Date']], on='Date', how='left') 
-buy_signals = sim_data[sim_data['AI_Score'] >= 0.75].copy()
-buy_signals = buy_signals.sort_values('Date')
-
-# 🟢 ĐIỀU CHỈNH LUẬT CHƠI
-INITIAL_CAPITAL = 1000000000
-MAX_SLOTS = 10
-FEE_TAX = 0.003                         
-BANK_RATE_YEARLY = 0.05                 # Lãi suất NH rảnh rỗi: 5%/năm
-DAILY_RATE = BANK_RATE_YEARLY / 365     # Lãi suất theo ngày
-
-# Ngày bắt đầu và kết thúc mô phỏng
-sim_start_date = pd.to_datetime(test_data['Date'].min())
-sim_end_date = pd.to_datetime(test_data['Date'].max())
-
-# Quản lý 10 khe vốn (Thêm 'last_active_date' để tính ngày rảnh rỗi gửi NH)
-slot_status = [{
-    'free_date': sim_start_date, 
-    'ticker': None, 
-    'capital': INITIAL_CAPITAL / MAX_SLOTS,
-    'last_active_date': sim_start_date 
-} for _ in range(MAX_SLOTS)]
-
-trade_logs = []
-total_bank_interest = 0
-
-for idx, row in buy_signals.iterrows():
-    ticker = row['Ticker']
-    buy_date = pd.to_datetime(row['Date'])
-    buy_date_str = buy_date.strftime('%Y-%m-%d')
-    
-    # 1. KIỂM TRA VĨ MÔ
-    try:
-        vn_price = vn_trend_idx.loc[buy_date_str, 'VNINDEX']
-        vn_ma50 = vn_trend_idx.loc[buy_date_str, 'MA50']
-        z_dxy = vn_trend_idx.loc[buy_date_str, 'Z_DXY']
-        vn_mfi = vn_trend_idx.loc[buy_date_str, 'VN_MFI']
-    except: continue
-    
-    if (pd.notna(z_dxy) and z_dxy > 1.0) or \
-       (pd.notna(vn_price) and pd.notna(vn_ma50) and vn_price < vn_ma50 and vn_mfi < 40):
-        continue 
-
-    # 2. KIỂM TRA TRÙNG LỆNH
-    already_holding = False
-    for slot in slot_status:
-        if slot['ticker'] == ticker and slot['free_date'] > buy_date:
-            already_holding = True
-            break
-    if already_holding: continue 
-
-    # 3. TÌM SLOT TRỐNG VÀ GIẢI NGÂN
-    try:
-        available_slot_idx = -1
-        for i in range(MAX_SLOTS):
-            if slot_status[i]['free_date'] <= buy_date:
-                available_slot_idx = i
-                break 
-                
-        if available_slot_idx == -1: continue 
-            
-        # 🟢 TÍNH TIỀN LÃI NGÂN HÀNG TRONG THỜI GIAN CHỜ MUA (Idle Cash)
-        idle_days = (buy_date - slot_status[available_slot_idx]['last_active_date']).days
-        if idle_days > 0:
-            idle_interest = slot_status[available_slot_idx]['capital'] * DAILY_RATE * idle_days
-            slot_status[available_slot_idx]['capital'] += idle_interest
-            total_bank_interest += idle_interest
-
-        buy_idx = stocks_close.index.get_loc(buy_date_str)
-        buy_price = stocks_close[ticker].iloc[buy_idx]
-        
-        sell_idx = -1
-        sell_price = 0
-        sell_reason = ""
-        
-        # Vòng lặp gồng lãi Macro
-        for day_offset in range(1, 250):
-            check_idx = buy_idx + day_offset
-            if check_idx >= len(stocks_close):
-                sell_idx = len(stocks_close) - 1
-                sell_price = stocks_close[ticker].iloc[sell_idx]
-                sell_reason = "HẾT DỮ LIỆU"
-                break
-                
-            current_date_str = stocks_close.index[check_idx].strftime('%Y-%m-%d')
-            current_price = stocks_close[ticker].iloc[check_idx]
-            
-            try:
-                vn_today = vn_trend_idx.loc[current_date_str, 'VNINDEX']
-                ma50_today = vn_trend_idx.loc[current_date_str, 'MA50']
-                mfi_today = vn_trend_idx.loc[current_date_str, 'VN_MFI']
-                dxy_today = vn_trend_idx.loc[current_date_str, 'Z_DXY']
-            except:
-                vn_today, ma50_today, mfi_today, dxy_today = 10000, 0, 50, 0 
-                
-            if pd.notna(vn_today) and pd.notna(ma50_today) and vn_today < ma50_today:
-                if (pd.notna(mfi_today) and mfi_today < 40) or (pd.notna(dxy_today) and dxy_today > 1.0):
-                    sell_idx = check_idx
-                    sell_price = current_price
-                    sell_reason = "VNI gãy trend + Vĩ mô xấu"
-                    break
-                
-        if sell_idx == -1:
-            sell_idx = buy_idx + 249
-            if sell_idx >= len(stocks_close): sell_idx = len(stocks_close) - 1
-            sell_price = stocks_close[ticker].iloc[sell_idx]
-            sell_reason = "Hết hạn gồng (1 năm)"
-            
-        sell_date = stocks_close.index[sell_idx]
-        
-        # CẬP NHẬT TIỀN TỪ CỔ PHIẾU
-        profit_pct = (sell_price / buy_price) - 1 - FEE_TAX
-        current_capital = slot_status[available_slot_idx]['capital'] 
-        trade_profit_vnd = current_capital * profit_pct
-        new_capital = current_capital + trade_profit_vnd 
-        
-        # TIỀN NHẢ VỀ LẠI THÀNH TIỀN MẶT CHỜ GỬI BANK
-        slot_status[available_slot_idx] = {
-            'free_date': pd.to_datetime(sell_date),
-            'ticker': ticker,
-            'capital': new_capital,
-            'last_active_date': pd.to_datetime(sell_date) # Bắt đầu đếm rảnh rỗi từ ngày bán
-        }
-        
-        trade_logs.append({
-            'Buy_Date': buy_date_str,
-            'Sell_Date': sell_date.strftime('%Y-%m-%d'),
-            'Ticker': ticker,
-            'Reason': sell_reason,
-            'Stock_Profit_%': round(profit_pct * 100, 2),
-            'Stock_Profit_VND': trade_profit_vnd,
-            'Slot_Capital': round(new_capital, 0)
-        })
-    except:
-        continue
-
-# 🟢 CHỐT SỔ CUỐI CÙNG: CỘNG LÃI BANK CHO CÁC NGÀY RẢNH RỖI CÒN LẠI ĐẾN HIỆN TẠI
-for slot in slot_status:
-    remaining_idle_days = (sim_end_date - slot['last_active_date']).days
-    if remaining_idle_days > 0:
-        final_interest = slot['capital'] * DAILY_RATE * remaining_idle_days
-        slot['capital'] += final_interest
-        total_bank_interest += final_interest
-
-if len(trade_logs) > 0:
-    df_trades = pd.DataFrame(trade_logs)
-    total_trades = len(df_trades)
-    winning_trades = len(df_trades[df_trades['Stock_Profit_VND'] > 0])
-    win_rate = winning_trades / total_trades * 100 if total_trades > 0 else 0
-    
-    final_capital = sum(slot['capital'] for slot in slot_status)
-    total_profit = final_capital - INITIAL_CAPITAL
-    roi = (final_capital / INITIAL_CAPITAL - 1) * 100
-    
-    print(f"🎯 Số lệnh ĐƯỢC MUA (Thực tế): {total_trades} lệnh")
-    print(f"🏆 Tỷ lệ thắng lệnh cổ phiếu (Win-rate): {win_rate:.1f}%")
-    print("-" * 50)
-    print(f"💵 VỐN BAN ĐẦU       : {INITIAL_CAPITAL:,.0f} VNĐ")
-    print(f"🏦 LÃI TỪ GỬI BANK 5%: +{total_bank_interest:,.0f} VNĐ (Tiền đẻ ra tiền khi rảnh)")
-    print(f"📈 TỔNG LÃI/LỖ RÒNG  : {total_profit:,.0f} VNĐ (Bao gồm cả Bank + Cổ phiếu)")
-    print(f"💎 TỔNG TÀI SẢN (NAV): {final_capital:,.0f} VNĐ")
-    print(f"🚀 TỶ SUẤT LỢI NHUẬN (ROI TOÀN DIỆN): {roi:.2f}%")
-    
-    print("\n🔍 X-RAY 10 LỆNH GẦN NHẤT (DANH MỤC 10 SLOT):")
-    print(df_trades[['Buy_Date', 'Sell_Date', 'Ticker', 'Reason', 'Stock_Profit_%', 'Slot_Capital']].tail(10).to_string(index=False))
-else:
-    print("⚠️ Không có lệnh nào khớp và chốt lời thành công.")
-    # 1. Bỏ giới hạn hiển thị của Pandas để in toàn bộ các dòng ra màn hình
-import pandas as pd
-pd.set_option('display.max_rows', None) 
-print(df_trades[['Buy_Date', 'Sell_Date', 'Ticker', 'Reason', 'Stock_Profit_%', 'Slot_Capital']])
-
-# 2. Xuất toàn bộ sổ lệnh ra file CSV để mở bằng Excel
-df_trades.to_csv('Lich_Su_Lenh_Toan_Tap_2024.csv', index=False, encoding='utf-8-sig')
-print("✅ Đã xuất file Lich_Su_Lenh_Toan_Tap_2024.csv thành công!")
