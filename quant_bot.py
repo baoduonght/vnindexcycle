@@ -449,7 +449,7 @@ buy_signals = buy_signals.sort_values('Date')
 
 # 🟢 ĐIỀU CHỈNH LUẬT CHƠI
 INITIAL_CAPITAL = 1000000000
-MAX_SLOTS = 15
+MAX_SLOTS = 10
 FEE_TAX = 0.003                         
 BANK_RATE_YEARLY = 0.05                 # Lãi suất NH rảnh rỗi: 5%/năm
 DAILY_RATE = BANK_RATE_YEARLY / 365     # Lãi suất theo ngày
