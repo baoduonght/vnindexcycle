@@ -71,7 +71,6 @@ vnindex_df['MA200'] = vnindex_df['VNINDEX'].rolling(200).mean()
 vnindex_df['ADX'] = calc_adx(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14)
 vnindex_df['ATR_PCT'] = calc_atr(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14) / vnindex_df['VNINDEX']
 vnindex_df['VN_MFI'] = calc_mfi(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], vnindex_df['Volume'], 14)
-
 df_clean = vnindex_df.dropna().copy()
 
 # ==========================================
@@ -155,7 +154,7 @@ ai_dict = {c: ml_master[ml_master['Ticker'] == c].set_index('Date')['AI_Score'] 
 # ==========================================
 # 4. CHẠY BACKTEST KẾ TOÁN (10 SLOTS + LÃI BANK)
 # ==========================================
-print("4. Chạy Sổ Kế Toán...")
+print("4. Chạy Sổ Kế Toán (Diamond Hands)...")
 def run_ai_quant_system_with_log():
     backtest = df_clean.copy()
     MAX_SLOTS = 10
@@ -174,6 +173,7 @@ def run_ai_quant_system_with_log():
         if date not in stocks_close.index: continue
         cash *= (1 + DAILY_INTEREST)
 
+        # 1. CÔNG TẮC VĨ MÔ: Bán tháo toàn bộ khi VNINDEX gãy MA100
         if idx < market_ma100:
             for c in list(held.keys()):
                 sell_price = stocks_close.at[date, c]
@@ -186,11 +186,15 @@ def run_ai_quant_system_with_log():
                 curr_price = stocks_close.at[date, c]
                 buy_price = held[c]['buy_price']
                 held[c]['highest'] = max(held[c]['highest'], curr_price)
+                
                 profit_margin = (curr_price - buy_price) / buy_price
                 peak_margin = (held[c]['highest'] - buy_price) / buy_price
 
-                if profit_margin <= -0.08 or profit_margin >= 0.20 or (peak_margin >= 0.12 and curr_price < held[c]['highest'] * 0.94) or (curr_price < stocks_ma20.at[date, c] and profit_margin > 0.05):
-                    to_remove.append(c)
+                # 2. XÓA BỎ CẮT LỖ VÀ CHỐT LỜI. CHỈ BÁN KHI MẤT ĐÀ TĂNG TRƯỞNG
+                if peak_margin >= 0.12 and curr_price < held[c]['highest'] * 0.94:
+                    to_remove.append(c) # Trailing Stop: Lãi >12% nhưng rớt 6% từ đỉnh thì chốt thu tiền về
+                elif curr_price < stocks_ma20.at[date, c] and profit_margin > 0.05:
+                    to_remove.append(c) # Chặn lãi: Thủng MA20 ngắn hạn khi đang có lãi nhẹ thì nhả hàng
 
             for c in to_remove:
                 sell_price = stocks_close.at[date, c]
