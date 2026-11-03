@@ -108,21 +108,23 @@ for ticker in raw_tickers:
     except Exception as e:
         print(f"⚠️ Bỏ qua {ticker} do lỗi kết nối: {e}")
 
-stocks_close = stocks_close.ffill().dropna()
-stocks_volume = stocks_volume.ffill().fillna(0)
 stock_tickers = [c for c in valid_tickers if c in stocks_close.columns]
 
-stocks_high_20 = stocks_close.rolling(20).max().shift(1)
-stocks_ma20 = stocks_close.rolling(20).mean()
-stocks_ma50 = stocks_close.rolling(50).mean()
-stocks_vol_ma20 = stocks_volume.rolling(20).mean().shift(1)
+# Điền giá trị để duy trì chuỗi liên tục
+stocks_close_clean = stocks_close.ffill()
+stocks_vol_clean = stocks_volume.fillna(0)
+
+stocks_high_20 = stocks_close_clean.rolling(20).max().shift(1)
+stocks_ma20 = stocks_close_clean.rolling(20).mean()
+stocks_ma50 = stocks_close_clean.rolling(50).mean()
+stocks_vol_ma20 = stocks_vol_clean.rolling(20).mean().shift(1)
 
 stocks_rsi = pd.DataFrame(index=stocks_close.index)
 for c in stock_tickers:
-    stocks_rsi[c] = calc_rsi(stocks_close[c])
+    stocks_rsi[c] = calc_rsi(stocks_close_clean[c])
 
 # ==========================================
-# 3. TẢI BỘ NHỚ AI & CHẤM ĐIỂM
+# 3. TẢI BỘ NHỚ AI & CHẤM ĐIỂM (ĐỘC LẬP TỪNG MÃ)
 # ==========================================
 print("3. Đang tải não bộ AI & Đồng bộ Vĩ mô CSV...")
 try:
@@ -143,12 +145,24 @@ z_cols = [f'Z_{c}' for c in ['DXY', 'US10Y', 'USD_VND']]
 
 df_ml_list = []
 for c in stock_tickers:
-    df_c = pd.DataFrame({'Date': stocks_close.index, 'Ticker': c})
-    df_c['Vol_Ratio'] = (stocks_volume[f'{c}_V'] / stocks_vol_ma20[f'{c}_V'].replace(0, np.nan)).values
-    df_c['Dist_MA50'] = (stocks_close[c] / stocks_ma50[c].replace(0, np.nan)).values
-    df_c['RSI'] = stocks_rsi[c].values
+    # Lấy đúng chuỗi ngày thực tế của mã c
+    s_price = stocks_close[c].dropna()
+    if len(s_price) < 100: 
+        continue
+    valid_dates = s_price.index
+    s_vol = stocks_volume[f'{c}_V'].reindex(valid_dates).fillna(0)
+    
+    s_ma50 = s_price.rolling(50).mean()
+    s_vol_ma20 = s_vol.rolling(20).mean().shift(1)
+    s_rsi = calc_rsi(s_price)
+    s_macd = calc_macd_hist(s_price)
+    
+    df_c = pd.DataFrame({'Date': valid_dates, 'Ticker': c})
+    df_c['Vol_Ratio'] = (s_vol / s_vol_ma20.replace(0, np.nan)).values
+    df_c['Dist_MA50'] = (s_price / s_ma50.replace(0, np.nan)).values
+    df_c['RSI'] = s_rsi.values
     df_c['RSI_Momentum'] = pd.Series(df_c['RSI']).diff(3).values 
-    df_c['MACD_Hist'] = calc_macd_hist(stocks_close[c]).values
+    df_c['MACD_Hist'] = s_macd.values
     df_ml_list.append(df_c)
 
 ml_master = pd.concat(df_ml_list, ignore_index=True).merge(macro_df, on='Date', how='left')
@@ -166,7 +180,7 @@ valid_rows = ml_master[ml_features].notna().all(axis=1)
 if valid_rows.sum() > 0:
     ml_master.loc[valid_rows, 'AI_Score'] = xgb_model.predict_proba(ml_master.loc[valid_rows, ml_features])[:, 1]
 
-# Giữ nguyên DatetimeIndex cho ai_dict để khớp với vòng lặp
+# Giữ nguyên DatetimeIndex cho ai_dict
 ai_dict = {c: ml_master[ml_master['Ticker'] == c].set_index('Date')['AI_Score'] for c in stock_tickers}
 
 # ==========================================
@@ -192,7 +206,7 @@ def run_ai_quant_system_with_log():
         market_atr_pct = backtest['ATR_PCT'].iloc[i]
         market_mfi = backtest['VN_MFI'].iloc[i]
 
-        if date not in stocks_close.index: 
+        if date not in stocks_close_clean.index: 
             continue
             
         cash *= (1 + DAILY_INTEREST)
@@ -206,15 +220,18 @@ def run_ai_quant_system_with_log():
         if idx < market_ma100:
             for c in list(held.keys()):
                 if held[c]['days_held'] >= 2:  # Đảm bảo hàng đã về tài khoản mới bán được
-                    sell_price = stocks_close.at[date, c]
-                    cash += held[c]['qty'] * sell_price * (1 - LIQUIDITY_FEE)
-                    profit = (sell_price / held[c]['buy_price'] - 1) * 100
-                    trade_log.append({'Date': date, 'Action': 'SELL (Thị trường gãy MA100)', 'Ticker': c, 'Price': sell_price, 'Profit(%)': round(profit, 2)})
-                    del held[c]
+                    sell_price = stocks_close_clean.at[date, c]
+                    if pd.notna(sell_price) and sell_price > 0:
+                        cash += held[c]['qty'] * sell_price * (1 - LIQUIDITY_FEE)
+                        profit = (sell_price / held[c]['buy_price'] - 1) * 100
+                        trade_log.append({'Date': date, 'Action': 'SELL (Thị trường gãy MA100)', 'Ticker': c, 'Price': sell_price, 'Profit(%)': round(profit, 2)})
+                        del held[c]
         else:
             # 2. THỊ TRƯỜNG VẪN TỐT: GỒNG LÃI TỐI ĐA, CHỈ BÁN KHI MẤT ĐÀ / ĐẢO CHIỀU
-            for c in held.keys():
-                curr_price = stocks_close.at[date, c]
+            for c in list(held.keys()):
+                curr_price = stocks_close_clean.at[date, c]
+                if pd.isna(curr_price) or curr_price <= 0:
+                    continue
                 buy_price = held[c]['buy_price']
                 held[c]['highest'] = max(held[c]['highest'], curr_price)
                 
@@ -231,7 +248,7 @@ def run_ai_quant_system_with_log():
                     # KHÔNG CẮT LỖ KHI ÂM: Ôm tiếp nếu VNINDEX chưa gãy MA100
 
             for c, reason in to_remove:
-                sell_price = stocks_close.at[date, c]
+                sell_price = stocks_close_clean.at[date, c]
                 cash += held[c]['qty'] * sell_price * (1 - LIQUIDITY_FEE)
                 profit = (sell_price / held[c]['buy_price'] - 1) * 100
                 trade_log.append({'Date': date, 'Action': reason, 'Ticker': c, 'Price': sell_price, 'Profit(%)': round(profit, 2)})
@@ -239,7 +256,7 @@ def run_ai_quant_system_with_log():
 
             # Quản trị tỷ trọng theo độ biến động thị trường
             max_exposure = 0.3 if (idx < market_ma50 or market_atr_pct > 0.018) else 1.0
-            stock_val = sum([held[c]['qty'] * stocks_close.at[date, c] for c in held])
+            stock_val = sum([held[c]['qty'] * stocks_close_clean.at[date, c] for c in held if pd.notna(stocks_close_clean.at[date, c])])
             current_total_nav = cash + stock_val
             allowed_capital = max(0, (current_total_nav * max_exposure) - stock_val)
 
@@ -249,19 +266,22 @@ def run_ai_quant_system_with_log():
                 buy_candidates = []
                 for c in stock_tickers:
                     if c not in held:
-                        curr_price = stocks_close.at[date, c]
-                        curr_vol = stocks_volume.at[date, f'{c}_V']
+                        if c not in stocks_close_clean.columns or f'{c}_V' not in stocks_vol_clean.columns:
+                            continue
+                        curr_price = stocks_close_clean.at[date, c]
+                        curr_vol = stocks_vol_clean.at[date, f'{c}_V']
                         prev_high_20 = stocks_high_20.at[date, c]
                         prev_vol_ma20 = stocks_vol_ma20.at[date, f'{c}_V']
 
-                        if pd.isna(prev_high_20) or pd.isna(prev_vol_ma20): 
+                        if pd.isna(curr_price) or pd.isna(prev_high_20) or pd.isna(prev_vol_ma20) or curr_price <= 0: 
                             continue
                             
                         # Breakout giá 20 phiên và nổ volume gấp rưỡi
                         if curr_price > prev_high_20 and curr_vol > (prev_vol_ma20 * 1.5):
                             ai_score = ai_dict[c].get(date, np.nan)
                             if pd.notna(ai_score) and ai_score >= 0.65:
-                                buy_candidates.append((c, ai_score, curr_vol / prev_vol_ma20 if prev_vol_ma20 > 0 else 0, stocks_rsi.at[date, c]))
+                                s_rsi_val = stocks_rsi.at[date, c] if c in stocks_rsi.columns and date in stocks_rsi.index else 50
+                                buy_candidates.append((c, ai_score, curr_vol / prev_vol_ma20 if prev_vol_ma20 > 0 else 0, s_rsi_val))
 
                 # Sắp xếp ưu tiên cổ phiếu có điểm AI cao nhất
                 buy_candidates.sort(key=lambda x: x[1], reverse=True)
@@ -270,7 +290,7 @@ def run_ai_quant_system_with_log():
                     slot_invest = min(allowed_capital / empty, cash)
                     for c, score, v_ratio, s_rsi in buy_candidates:
                         if slot_invest > 1_000_000 and cash >= slot_invest and empty > 0:
-                            buy_price = stocks_close.at[date, c]
+                            buy_price = stocks_close_clean.at[date, c]
                             actual_invest = slot_invest * (1 - LIQUIDITY_FEE)
                             held[c] = {
                                 'qty': actual_invest / buy_price,
@@ -341,7 +361,7 @@ def send_telegram_msg(text_message):
         if res.status_code == 200:
             print("✅ Đã gửi báo cáo Telegram thành công!")
         else:
-            print(f"⚠️ Telegram trả lời: {res.text}")
+            print(f"⚠️ Telegram phản hồi: {res.text}")
     except Exception as e:
         print(f"Lỗi gửi Telegram: {e}")
 
@@ -352,23 +372,19 @@ latest_ma100 = df_clean['MA100'].iloc[-1]
 latest_ma200 = df_clean['MA200'].iloc[-1]
 latest_adx = df_clean['ADX'].iloc[-1]
 
-# Lấy dữ liệu vĩ mô chốt tuần
 latest_macro = macro_df.iloc[-1] if not macro_df.empty else None
 dxy_val = f"{latest_macro['DXY']:.1f}" if latest_macro is not None and pd.notna(latest_macro.get('DXY')) else "N/A"
 us10y_val = f"{latest_macro['US10Y']:.2f}%" if latest_macro is not None and pd.notna(latest_macro.get('US10Y')) else "N/A"
 usdvnd_val = f"{latest_macro['USD_VND']:,.0f}" if latest_macro is not None and pd.notna(latest_macro.get('USD_VND')) else "N/A"
 
-# Soạn thảo Bản tin tuần
 msg = f"📊 <b>BẢN TIN CHIẾN LƯỢC TUẦN - RADAR VN30</b> 📊\n"
 msg += f"📅 Chốt tuần ngày: <b>{latest_date.strftime('%d/%m/%Y')}</b>\n"
 msg += f"➖➖➖➖➖➖➖➖➖➖\n\n"
 
-# 1. Bức tranh Vĩ mô
 msg += f"🌍 <b>VĨ MÔ QUỐC TẾ CHỐT TUẦN:</b>\n"
 msg += f"• DXY: <b>{dxy_val}</b> | US10Y: <b>{us10y_val}</b>\n"
 msg += f"• Tỷ giá USD/VND: <b>{usdvnd_val}</b>\n\n"
 
-# 2. Đánh giá Xu hướng VN-Index (Công tắc số 1)
 is_uptrend = (latest_idx > latest_ma200) and (latest_adx > 20)
 is_downtrend = (latest_idx < latest_ma100)
 
@@ -386,23 +402,22 @@ else:
     msg += f"🟡 <b>Trạng thái: TÍCH LŨY / CHỜ XÁC NHẬN</b>\n"
     msg += f"<i>Khuyến nghị: Thị trường phân hóa, chỉ giải ngân thăm dò với tỷ trọng nhỏ.</i>\n\n"
 
-# 3. Quét cổ phiếu VN30 cho tuần tới
 msg += f"🎯 <b>CỔ PHIẾU TIỀM NĂNG CHO TUẦN TỚI:</b>\n"
 weekly_picks = []
 
 if is_uptrend:
     for c in stock_tickers:
-        curr_price = stocks_close.at[latest_date, c]
-        curr_vol = stocks_volume.at[latest_date, f'{c}_V']
-        prev_high_20 = stocks_high_20.at[latest_date, c]
-        prev_vol_ma20 = stocks_vol_ma20.at[latest_date, f'{c}_V']
-        
-        if pd.notna(prev_high_20) and pd.notna(prev_vol_ma20):
-            # Điều kiện Breakout đỉnh 20 ngày + Vol x1.5
-            if curr_price > prev_high_20 and curr_vol > (prev_vol_ma20 * 1.5):
-                score = ai_dict[c].get(latest_date, np.nan)
-                if pd.notna(score) and score >= 0.65:
-                    weekly_picks.append((c, curr_price, score, curr_vol / prev_vol_ma20))
+        if c in stocks_close_clean.columns and latest_date in stocks_close_clean.index:
+            curr_price = stocks_close_clean.at[latest_date, c]
+            curr_vol = stocks_vol_clean.at[latest_date, f'{c}_V']
+            prev_high_20 = stocks_high_20.at[latest_date, c]
+            prev_vol_ma20 = stocks_vol_ma20.at[latest_date, f'{c}_V']
+            
+            if pd.notna(curr_price) and pd.notna(prev_high_20) and pd.notna(prev_vol_ma20):
+                if curr_price > prev_high_20 and curr_vol > (prev_vol_ma20 * 1.5):
+                    score = ai_dict[c].get(latest_date, np.nan)
+                    if pd.notna(score) and score >= 0.65:
+                        weekly_picks.append((c, curr_price, score, curr_vol / prev_vol_ma20))
 
     weekly_picks.sort(key=lambda x: x[2], reverse=True)
 
@@ -412,11 +427,10 @@ if weekly_picks:
 else:
     msg += f"<i>Chưa có mã VN30 nào hội tụ đủ điểm nổ Vol và Alpha tuần này. Kiên nhẫn chờ cơ hội.</i>\n"
 
-# 4. Danh mục đang nắm giữ
 msg += f"\n💼 <b>DANH MỤC HIỆN TẠI:</b>\n"
 if current_held:
     for ticker, info in current_held.items():
-        curr_price = stocks_close.at[latest_date, ticker]
+        curr_price = stocks_close_clean.at[latest_date, ticker]
         pnl = (curr_price / info['buy_price'] - 1) * 100
         icon = "🟢" if pnl >= 0 else "🔴"
         msg += f"{icon} <b>{ticker}</b>: {pnl:+.1f}% (T+{info['days_held']})\n"
