@@ -1,21 +1,27 @@
-name: HỆ THỐNG QUANT VN30 - BẢN TIN CHIẾN LƯỢC THỨ 7
+name: HỆ THỐNG QUANT VN30
 
 on:
   schedule:
-    # 🎯 Chạy tự động vào đúng 09:00 sáng Thứ 7 hàng tuần (Giờ VN: UTC+7 -> Giờ UTC là 02:00)
+    # 🎯 NHÁNH THỰC CHIẾN: Chạy quant_bot.py vào 15:30 chiều Thứ 2 đến Thứ 6
+    # Giờ VN (UTC+7) là 15:30 -> Giờ UTC là 08:30
+    - cron: '30 8 * * 1-5'
+    
+    # 🧠 NHÁNH HỌC TẬP: Chạy train_bot.py vào 09:00 sáng Thứ 7
+    # Giờ VN (UTC+7) là 09:00 -> Giờ UTC là 02:00
     - cron: '0 2 * * 6'
     
-  # Cho phép bấm nút "Run workflow" bằng tay trên Github để test bất cứ lúc nào
+  # Cho phép bác bấm nút "Run workflow" bằng tay trên Github để test thử bot Telegram
   workflow_dispatch:
 
 permissions:
+  # Cấp quyền tối cao để Bot tự động lưu file não bộ (.json) và lịch sử giao dịch (.csv) lên Github
   contents: write 
 
 jobs:
-  weekly-quant-pipeline:
+  quant-trading-bot:
     runs-on: ubuntu-latest
     steps:
-      - name: 📥 Lấy mã nguồn từ Repository
+      - name: 📥 Lấy mã nguồn và Dữ liệu từ Repository
         uses: actions/checkout@v4
 
       - name: 🐍 Cài đặt môi trường Python 3.11
@@ -26,29 +32,40 @@ jobs:
       - name: ⚙️ Cài đặt thư viện tài chính & AI
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy yfinance requests xgboost scikit-learn beautifulsoup4 pandas-datareader
+          pip install pandas numpy yfinance requests xgboost scikit-learn plotly
           pip install git+https://github.com/rongardF/tvdatafeed.git
 
-      # BƯỚC 1: CẬP NHẬT TOÀN BỘ VĨ MÔ TUẦN MỚI
-      - name: 🌍 1. Quét dữ liệu Vĩ mô & VNINDEX (macro_database.py)
-        run: python macro_database.py
-
-      # BƯỚC 2: MỞ LÒ LUYỆN ĐAN THỨ 7
-      - name: 🧠 2. Đúc Não Bộ AI Mới (train_bot.py)
+      # ==========================================
+      # NHÁNH 1: LUYỆN ĐAN & LƯU BỘ NHỚ (CHỈ CHẠY THỨ 7 HOẶC BẤM TEST TAY)
+      # ==========================================
+      - name: 🧠 Mở Lò Luyện Đan (train_bot.py)
+        if: github.event.schedule == '0 2 * * 6' || github.event_name == 'workflow_dispatch'
         run: python train_bot.py
 
-      # BƯỚC 3: QUÉT CHIẾN LƯỢC TUẦN & BẮN TELEGRAM
-      - name: 🎯 3. Quét Tín Hiệu & Gửi Báo Cáo Tuần (quant_bot.py)
+      - name: 💾 Lưu Não Bộ Mới Lên Github (.json)
+        if: github.event.schedule == '0 2 * * 6' || github.event_name == 'workflow_dispatch'
+        run: |
+          git config --global user.name "Quant AutoBot"
+          git config --global user.email "bot@quant.com"
+          git add xgboost_ultimate.json
+          git commit -m "🤖 [Auto-Update] Đã đúc xong não bộ AI tuần mới" || echo "Không có sự thay đổi để commit"
+          git push
+
+      # ==========================================
+      # NHÁNH 2: NGẮM BẮN & BÁO CÁO (CHẠY T2-T6 HOẶC BẤM TEST TAY)
+      # ==========================================
+      - name: 🎯 Bắn tín hiệu Telegram (quant_bot.py)
+        if: github.event.schedule == '30 8 * * 1-5' || github.event_name == 'workflow_dispatch'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python quant_bot.py
 
-      # BƯỚC 4: TỰ ĐỘNG LƯU TOÀN BỘ KẾT QUẢ LÊN GITHUB CHO POWER BI
-      - name: 💾 4. Lưu Não Bộ, Dữ Liệu & Sổ Lệnh Lên Github
+      - name: 📊 Cập nhật Sổ Kế Toán trading_log.csv lên Github (cho Power BI)
+        if: github.event.schedule == '30 8 * * 1-5' || github.event_name == 'workflow_dispatch'
         run: |
           git config --global user.name "Quant AutoBot"
           git config --global user.email "bot@quant.com"
-          git add markets_database10years.csv markets_database_now.csv vn_markets_database10years.csv global_markets_database10years.csv xgboost_ultimate.json trading_log.csv
-          git commit -m "🤖 [Auto-Update Thứ 7] Cập nhật Vĩ mô, Não bộ AI & Sổ lệnh tuần mới [skip ci]" || echo "Không có thay đổi để commit"
+          git add trading_log.csv
+          git commit -m "📊 [Auto-Update] Cập nhật sổ kế toán giao dịch trading_log.csv cho Power BI" || echo "Không có giao dịch mới để commit"
           git push
