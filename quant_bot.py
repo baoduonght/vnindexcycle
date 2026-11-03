@@ -105,12 +105,12 @@ for c in stock_tickers:
     stocks_rsi[c] = calc_rsi(stocks_close[c])
 
 # ==========================================
-# 3. TẢI NÃO BỘ AI & CHẤM ĐIỂM (KHÔNG HỌC LẠI)
+# 3. TẢI NÃO BỘ AI & CHẤM ĐIỂM (CẬP NHẬT TỶ GIÁ & ĐỘNG LƯỢNG)
 # ==========================================
-print("3. Đang tải bộ nhớ AI tĩnh...")
+print("3. Đang tải bộ nhớ AI tĩnh & Đồng bộ Vĩ mô CSV...")
 try:
-    macro_df = pd.read_csv('global_markets_database10years.csv')
-    macro_df = macro_df[['Date', 'DXY', 'US10Y']]
+    macro_df = pd.read_csv('markets_database10years.csv')
+    macro_df = macro_df[['Date', 'DXY', 'US10Y', 'USD_VND']]
     macro_df['Date'] = pd.to_datetime(macro_df['Date']).dt.strftime('%Y-%m-%d')
     macro_df = macro_df.sort_values('Date').reset_index(drop=True)
 except Exception as e:
@@ -121,7 +121,8 @@ market_context['VN_Dist_MA200'] = market_context['VNINDEX'] / market_context['MA
 market_context['Date'] = pd.to_datetime(market_context['Date']).dt.strftime('%Y-%m-%d')
 
 macro_df = macro_df.merge(market_context, on='Date', how='left').ffill()
-for col in ['DXY', 'US10Y']:
+macro_cols = ['DXY', 'US10Y', 'USD_VND']
+for col in macro_cols:
     macro_df[f'Z_{col}'] = (macro_df[col] - macro_df[col].rolling(120).mean()) / macro_df[col].rolling(120).std()
 
 df_ml_list = []
@@ -131,11 +132,12 @@ for c in stock_tickers:
     df_c['Vol_Ratio'] = (stocks_volume[f'{c}_V'] / stocks_vol_ma20[f'{c}_V']).values
     df_c['Dist_MA50'] = (stocks_close[c] / stocks_ma50[c]).values
     df_c['RSI'] = calc_rsi(stocks_close[c]).values
+    df_c['RSI_Momentum'] = pd.Series(df_c['RSI']).diff(3).values # Động lượng RSI
     df_c['MACD_Hist'] = calc_macd_hist(stocks_close[c]).values
     df_ml_list.append(df_c)
 
 ml_master = pd.concat(df_ml_list).merge(macro_df, on='Date', how='left')
-ml_features = ['Vol_Ratio', 'Dist_MA50', 'RSI', 'VN_MFI', 'MACD_Hist', 'VN_Dist_MA200', 'Z_DXY', 'Z_US10Y']
+ml_features = ['Vol_Ratio', 'Dist_MA50', 'RSI', 'RSI_Momentum', 'VN_MFI', 'MACD_Hist', 'VN_Dist_MA200', 'Z_DXY', 'Z_US10Y', 'Z_USD_VND']
 
 MODEL_FILE = "xgboost_ultimate.json"
 xgb_model = xgb.XGBClassifier()
@@ -217,7 +219,7 @@ def run_ai_quant_system_with_log():
                         if pd.isna(prev_high_20) or pd.isna(prev_vol_ma20): continue
                         if curr_price > prev_high_20 and curr_vol > (prev_vol_ma20 * 1.5):
                             ai_score = ai_dict[c].get(date, 0)
-                            if pd.notna(ai_score) and ai_score >= 0.80:
+                            if pd.notna(ai_score) and ai_score >= 0.72: # Chuẩn Sniper tối ưu
                                 buy_candidates.append((c, ai_score, curr_vol/prev_vol_ma20 if prev_vol_ma20>0 else 0, stocks_rsi.at[date, c]))
 
                 if buy_candidates:
