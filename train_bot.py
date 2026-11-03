@@ -132,7 +132,7 @@ for c in stock_tickers:
     
     # Target: Lợi nhuận > 2% trong vòng 30 phiên
     future_return = stocks_close[c].shift(-30) / stocks_close[c] - 1
-    df_c['Target'] = (future_return > 0.02).astype(int).values
+    df_c['Target'] = (future_return > 0.05).astype(int).values
     df_ml_list.append(df_c)
 
 ml_master = pd.concat(df_ml_list).merge(macro_df, on='Date', how='left')
