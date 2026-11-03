@@ -101,22 +101,25 @@ stocks_vol_ma20 = stocks_volume.rolling(20).mean().shift(1)
 # ==========================================
 # 3. CHUẨN BỊ BỘ DỮ LIỆU ĐỂ AI HỌC (TRAIN DATA)
 # ==========================================
-print("3. Khởi tạo màng lưới tính toán...")
+print("3. Khởi tạo màng lưới tính toán (Bản Sniper)...")
 try:
-    macro_df = pd.read_csv('global_markets_database10years.csv')
-    macro_df = macro_df[['Date', 'DXY', 'US10Y']]
+    # Đọc file tổng hợp từ hệ thống Cào Vĩ mô của bác
+    macro_df = pd.read_csv('markets_database10years.csv')
+    macro_df = macro_df[['Date', 'DXY', 'US10Y', 'USD_VND']]
     macro_df['Date'] = pd.to_datetime(macro_df['Date']).dt.strftime('%Y-%m-%d')
-    fresh_us_dates = macro_df.dropna(subset=['DXY', 'US10Y'])['Date'].tolist()
+    fresh_us_dates = macro_df.dropna(subset=['DXY', 'US10Y', 'USD_VND'])['Date'].tolist()
     macro_df = macro_df.sort_values('Date').reset_index(drop=True)
 except Exception as e:
-    sys.exit(f"🛑 LỖI ĐỌC FILE VĨ MÔ: {e}. Bác nhớ up file csv lên Github nhé!")
+    sys.exit(f"🛑 LỖI ĐỌC FILE VĨ MÔ: {e}. Bác nhớ cập nhật file CSV lên Github nhé!")
 
 market_context = vnindex_df[['Date', 'VN_MFI', 'VNINDEX', 'MA200']].copy()
 market_context['VN_Dist_MA200'] = market_context['VNINDEX'] / market_context['MA200']
 market_context['Date'] = pd.to_datetime(market_context['Date']).dt.strftime('%Y-%m-%d')
 
 macro_df = macro_df.merge(market_context[['Date', 'VN_MFI', 'VN_Dist_MA200']], on='Date', how='left').ffill()
-macro_cols = ['DXY', 'US10Y']
+
+# Tính Z-Score cho 3 biến (Kể cả Tỷ giá)
+macro_cols = ['DXY', 'US10Y', 'USD_VND']
 for col in macro_cols:
     macro_df[f'Z_{col}'] = (macro_df[col] - macro_df[col].rolling(120).mean()) / macro_df[col].rolling(120).std()
 z_cols = [f'Z_{c}' for c in macro_cols]
@@ -128,15 +131,16 @@ for c in stock_tickers:
     df_c['Vol_Ratio'] = (stocks_volume[f'{c}_V'] / stocks_vol_ma20[f'{c}_V']).values
     df_c['Dist_MA50'] = (stocks_close[c] / stocks_ma50[c]).values
     df_c['RSI'] = calc_rsi(stocks_close[c]).values
+    df_c['RSI_Momentum'] = pd.Series(df_c['RSI']).diff(3).values # Gia tốc RSI
     df_c['MACD_Hist'] = calc_macd_hist(stocks_close[c]).values
     
-    # Target: Lợi nhuận > 2% trong vòng 30 phiên
+    # Target: Lợi nhuận > 5% trong vòng 30 phiên (Ép AI học bài khó)
     future_return = stocks_close[c].shift(-30) / stocks_close[c] - 1
     df_c['Target'] = (future_return > 0.05).astype(int).values
     df_ml_list.append(df_c)
 
 ml_master = pd.concat(df_ml_list).merge(macro_df, on='Date', how='left')
-ml_features = ['Vol_Ratio', 'Dist_MA50', 'RSI', 'VN_MFI', 'MACD_Hist', 'VN_Dist_MA200'] + z_cols
+ml_features = ['Vol_Ratio', 'Dist_MA50', 'RSI', 'RSI_Momentum', 'VN_MFI', 'MACD_Hist', 'VN_Dist_MA200'] + z_cols
 ml_master = ml_master[ml_master['Date'].isin(fresh_us_dates)]
 ml_master_clean = ml_master.dropna(subset=ml_features).copy()
 
@@ -161,9 +165,10 @@ if len(X_train) == 0:
 
 scale_weight = len(y_train[y_train == 0]) / len(y_train[y_train == 1]) if len(y_train[y_train == 1]) > 0 else 1
 
+# Tinh chỉnh lại lõi AI (Học sâu hơn một chút để xử lý 10 biến)
 xgb_model = xgb.XGBClassifier(
     n_estimators=150,              
-    max_depth=4,                   
+    max_depth=5, # Tăng nhẹ độ sâu để AI hiểu liên kết chéo giữa Tỷ giá và Trái phiếu                  
     learning_rate=0.05,            
     subsample=0.8,                 
     colsample_bytree=0.8,          
