@@ -372,7 +372,7 @@ print("4. Chạy Sổ Kế Toán (Trend Following + Tiền Mặt Gửi Bank 5%/N
 def run_ai_quant_system_with_log():
     # Đồng bộ đúng 10 năm theo dữ liệu vĩ mô (từ 01/01/2014)
     backtest = df_clean[df_clean['Date'] >= '2014-01-01'].copy().reset_index(drop=True)
-    MAX_SLOTS = 10
+    MAX_SLOTS = 5
     LIQUIDITY_FEE = 0.0035  # Phí giao dịch + Thuế bán 0.1%
     ANNUAL_BANK_RATE = 0.05 # Lãi suất gửi ngân hàng 5%/năm
     cash = 100_000_000 
