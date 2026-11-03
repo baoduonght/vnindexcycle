@@ -211,16 +211,26 @@ def run_ai_quant_system_with_log():
             empty = MAX_SLOTS - len(held)
             if empty > 0 and (idx > market_ma200) and (market_adx > 22) and (allowed_capital > 0):
                 buy_candidates = []
-                for c in stock_tickers:
-                    if c not in held:
-                        curr_price, curr_vol = stocks_close.at[date, c], stocks_volume.at[date, f'{c}_V']
-                        prev_high_20, prev_vol_ma20 = stocks_high_20.at[date, c], stocks_vol_ma20.at[date, f'{c}_V']
+                # Căn chuẩn giá VNINDEX theo lịch giao dịch của rổ VN30
+vn_close_aligned = vnindex_df.set_index('Date')['VNINDEX'].reindex(stocks_close.index).ffill()
+# Tính lợi nhuận tương lai 30 phiên của chính VNINDEX
+vn_future_return = vn_close_aligned.shift(-30) / vn_close_aligned - 1
 
-                        if pd.isna(prev_high_20) or pd.isna(prev_vol_ma20): continue
-                        if curr_price > prev_high_20 and curr_vol > (prev_vol_ma20 * 1.5):
-                            ai_score = ai_dict[c].get(date, 0)
-                            if pd.notna(ai_score) and ai_score >= 0.72: # Chuẩn Sniper tối ưu
-                                buy_candidates.append((c, ai_score, curr_vol/prev_vol_ma20 if prev_vol_ma20>0 else 0, stocks_rsi.at[date, c]))
+df_ml_list = []
+clean_dates = pd.to_datetime(stocks_close.index).strftime('%Y-%m-%d')
+for c in stock_tickers:
+    df_c = pd.DataFrame({'Date': clean_dates, 'Ticker': c})
+    df_c['Vol_Ratio'] = (stocks_volume[f'{c}_V'] / stocks_vol_ma20[f'{c}_V']).values
+    df_c['Dist_MA50'] = (stocks_close[c] / stocks_ma50[c]).values
+    df_c['RSI'] = calc_rsi(stocks_close[c]).values
+    df_c['RSI_Momentum'] = pd.Series(df_c['RSI']).diff(3).values 
+    df_c['MACD_Hist'] = calc_macd_hist(stocks_close[c]).values
+    
+    # PHƯƠNG PHÁP ALPHA: ĐÁNH BẠI VNINDEX
+    stock_future_return = stocks_close[c].shift(-30) / stocks_close[c] - 1
+    # Đánh nhãn (Target = 1) CHỈ KHI lợi nhuận mã này LỚN HƠN lợi nhuận VNINDEX
+    df_c['Target'] = (stock_future_return > vn_future_return).astype(int).values
+    df_ml_list.append(df_c)
 
                 if buy_candidates:
                     invest_amt = min(allowed_capital / empty, cash)
