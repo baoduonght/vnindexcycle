@@ -235,6 +235,22 @@ def run_ai_quant_system_with_log():
     return pd.DataFrame(trade_log)
 
 df_trade_log = run_ai_quant_system_with_log()
+# ==========================================
+# IN KẾT QUẢ BACKTEST RA MÀN HÌNH CONSOLE
+# ==========================================
+print("\n" + "="*50)
+print("📊 TỔNG KẾT BACKTEST HIỆU QUẢ QUÁ KHỨ")
+print("="*50)
+sells = df_trade_log[df_trade_log['Action'].str.contains('SELL', na=False)]
+total_sells = len(sells)
+win_sells = len(sells[sells['Profit(%)'] > 0])
+
+print(f"Tổng số lệnh đã chốt sổ: {total_sells}")
+if total_sells > 0:
+    print(f"🎯 Tỷ lệ thắng (Win Rate): {win_sells / total_sells * 100:.2f}%")
+    print(f"💰 Lệnh lãi cao nhất: +{sells['Profit(%)'].max()}%")
+    print(f"🩸 Lệnh lỗ nặng nhất: {sells['Profit(%)'].min()}%")
+print("="*50 + "\n")
 
 # ==========================================
 # 5. TELEGRAM RADAR
