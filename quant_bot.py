@@ -181,17 +181,26 @@ if valid_rows.sum() > 0:
 ai_dict = {c: ml_master[ml_master['Ticker'] == c].set_index('Date')['AI_Score'] for c in stock_tickers}
 
 # ==========================================
-# 4. CHẠY BACKTEST KẾ TOÁN (5 SLOTS + LÃI KÉP TÁI ĐẦU TƯ)
+# 4. CHẠY BACKTEST KẾ TOÁN (CÓ TRƯỢT GIÁ THỰC TẾ & TÍNH MDD)
 # ==========================================
-print("4. Chạy Sổ Kế Toán (5 Slots + Lãi Kép Tái Đầu Tư Toàn Diện)...")
+print("4. Chạy Sổ Kế Toán (5 Slots + Trượt Giá 0.5% + Ghi Nhận Maximum Drawdown)...")
 def run_ai_quant_system_with_log():
     backtest = df_clean[df_clean['Date'] >= '2014-01-01'].copy().reset_index(drop=True)
-    MAX_SLOTS = 5           # 🎯 CHUẨN 5 SLOTS (Mỗi mã 20% NAV)
-    LIQUIDITY_FEE = 0.0035  # Phí giao dịch + Thuế bán 0.1%
-    ANNUAL_BANK_RATE = 0.05 # Lãi suất gửi ngân hàng 5%/năm
+    MAX_SLOTS = 5
+    
+    # 🎯 MA SÁT THỊ TRƯỜNG THỰC TẾ:
+    BROKER_FEE = 0.0015   # Phí giao dịch 0.15%
+    TAX_SELL = 0.0010     # Thuế bán 0.1%
+    SLIPPAGE = 0.0050     # Độ trượt giá 0.5% mỗi chiều (mua đuổi / bán tháo)
+    
+    BUY_FRICTION = BROKER_FEE + SLIPPAGE        # Tổng ma sát khi Mua: ~0.65%
+    SELL_FRICTION = BROKER_FEE + TAX_SELL + SLIPPAGE # Tổng ma sát khi Bán: ~0.75%
+    
+    ANNUAL_BANK_RATE = 0.04 # Lãi suất quản lý tiền nhàn rỗi thận trọng: 4%/năm
     cash = 100_000_000 
     held = {}
     trade_log = [] 
+    daily_nav_log = []
     total_bank_interest = 0.0
     prev_date = None
 
@@ -208,7 +217,7 @@ def run_ai_quant_system_with_log():
         if date not in stocks_close_clean.index: 
             continue
             
-        # 🏦 Tính lãi ngân hàng cho tiền mặt theo ngày thực tế (đủ 365 ngày cả T7/CN/Lễ)
+        # 🏦 Tính lãi ngân hàng cho tiền mặt theo ngày thực tế (365 ngày)
         if prev_date is not None:
             cal_days = (date - prev_date).days
             if cal_days > 0 and cash > 0:
@@ -228,8 +237,9 @@ def run_ai_quant_system_with_log():
                 if held[c]['days_held'] >= 2:
                     sell_price = stocks_close_clean.at[date, c]
                     if pd.notna(sell_price) and sell_price > 0:
-                        cash += held[c]['qty'] * sell_price * (1 - LIQUIDITY_FEE)
-                        profit = (sell_price / held[c]['buy_price'] - 1) * 100
+                        net_cash_received = held[c]['qty'] * sell_price * (1 - SELL_FRICTION)
+                        cash += net_cash_received
+                        profit = (sell_price * (1 - SELL_FRICTION) / held[c]['cost_basis'] - 1) * 100
                         trade_log.append({'Date': date, 'Action': 'SELL (Thị trường gãy MA100)', 'Ticker': c, 'Price': sell_price, 'Profit(%)': round(profit, 2)})
                         del held[c]
         else:
@@ -251,22 +261,21 @@ def run_ai_quant_system_with_log():
                     # Chặn lãi: Thủng MA20 ngắn hạn khi đang có lãi nhẹ (> 5%) -> Nhả hàng
                     elif curr_price < stocks_ma20.at[date, c] and profit_margin > 0.05:
                         to_remove.append((c, 'SELL (Thủng MA20)'))
-                    # KHÔNG CẮT LỖ KHI ÂM: Ôm tiếp nếu VNINDEX chưa gãy MA100
 
             for c, reason in to_remove:
                 sell_price = stocks_close_clean.at[date, c]
-                cash += held[c]['qty'] * sell_price * (1 - LIQUIDITY_FEE)
-                profit = (sell_price / held[c]['buy_price'] - 1) * 100
+                net_cash_received = held[c]['qty'] * sell_price * (1 - SELL_FRICTION)
+                cash += net_cash_received
+                profit = (sell_price * (1 - SELL_FRICTION) / held[c]['cost_basis'] - 1) * 100
                 trade_log.append({'Date': date, 'Action': reason, 'Ticker': c, 'Price': sell_price, 'Profit(%)': round(profit, 2)})
                 del held[c]
 
-            # Quản trị tỷ trọng: Tính tổng NAV hiện tại (bao gồm vốn gốc + toàn bộ lãi tích lũy)
+            # Quản trị tỷ trọng theo NAV hiện tại
             stock_val = sum([held[c]['qty'] * stocks_close_clean.at[date, c] for c in held if pd.notna(stocks_close_clean.at[date, c])])
             current_total_nav = cash + stock_val
             max_exposure = 0.3 if (idx < market_ma50 or market_atr_pct > 0.018) else 1.0
             allowed_capital = max(0, (current_total_nav * max_exposure) - stock_val)
 
-            # Ưu tiên kiểm định VN-Index phải Uptrend trước (Trên MA200 và ADX > 20)
             empty = MAX_SLOTS - len(held)
             if empty > 0 and (idx > market_ma200) and (market_adx > 20) and (allowed_capital > 0):
                 buy_candidates = []
@@ -289,20 +298,20 @@ def run_ai_quant_system_with_log():
                                 s_rsi_val = stocks_rsi.at[date, c] if c in stocks_rsi.columns and date in stocks_rsi.index else 50
                                 buy_candidates.append((c, ai_score, curr_vol / prev_vol_ma20 if prev_vol_ma20 > 0 else 0, s_rsi_val))
 
-                # Sắp xếp ưu tiên cổ phiếu có điểm AI cao nhất
                 buy_candidates.sort(key=lambda x: x[1], reverse=True)
 
                 if buy_candidates:
-                    # 🚀 LÃI KÉP: Mỗi slot chiếm đúng 1/5 (20%) tổng tài sản hiện có (Vốn + Lãi tích lũy)
                     target_slot_val = (current_total_nav * max_exposure) / MAX_SLOTS
                     for c, score, v_ratio, s_rsi in buy_candidates:
                         slot_invest = min(target_slot_val, cash, allowed_capital)
                         if slot_invest > 1_000_000 and empty > 0 and cash >= slot_invest:
                             buy_price = stocks_close_clean.at[date, c]
-                            actual_invest = slot_invest * (1 - LIQUIDITY_FEE)
+                            # Tính cả trượt giá và phí mua vào giá vốn
+                            actual_invest = slot_invest * (1 - BUY_FRICTION)
                             held[c] = {
                                 'qty': actual_invest / buy_price,
                                 'buy_price': buy_price,
+                                'cost_basis': buy_price * (1 + BUY_FRICTION), # Giá vốn thực tế sau ma sát
                                 'highest': buy_price,
                                 'days_held': 0
                             }
@@ -318,9 +327,13 @@ def run_ai_quant_system_with_log():
                             if empty == 0 or cash <= 0 or allowed_capital <= 0:
                                 break
 
-    return pd.DataFrame(trade_log), held, cash, total_bank_interest
+        # Ghi nhận NAV hàng ngày để vẽ đường cong tài sản & tính Maximum Drawdown
+        current_nav = cash + sum([held[c]['qty'] * stocks_close_clean.at[date, c] for c in held if pd.notna(stocks_close_clean.at[date, c])])
+        daily_nav_log.append({'Date': date, 'NAV': current_nav})
 
-df_trade_log, current_held, final_cash, total_bank_earned = run_ai_quant_system_with_log()
+    return pd.DataFrame(trade_log), pd.DataFrame(daily_nav_log), held, cash, total_bank_interest
+
+df_trade_log, df_daily_nav, current_held, final_cash, total_bank_earned = run_ai_quant_system_with_log()
 
 # ==========================================
 # 5. XUẤT FILE TRADING LOG CHO POWER BI
@@ -334,11 +347,11 @@ else:
     print("⚠️ Chưa có lệnh nào phát sinh.")
 
 # ==========================================
-# 6. IN KẾT QUẢ RA CONSOLE (TỔNG TÀI SẢN & SO SÁNH ETF)
+# 6. IN KẾT QUẢ RA CONSOLE (TÍNH TOÁN MAXIMUM DRAWDOWN CHUẨN QUỸ)
 # ==========================================
-print("\n" + "="*50)
-print("📊 TỔNG KẾT HIỆU QUẢ DANH MỤC THỰC CHIẾN 10 NĂM")
-print("="*50)
+print("\n" + "="*55)
+print("📊 BÁO CÁO ĐỊNH LƯỢNG RỦI RO & HIỆU QUẢ DANH MỤC 10 NĂM")
+print("="*55)
 
 INITIAL_CAPITAL = 100_000_000
 stock_val_final = sum([current_held[c]['qty'] * stocks_close_clean.at[latest_date, c] for c in current_held if pd.notna(stocks_close_clean.at[latest_date, c])])
@@ -349,13 +362,32 @@ start_backtest_date = pd.to_datetime('2014-01-01')
 total_years = (latest_date - start_backtest_date).days / 365.25
 cagr = ((total_nav_final / INITIAL_CAPITAL) ** (1 / total_years) - 1) * 100 if total_years > 0 else 0
 
+# 📉 TÍNH MAXIMUM DRAWDOWN (SỤT GIẢM TỐI ĐA TOÀN TÀI KHOẢN TỪ ĐỈNH)
+if not df_daily_nav.empty:
+    df_daily_nav['Peak_NAV'] = df_daily_nav['NAV'].cummax()
+    df_daily_nav['Drawdown'] = (df_daily_nav['NAV'] - df_daily_nav['Peak_NAV']) / df_daily_nav['Peak_NAV']
+    max_dd = df_daily_nav['Drawdown'].min() * 100
+    
+    # Tìm thời điểm đỉnh và đáy của đợt sụt giảm lớn nhất
+    worst_idx = df_daily_nav['Drawdown'].idxmin()
+    worst_row = df_daily_nav.loc[worst_idx]
+    peak_row = df_daily_nav.loc[:worst_idx].loc[df_daily_nav.loc[:worst_idx, 'NAV'].idxmax()]
+    mdd_peak_date = peak_row['Date'].strftime('%d/%m/%Y')
+    mdd_trough_date = worst_row['Date'].strftime('%d/%m/%Y')
+else:
+    max_dd = 0.0
+    mdd_peak_date, mdd_trough_date = "N/A", "N/A"
+
 print(f"💵 Vốn khởi điểm (01/2014): {INITIAL_CAPITAL:,.0f} VNĐ")
 print(f"🏦 TỔNG TÀI SẢN HIỆN TẠI (NAV): {total_nav_final:,.0f} VNĐ")
-print(f"💰 LÃI GỬI NGÂN HÀNG ĐÃ THU VỀ (5%/năm): +{total_bank_earned:,.0f} VNĐ")
-print(f"🚀 TỔNG LỢI NHUẬN TÀI KHOẢN: {total_return_pct:+,.2f}%")
+print(f"💰 Lãi gửi Bank thu về (4%/năm): +{total_bank_earned:,.0f} VNĐ")
+print(f"🚀 TỔNG LỢI NHUẬN (Đã trừ trượt giá & phí): {total_return_pct:+,.2f}%")
 print(f"📈 Lợi nhuận kép trung bình (CAGR): {cagr:.2f}% / năm")
-print(f"📌 (So sánh: Gửi bank đơn thuần ~5.5%/năm | Mua ETF VN30 ~9.5%/năm)")
-print("-" * 50)
+print("-" * 55)
+print(f"📉 SỤT GIẢM TỐI ĐA (Maximum Drawdown - MDD): {max_dd:.2f}%")
+print(f"   (Thời kỳ chịu đựng lớn nhất: Từ đỉnh {mdd_peak_date} rơi về đáy {mdd_trough_date})")
+print(f"📌 (So sánh: Năm 2022 VN-Index sụt -42.5%, ETF VN30 sụt -48.2%)")
+print("-" * 55)
 
 if not df_trade_log.empty and 'Action' in df_trade_log.columns:
     sells = df_trade_log[df_trade_log['Action'].str.contains('SELL', na=False)]
@@ -368,7 +400,7 @@ if not df_trade_log.empty and 'Action' in df_trade_log.columns:
         print(f"🩸 Lệnh lỗ đơn lẻ sâu nhất: {sells['Profit(%)'].min()}%")
     else:
         print("⏳ Bot đang ôm hàng theo trend, chưa chốt sổ lệnh BÁN nào.")
-print("="*50 + "\n")
+print("="*55 + "\n")
 
 # ==========================================
 # 7. TELEGRAM RADAR: BẢN TIN CHIẾN LƯỢC TUẦN
@@ -421,7 +453,7 @@ msg += f"• MA100: {latest_ma100:.1f} | MA200: {latest_ma200:.1f} | ADX: {lates
 
 if is_downtrend:
     msg += f"🛑 <b>Trạng thái: NGUY HIỂM (Dưới MA100)</b>\n"
-    msg += f"<i>Khuyến nghị: Thị trường gãy kênh, ưu tiên cầm 100% Tiền mặt nhận lãi Bank 5%/năm.</i>\n\n"
+    msg += f"<i>Khuyến nghị: Thị trường gãy kênh, ưu tiên cầm 100% Tiền mặt nhận lãi Bank 4%/năm.</i>\n\n"
 elif is_uptrend:
     msg += f"🟢 <b>Trạng thái: UPTREND XÁC NHẬN (Trên MA200)</b>\n"
     msg += f"<i>Đèn xanh bật: Cho phép kích hoạt quét cổ phiếu VN30 để gom hàng cho tuần tới.</i>\n\n"
@@ -459,6 +491,7 @@ else:
 msg += f"\n💼 <b>TÀI CHÍNH & DANH MỤC HIỆN TẠI:</b>\n"
 msg += f"• Tổng NAV: <b>{total_nav_final:,.0f} VNĐ</b> ({total_return_pct:+,.1f}%)\n"
 msg += f"• Tiền lãi gửi Bank đã thu: <b>+{total_bank_earned:,.0f} VNĐ</b>\n"
+msg += f"• Rủi ro sụt giảm tối đa (MDD): <b>{max_dd:.1f}%</b>\n"
 if current_held:
     for ticker, info in current_held.items():
         curr_price = stocks_close_clean.at[latest_date, ticker]
@@ -466,7 +499,7 @@ if current_held:
         icon = "🟢" if pnl >= 0 else "🔴"
         msg += f"{icon} <b>{ticker}</b>: {pnl:+.1f}% (T+{info['days_held']})\n"
 else:
-    msg += f"• Cổ phiếu: <i>100% Tiền mặt (Đang hưởng lãi Bank 5%/năm).</i>\n"
+    msg += f"• Cổ phiếu: <i>100% Tiền mặt (Đang hưởng lãi Bank 4%/năm).</i>\n"
 
 msg += f"➖➖➖➖➖➖➖➖➖➖"
 send_telegram_msg(msg)
