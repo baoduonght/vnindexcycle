@@ -329,6 +329,8 @@ print("\n" + "="*50)
 print("📊 TỔNG KẾT HIỆU QUẢ DANH MỤC THỰC CHIẾN 10 NĂM")
 print("="*50)
 
+latest_date = df_clean['Date'].iloc[-1]
+
 INITIAL_CAPITAL = 100_000_000
 stock_val_final = sum([current_held[c]['qty'] * stocks_close_clean.at[latest_date, c] for c in current_held if pd.notna(stocks_close_clean.at[latest_date, c])])
 total_nav_final = final_cash + stock_val_final
@@ -336,9 +338,9 @@ total_return_pct = (total_nav_final / INITIAL_CAPITAL - 1) * 100
 
 # Tính số năm đầu tư thực tế
 total_years = (latest_date - df_clean['Date'].iloc[0]).days / 365.25
-cagr = ((total_nav_final / INITIAL_CAPITAL) ** (1 / total_years) - 1) * 100
+cagr = ((total_nav_final / INITIAL_CAPITAL) ** (1 / total_years) - 1) * 100 if total_years > 0 else 0
 
-print(f"💵 Vốn khởi điểm (2014): {INITIAL_CAPITAL:,.0f} VNĐ")
+print(f"💵 Vốn khởi điểm: {INITIAL_CAPITAL:,.0f} VNĐ")
 print(f"🏦 TỔNG TÀI SẢN HIỆN TẠI (NAV): {total_nav_final:,.0f} VNĐ")
 print(f"🚀 TỔNG LỢI NHUẬN TÀI KHOẢN: {total_return_pct:+,.2f}%")
 print(f"📈 Lợi nhuận kép trung bình (CAGR): {cagr:.2f}% / năm")
