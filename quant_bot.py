@@ -217,7 +217,7 @@ def run_ai_quant_system_with_log():
                         if pd.isna(prev_high_20) or pd.isna(prev_vol_ma20): continue
                         if curr_price > prev_high_20 and curr_vol > (prev_vol_ma20 * 1.5):
                             ai_score = ai_dict[c].get(date, 0)
-                            if pd.notna(ai_score) and ai_score >= 0.65:
+                            if pd.notna(ai_score) and ai_score >= 0.80:
                                 buy_candidates.append((c, ai_score, curr_vol/prev_vol_ma20 if prev_vol_ma20>0 else 0, stocks_rsi.at[date, c]))
 
                 if buy_candidates:
