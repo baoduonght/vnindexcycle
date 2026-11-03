@@ -81,7 +81,7 @@ vnindex_df['ATR_PCT'] = calc_atr(vnindex_df['High'], vnindex_df['Low'], vnindex_
 vnindex_df['VN_MFI'] = calc_mfi(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], vnindex_df['Volume'], 14)
 
 # ==========================================
-# 2. TẢI DỮ LIỆU VN30 & CHỈ BÁO KỸ THUẬT
+# 2. TẢI DỮ LIỆU VN30 & CHỈ BÁO KỸ THUẬT (GIỮ TRỌN VẸN LỊCH SỬ)
 # ==========================================
 print("2. Đang tải rổ VN30...")
 raw_tickers = ['FPT', 'HPG', 'SSI', 'MWG', 'PNJ', 'TCB', 'MBB', 'VPB', 'ACB', 'VCB']
@@ -107,17 +107,13 @@ for ticker in raw_tickers:
     except Exception as e:
         print(f"⚠️ Bỏ qua {ticker} do lỗi kết nối: {e}")
 
-stocks_close = stocks_close.ffill().dropna()
-stocks_volume = stocks_volume.ffill().fillna(0)
+# Giữ nguyên toàn bộ lịch sử (Không dropna làm mất quá khứ của các mã lên sàn sớm)
 stock_tickers = [c for c in valid_tickers if c in stocks_close.columns]
 
-stocks_ma50 = stocks_close.rolling(50).mean()
-stocks_vol_ma20 = stocks_volume.rolling(20).mean().shift(1)
-
 # ==========================================
-# 3. CHUẨN BỊ BỘ DỮ LIỆU ĐỂ AI HỌC (TRAIN DATA)
+# 3. CHUẨN BỊ BỘ DỮ LIỆU ĐỂ AI HỌC (TRAIN DATA ĐỘC LẬP TỪNG MÃ)
 # ==========================================
-print("3. Khởi tạo màng lưới tính toán...")
+print("3. Khởi tạo màng lưới tính toán (Giữ trọn vẹn 100% lịch sử từng mã)...")
 try:
     macro_df = pd.read_csv('markets_database10years.csv')
     macro_df = macro_df[['Date', 'DXY', 'US10Y', 'USD_VND']]
@@ -136,27 +132,40 @@ for col in macro_cols:
     macro_df[f'Z_{col}'] = (macro_df[col] - macro_df[col].rolling(120).mean()) / macro_df[col].rolling(120).std()
 z_cols = [f'Z_{c}' for c in macro_cols]
 
-# Đồng bộ VN-INDEX theo lịch giao dịch của rổ VN30
-vn_close_aligned = vnindex_df.set_index('Date')['VNINDEX'].reindex(stocks_close.index).ffill()
-# Lợi nhuận tương lai 30 phiên của VNINDEX
-vn_future_return = vn_close_aligned.shift(-30) / vn_close_aligned - 1
+# Đồng bộ VNINDEX theo dòng thời gian
+vn_series = vnindex_df.set_index('Date')['VNINDEX'].sort_index()
+vn_future_return = vn_series.shift(-30) / vn_series - 1
 
 df_ml_list = []
 for c in stock_tickers:
-    df_c = pd.DataFrame({'Date': stocks_close.index, 'Ticker': c})
-    df_c['Vol_Ratio'] = (stocks_volume[f'{c}_V'] / stocks_vol_ma20[f'{c}_V'].replace(0, np.nan)).values
-    df_c['Dist_MA50'] = (stocks_close[c] / stocks_ma50[c].replace(0, np.nan)).values
-    df_c['RSI'] = calc_rsi(stocks_close[c]).values
+    # Lấy đúng chuỗi ngày mà mã c THỰC TẾ CÓ GIAO DỊCH TRONG LỊCH SỬ
+    s_price = stocks_close[c].dropna()
+    if len(s_price) < 100: 
+        continue  # Mã mới lên sàn dưới 100 ngày thì bỏ qua
+        
+    valid_dates = s_price.index
+    s_vol = stocks_volume[f'{c}_V'].reindex(valid_dates).fillna(0)
+    
+    # Tính toán chỉ báo kỹ thuật riêng cho mã c trên đúng dòng thời gian của nó
+    s_ma50 = s_price.rolling(50).mean()
+    s_vol_ma20 = s_vol.rolling(20).mean().shift(1)
+    s_rsi = calc_rsi(s_price)
+    s_macd = calc_macd_hist(s_price)
+    
+    df_c = pd.DataFrame({'Date': valid_dates, 'Ticker': c})
+    df_c['Vol_Ratio'] = (s_vol / s_vol_ma20.replace(0, np.nan)).values
+    df_c['Dist_MA50'] = (s_price / s_ma50.replace(0, np.nan)).values
+    df_c['RSI'] = s_rsi.values
     df_c['RSI_Momentum'] = pd.Series(df_c['RSI']).diff(3).values 
-    df_c['MACD_Hist'] = calc_macd_hist(stocks_close[c]).values
+    df_c['MACD_Hist'] = s_macd.values
     
-    # 🎯 PHƯƠNG PHÁP ALPHA: ĐÁNH NHÃN CHUẨN (KHÔNG NHIỄM ĐỘC 30 NGÀY GẦN NHẤT)
-    stock_future_return = stocks_close[c].shift(-30) / stocks_close[c] - 1
+    # Lợi nhuận tương lai của cổ phiếu vs VNINDEX
+    stock_future_return = s_price.shift(-30) / s_price - 1
+    vn_future_aligned = vn_future_return.reindex(valid_dates)
     
-    # Chỉ đánh nhãn khi cả 2 đều thực sự có dữ liệu tương lai
-    valid_mask = stock_future_return.notna() & vn_future_return.notna()
-    target_series = pd.Series(np.nan, index=stocks_close.index)
-    target_series[valid_mask] = (stock_future_return[valid_mask] > vn_future_return[valid_mask]).astype(int)
+    valid_mask = stock_future_return.notna() & vn_future_aligned.notna()
+    target_series = pd.Series(np.nan, index=valid_dates)
+    target_series[valid_mask] = (stock_future_return[valid_mask] > vn_future_aligned[valid_mask]).astype(int)
     
     df_c['Target'] = target_series.values
     df_ml_list.append(df_c)
@@ -164,13 +173,14 @@ for c in stock_tickers:
 ml_master = pd.concat(df_ml_list, ignore_index=True).merge(macro_df, on='Date', how='left')
 ml_features = ['Vol_Ratio', 'Dist_MA50', 'RSI', 'RSI_Momentum', 'VN_MFI', 'MACD_Hist', 'VN_Dist_MA200'] + z_cols
 
-# Loại bỏ hàng thiếu Feature hoặc thiếu Target (Bao gồm đúng 30 ngày gần nhất chưa có kết quả)
+# Bỏ hàng thiếu Feature hoặc thiếu Target (chỉ bỏ 30 ngày gần nhất chưa có kết quả)
 ml_master_clean = ml_master.dropna(subset=ml_features + ['Target']).copy()
 ml_master_clean['Target'] = ml_master_clean['Target'].astype(int)
 
 if ml_master_clean.empty:
     sys.exit("⚠️ LỖI ĐỒNG BỘ: Tập dữ liệu bị rỗng.")
 
+print(f"📊 Tổng số mẫu dữ liệu AI được học (Đầy đủ lịch sử): {len(ml_master_clean)} dòng!")
 # ==========================================
 # 4. HUẤN LUYỆN & KIỂM THỬ ĐỘC LẬP
 # ==========================================
