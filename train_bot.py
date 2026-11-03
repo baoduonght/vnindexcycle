@@ -126,17 +126,25 @@ z_cols = [f'Z_{c}' for c in macro_cols]
 
 df_ml_list = []
 clean_dates = pd.to_datetime(stocks_close.index).strftime('%Y-%m-%d')
+# Căn chuẩn giá VNINDEX theo lịch giao dịch của rổ VN30
+vn_close_aligned = vnindex_df.set_index('Date')['VNINDEX'].reindex(stocks_close.index).ffill()
+# Tính lợi nhuận tương lai 30 phiên của chính VNINDEX
+vn_future_return = vn_close_aligned.shift(-30) / vn_close_aligned - 1
+
+df_ml_list = []
+clean_dates = pd.to_datetime(stocks_close.index).strftime('%Y-%m-%d')
 for c in stock_tickers:
     df_c = pd.DataFrame({'Date': clean_dates, 'Ticker': c})
     df_c['Vol_Ratio'] = (stocks_volume[f'{c}_V'] / stocks_vol_ma20[f'{c}_V']).values
     df_c['Dist_MA50'] = (stocks_close[c] / stocks_ma50[c]).values
     df_c['RSI'] = calc_rsi(stocks_close[c]).values
-    df_c['RSI_Momentum'] = pd.Series(df_c['RSI']).diff(3).values # Gia tốc RSI
+    df_c['RSI_Momentum'] = pd.Series(df_c['RSI']).diff(3).values 
     df_c['MACD_Hist'] = calc_macd_hist(stocks_close[c]).values
     
-    # Target: Lợi nhuận > 5% trong vòng 30 phiên (Ép AI học bài khó)
-    future_return = stocks_close[c].shift(-30) / stocks_close[c] - 1
-    df_c['Target'] = (future_return > 0.05).astype(int).values
+    # PHƯƠNG PHÁP ALPHA: ĐÁNH BẠI VNINDEX
+    stock_future_return = stocks_close[c].shift(-30) / stocks_close[c] - 1
+    # Đánh nhãn (Target = 1) CHỈ KHI lợi nhuận mã này LỚN HƠN lợi nhuận VNINDEX
+    df_c['Target'] = (stock_future_return > vn_future_return).astype(int).values
     df_ml_list.append(df_c)
 
 ml_master = pd.concat(df_ml_list).merge(macro_df, on='Date', how='left')
