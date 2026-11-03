@@ -323,11 +323,27 @@ else:
     print("⚠️ Chưa có lệnh nào phát sinh.")
 
 # ==========================================
-# 6. IN KẾT QUẢ RA CONSOLE
+# 6. IN KẾT QUẢ RA CONSOLE (TỔNG TÀI SẢN & SO SÁNH ETF)
 # ==========================================
 print("\n" + "="*50)
-print("📊 TỔNG KẾT BACKTEST HIỆU QUẢ QUÁ KHỨ")
+print("📊 TỔNG KẾT HIỆU QUẢ DANH MỤC THỰC CHIẾN 10 NĂM")
 print("="*50)
+
+INITIAL_CAPITAL = 100_000_000
+stock_val_final = sum([current_held[c]['qty'] * stocks_close_clean.at[latest_date, c] for c in current_held if pd.notna(stocks_close_clean.at[latest_date, c])])
+total_nav_final = final_cash + stock_val_final
+total_return_pct = (total_nav_final / INITIAL_CAPITAL - 1) * 100
+
+# Tính số năm đầu tư thực tế
+total_years = (latest_date - df_clean['Date'].iloc[0]).days / 365.25
+cagr = ((total_nav_final / INITIAL_CAPITAL) ** (1 / total_years) - 1) * 100
+
+print(f"💵 Vốn khởi điểm (2014): {INITIAL_CAPITAL:,.0f} VNĐ")
+print(f"🏦 TỔNG TÀI SẢN HIỆN TẠI (NAV): {total_nav_final:,.0f} VNĐ")
+print(f"🚀 TỔNG LỢI NHUẬN TÀI KHOẢN: {total_return_pct:+,.2f}%")
+print(f"📈 Lợi nhuận kép trung bình (CAGR): {cagr:.2f}% / năm")
+print(f"📌 (So sánh: Gửi ngân hàng ~5.5%/năm | Mua ETF VN30 ~9.5%/năm)")
+print("-" * 50)
 
 if not df_trade_log.empty and 'Action' in df_trade_log.columns:
     sells = df_trade_log[df_trade_log['Action'].str.contains('SELL', na=False)]
@@ -335,15 +351,12 @@ if not df_trade_log.empty and 'Action' in df_trade_log.columns:
     if total_sells > 0:
         win_sells = len(sells[sells['Profit(%)'] > 0])
         print(f"Tổng số lệnh đã chốt sổ: {total_sells}")
-        print(f"🎯 Tỷ lệ thắng (Win Rate): {win_sells / total_sells * 100:.2f}%")
-        print(f"💰 Lệnh lãi cao nhất: +{sells['Profit(%)'].max()}%")
-        print(f"🩸 Lệnh lỗ sâu nhất: {sells['Profit(%)'].min()}%")
+        print(f"🎯 Tỷ lệ thắng (Win Rate): {win_sells / total_sells * 100:.2f}% (Thắng {win_sells}/{total_sells} trận)")
+        print(f"💰 Lệnh lãi đơn lẻ cao nhất: +{sells['Profit(%)'].max()}%")
+        print(f"🩸 Lệnh lỗ đơn lẻ sâu nhất: {sells['Profit(%)'].min()}%")
     else:
         print("⏳ Bot đang ôm hàng theo trend, chưa chốt sổ lệnh BÁN nào.")
-else:
-    print("🤖 Tiêu chuẩn quá khắt khe, chưa có lệnh MUA/BÁN nào được khớp.")
 print("="*50 + "\n")
-
 # ==========================================
 # 7. TELEGRAM RADAR: BẢN TIN CHIẾN LƯỢC TUẦN
 # ==========================================
