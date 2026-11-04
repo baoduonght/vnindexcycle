@@ -58,34 +58,42 @@ def calc_macd_hist(series, fast=12, slow=26, signal=9):
     return macd - macd_signal
 
 # ==========================================
-# HÀM TẢI DỮ LIỆU ĐA NGUỒN (TRADINGVIEW + VNDIRECT FALLBACK)
+# HÀM TẢI DỮ LIỆU ĐA NGUỒN TỐC ĐỘ CAO (DNSE + VNDIRECT + TCBS + TRADINGVIEW)
 # ==========================================
 def fetch_ticker_data(symbol, n_bars=4000):
+    """
+    Tải dữ liệu chứng khoán tốc độ cao từ các nguồn trực tiếp Việt Nam:
+    1. DNSE (Entrade API) - Siêu nhanh, không bị chặn IP, đầy đủ 10 năm.
+    2. VNDirect (DChart API) - Nguồn dữ liệu bảng giá chính thức.
+    3. TCBS (Techcom Securities) - Nguồn dữ liệu tài chính lớn.
+    4. TradingView (tvDatafeed) - Chỉ làm phương án dự phòng cuối cùng.
+    """
+    now_ts = int(datetime.datetime.now().timestamp())
+    start_ts = int((datetime.datetime.now() - datetime.timedelta(days=12*365)).timestamp())
+
+    # 1. Nguồn 1: DNSE Entrade API (Tốc độ ~50ms, không bao giờ timeout, đủ 10 năm)
     try:
-        df = tv.get_hist(symbol=symbol, exchange='HOSE', interval=Interval.in_daily, n_bars=n_bars)
-        if df is not None and len(df) > 50:
-            df = df.reset_index()
-            df.rename(columns={'datetime': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
-            df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None).dt.normalize()
-            return df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].sort_values('Date').reset_index(drop=True)
+        url = f"https://services.entrade.com.vn/chart-api/v2/ohlcs/stock?from={start_ts}&to={now_ts}&symbol={symbol}&resolution=1D"
+        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}, timeout=6)
+        if res.status_code == 200:
+            data = res.json()
+            if 't' in data and len(data['t']) > 50:
+                df = pd.DataFrame({
+                    'Date': pd.to_datetime(data['t'], unit='s').tz_localize(None).normalize(),
+                    'Open': data['o'],
+                    'High': data['h'],
+                    'Low': data['l'],
+                    'Close': data['c'],
+                    'Volume': data.get('v', [0]*len(data['t']))
+                })
+                return df.drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
     except Exception:
         pass
 
+    # 2. Nguồn 2: VNDirect DChart API
     try:
-        df = tv.get_hist(symbol=symbol, exchange='UPCOM', interval=Interval.in_daily, n_bars=n_bars)
-        if df is not None and len(df) > 50:
-            df = df.reset_index()
-            df.rename(columns={'datetime': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
-            df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None).dt.normalize()
-            return df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].sort_values('Date').reset_index(drop=True)
-    except Exception:
-        pass
-
-    try:
-        now_ts = int(datetime.datetime.now().timestamp())
-        start_ts = int((datetime.datetime.now() - datetime.timedelta(days=12*365)).timestamp())
         url = f"https://dchart-api.vndirect.com.vn/dchart/history?resolution=D&symbol={symbol}&from={start_ts}&to={now_ts}"
-        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=12)
+        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}, timeout=6)
         if res.status_code == 200:
             data = res.json()
             if data.get('s') == 'ok' and len(data.get('t', [])) > 50:
@@ -97,7 +105,32 @@ def fetch_ticker_data(symbol, n_bars=4000):
                     'Close': data['c'],
                     'Volume': data.get('v', [0]*len(data['t']))
                 })
-                return df.sort_values('Date').reset_index(drop=True)
+                return df.drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
+    except Exception:
+        pass
+
+    # 3. Nguồn 3: TCBS Public API
+    try:
+        url = f"https://apipubaws.tcbs.com.vn/stock-insight/v1/stock/bars-long-term?ticker={symbol}&type=stock&resolution=D&from={start_ts}&to={now_ts}"
+        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}, timeout=6)
+        if res.status_code == 200:
+            data = res.json().get('data', [])
+            if len(data) > 50:
+                df = pd.DataFrame(data)
+                df.rename(columns={'tradingDate': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
+                df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None).dt.normalize()
+                return df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
+    except Exception:
+        pass
+
+    # 4. Nguồn 4: TradingView (Phương án dự phòng cuối cùng)
+    try:
+        df = tv.get_hist(symbol=symbol, exchange='HOSE', interval=Interval.in_daily, n_bars=n_bars)
+        if df is not None and len(df) > 50:
+            df = df.reset_index()
+            df.rename(columns={'datetime': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
+            df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None).dt.normalize()
+            return df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
     except Exception:
         pass
 
@@ -111,28 +144,32 @@ vnindex_raw = fetch_ticker_data('VNINDEX', n_bars=4000)
 if vnindex_raw is None or vnindex_raw.empty:
     sys.exit("❌ LỖI: Không thể tải dữ liệu VNINDEX.")
 
-vnindex_df = vnindex_raw.rename(columns={'Close': 'VNINDEX'})
+vnindex_df = vnindex_raw.rename(columns={'Close': 'VNINDEX'}).drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
 vnindex_df['MA50'] = vnindex_df['VNINDEX'].rolling(50).mean()
 vnindex_df['MA100'] = vnindex_df['VNINDEX'].rolling(100).mean()
 vnindex_df['MA200'] = vnindex_df['VNINDEX'].rolling(200).mean()
 vnindex_df['ADX'] = calc_adx(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14)
 vnindex_df['ATR_PCT'] = calc_atr(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14) / vnindex_df['VNINDEX']
 vnindex_df['VN_MFI'] = calc_mfi(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], vnindex_df['Volume'], 14)
-df_clean = vnindex_df.dropna().copy().reset_index(drop=True)
+df_clean = vnindex_df.dropna().drop_duplicates(subset=['Date'], keep='last').copy().reset_index(drop=True)
 
 # ==========================================
 # 2. TẢI TOÀN BỘ RỔ CỔ PHIẾU VN30 LỊCH SỬ (POINT-IN-TIME)
 # ==========================================
 print(f"2. Đang tải dữ liệu {len(ALL_HISTORICAL_VN30_TICKERS)} mã VN30 lịch sử để AI học tập toàn diện...")
 
-stocks_close = pd.DataFrame({'Date': df_clean['Date']}).set_index('Date')
-stocks_volume = pd.DataFrame({'Date': df_clean['Date']}).set_index('Date')
+timeline_dates = pd.DatetimeIndex(df_clean['Date'].drop_duplicates().sort_values())
+
+stocks_close = pd.DataFrame(index=timeline_dates)
+stocks_volume = pd.DataFrame(index=timeline_dates)
 
 loaded_tickers = []
 for ticker in ALL_HISTORICAL_VN30_TICKERS:
     df_t = fetch_ticker_data(ticker, n_bars=4000)
     if df_t is not None and not df_t.empty:
+        df_t = df_t.drop_duplicates(subset=['Date'], keep='last').sort_values('Date')
         df_t.set_index('Date', inplace=True)
+        df_t = df_t[~df_t.index.duplicated(keep='last')]
         stocks_close[ticker] = df_t['Close']
         stocks_volume[f'{ticker}_V'] = df_t['Volume']
         loaded_tickers.append(ticker)
@@ -164,14 +201,15 @@ try:
     macro_df = pd.read_csv('markets_database10years.csv')
     macro_df = macro_df[['Date', 'DXY', 'US10Y', 'USD_VND']]
     macro_df['Date'] = pd.to_datetime(macro_df['Date']).dt.strftime('%Y-%m-%d')
+    macro_df = macro_df.drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
     fresh_us_dates = macro_df.dropna(subset=['DXY', 'US10Y', 'USD_VND'])['Date'].tolist()
-    macro_df = macro_df.sort_values('Date').reset_index(drop=True)
 except Exception as e:
     sys.exit(f"🛑 LỖI ĐỌC FILE VĨ MÔ: {e}")
 
 market_context = vnindex_df[['Date', 'VN_MFI', 'VNINDEX', 'MA200']].copy()
 market_context['VN_Dist_MA200'] = market_context['VNINDEX'] / market_context['MA200']
 market_context['Date'] = pd.to_datetime(market_context['Date']).dt.strftime('%Y-%m-%d')
+market_context = market_context.drop_duplicates(subset=['Date'], keep='last')
 
 macro_df = macro_df.merge(market_context[['Date', 'VN_MFI', 'VN_Dist_MA200']], on='Date', how='left').ffill()
 
