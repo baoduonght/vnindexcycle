@@ -504,11 +504,13 @@ def run_ai_quant_system():
         
         # Giảm tỷ trọng cổ phiếu khi thị trường yếu hoặc biến động cao
         if idx < market_ma50 or market_atr_pct > 0.020:
-            max_exposure = 0.4       # Thị trường yếu: chỉ cho phép 40% NAV vào cổ phiếu
+            max_exposure = 0.4       # Thị trường yếu/biến động cao: chỉ cho phép 40% NAV vào cổ phiếu
+        elif idx < market_ma200:
+            max_exposure = 0.5       # Thị trường Gấu (dưới MA200): tối đa 50% NAV (phòng thủ chống bull trap)
         elif idx < market_ma100:
-            max_exposure = 0.6       # Thị trường hồi phục sớm: 60%
+            max_exposure = 0.7       # Thị trường hồi phục sớm: 70%
         else:
-            max_exposure = 1.0       # Thị trường mạnh: 100%
+            max_exposure = 1.0       # Thị trường Uptrend mạnh toàn diện: 100%
         
         allowed_stock_cap = max(0.0, (current_nav * max_exposure) - stock_val_now)
 
@@ -518,10 +520,12 @@ def run_ai_quant_system():
         # ====================================================================
         if empty_slots > 0 and (idx > market_ma100) and (market_adx > ADX_MIN) and (allowed_stock_cap > 0):
             buy_candidates = []
+            prev_date = backtest['Date'].iloc[i-1] if i > 0 else None
 
             for c in active_vn30:
                 if c not in held and c in loaded_tickers and c in stocks_close.columns:
                     curr_price = stocks_close.at[date, c]
+                    prev_c_price = stocks_close.at[prev_date, c] if (prev_date is not None and prev_date in stocks_close.index) else np.nan
                     curr_vol = stocks_volume.at[date, f'{c}_V'] if f'{c}_V' in stocks_volume.columns else np.nan
                     prev_h20 = stocks_high_20.at[date, c] if c in stocks_high_20.columns else np.nan
                     prev_v_ma = stocks_vol_ma20.at[date, f'{c}_V'] if f'{c}_V' in stocks_vol_ma20.columns else np.nan
@@ -540,24 +544,33 @@ def run_ai_quant_system():
                     s_ma20_val = stocks_ma20.at[date, c] if c in stocks_ma20.columns else np.nan
                     s_ma50_val = stocks_ma50[c].at[date] if c in stocks_ma50.columns else np.nan
 
-                    # ========= TÍN HIỆU 1: MOMENTUM BREAKOUT (Giống cũ, nới lỏng) =========
-                    # Vượt đỉnh 20 phiên + Volume >= 1.2x MA20 + AI >= 0.55
-                    if curr_price > prev_h20 and v_ratio >= VOL_BREAKOUT_RATIO and score >= AI_THRESHOLD:
+                    # Nến xanh xác nhận bật tăng (tăng điểm so với phiên trước)
+                    is_green_candle = (pd.notna(prev_c_price) and curr_price >= prev_c_price * 1.002)
+
+                    # ========= TÍN HIỆU 1: MOMENTUM BREAKOUT =========
+                    # Vượt đỉnh 20 phiên + Volume >= 1.2x MA20
+                    # Trong Thị trường Gấu (VNINDEX < MA200), nâng chuẩn AI Score lên >= 0.62 để lọc bẫy vượt đỉnh xả hàng
+                    effective_ai_breakout = 0.62 if idx < market_ma200 else AI_THRESHOLD
+                    if curr_price > prev_h20 and v_ratio >= VOL_BREAKOUT_RATIO and score >= effective_ai_breakout:
                         buy_candidates.append({
                             'Ticker': c, 'Score': score, 'Price': curr_price,
                             'Vol_Ratio': round(v_ratio, 1), 'RSI': round(r_rsi, 1),
                             'Signal': 'Breakout'
                         })
 
-                    # ========= TÍN HIỆU 2: PULLBACK (BẬT TĂNG TỪ HỖ TRỢ) =========
-                    # Giá hồi về chạm MA20 nhưng vẫn trên MA50 (bật lên từ vùng hỗ trợ)
-                    # RSI trong vùng 35-60 (không quá mua) + AI Score cao >= 0.60
-                    # ĐIỀU KIỆN TIÊN QUYẾT: VN-Index PHẢI TRÊN MA50 (Thị trường chung phải đang trong uptrend ngắn hạn)
+                    # ========= TÍN HIỆU 2: PULLBACK (BẬT TĂNG TỪ HỖ TRỢ NỀN GIÁ) =========
+                    # 1. Giá chạm vùng hỗ trợ MA20 (0.98x - 1.02x MA20) nhưng vẫn giữ trên MA50 (uptrend)
+                    # 2. RSI trong vùng 35 - 60 (không quá mua)
+                    # 3. Nến hôm nay PHẢI LÀ NẾN XANH XÁC NHẬN BẬT TĂNG (không bắt dao rơi nến đỏ cắm xuống)
+                    # 4. Thanh khoản tối thiểu >= 0.7x MA20 (không phải phiên trôi dạt thiếu cầu)
+                    # 5. Thị trường chung VN-Index PHẢI TRÊN MA50
                     elif (pd.notna(s_ma20_val) and pd.notna(s_ma50_val)
                           and curr_price >= s_ma20_val * 0.98    # Chạm hoặc sát MA20
                           and curr_price <= s_ma20_val * 1.02
                           and curr_price > s_ma50_val            # Vẫn trên MA50 (uptrend)
                           and 35 <= r_rsi <= 60                  # RSI không quá mua
+                          and is_green_candle                    # Bắt buộc nến xanh bật tăng
+                          and v_ratio >= 0.7                     # Volume tối thiểu 0.7x
                           and score >= 0.60                      # AI tin tưởng
                           and idx > market_ma50):                # Thị trường chung phải trên MA50 để tránh bắt dao rơi
                         buy_candidates.append({
