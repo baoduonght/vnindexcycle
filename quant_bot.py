@@ -85,7 +85,7 @@ def fetch_ticker_data(symbol, n_bars=4000):
                     'Close': data['c'],
                     'Volume': data.get('v', [0]*len(data['t']))
                 })
-                return df.sort_values('Date').reset_index(drop=True)
+                return df.drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
     except Exception:
         pass
 
@@ -104,7 +104,7 @@ def fetch_ticker_data(symbol, n_bars=4000):
                     'Close': data['c'],
                     'Volume': data.get('v', [0]*len(data['t']))
                 })
-                return df.sort_values('Date').reset_index(drop=True)
+                return df.drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
     except Exception:
         pass
 
@@ -118,7 +118,7 @@ def fetch_ticker_data(symbol, n_bars=4000):
                 df = pd.DataFrame(data)
                 df.rename(columns={'tradingDate': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
                 df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None).dt.normalize()
-                return df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].sort_values('Date').reset_index(drop=True)
+                return df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
     except Exception:
         pass
 
@@ -129,7 +129,7 @@ def fetch_ticker_data(symbol, n_bars=4000):
             df = df.reset_index()
             df.rename(columns={'datetime': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
             df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None).dt.normalize()
-            return df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].sort_values('Date').reset_index(drop=True)
+            return df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
     except Exception:
         pass
 
@@ -143,24 +143,27 @@ vnindex_raw = fetch_ticker_data('VNINDEX', n_bars=4000)
 if vnindex_raw is None or vnindex_raw.empty:
     sys.exit("❌ LỖI: Không thể tải dữ liệu VNINDEX từ cả TradingView lẫn VNDirect!")
 
-vnindex_df = vnindex_raw.rename(columns={'Close': 'VNINDEX'})
+vnindex_df = vnindex_raw.rename(columns={'Close': 'VNINDEX'}).drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
 vnindex_df['MA50'] = vnindex_df['VNINDEX'].rolling(50).mean()
 vnindex_df['MA100'] = vnindex_df['VNINDEX'].rolling(100).mean()
 vnindex_df['MA200'] = vnindex_df['VNINDEX'].rolling(200).mean()
 vnindex_df['ADX'] = calc_adx(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14)
 vnindex_df['ATR_PCT'] = calc_atr(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14) / vnindex_df['VNINDEX']
 vnindex_df['VN_MFI'] = calc_mfi(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], vnindex_df['Volume'], 14)
-df_clean = vnindex_df.dropna().copy().reset_index(drop=True)
+df_clean = vnindex_df.dropna().drop_duplicates(subset=['Date'], keep='last').copy().reset_index(drop=True)
 
 # ==========================================
 # 2. TẢI TOÀN BỘ RỔ CỔ PHIẾU VN30 LỊCH SỬ (POINT-IN-TIME)
 # ==========================================
 print(f"2. Đang tải toàn bộ {len(ALL_HISTORICAL_VN30_TICKERS)} mã cổ phiếu VN30 lịch sử (Chống Survivorship Bias)...")
 
-stocks_close = pd.DataFrame({'Date': df_clean['Date']}).set_index('Date')
-stocks_volume = pd.DataFrame({'Date': df_clean['Date']}).set_index('Date')
-stocks_high = pd.DataFrame({'Date': df_clean['Date']}).set_index('Date')
-stocks_low = pd.DataFrame({'Date': df_clean['Date']}).set_index('Date')
+# Khởi tạo ma trận dữ liệu với trục ngày tuyệt đối duy nhất (Không duplicate labels)
+timeline_dates = pd.DatetimeIndex(df_clean['Date'].drop_duplicates().sort_values())
+
+stocks_close = pd.DataFrame(index=timeline_dates)
+stocks_volume = pd.DataFrame(index=timeline_dates)
+stocks_high = pd.DataFrame(index=timeline_dates)
+stocks_low = pd.DataFrame(index=timeline_dates)
 
 loaded_tickers = []
 delisted_or_empty = []
@@ -168,7 +171,10 @@ delisted_or_empty = []
 for ticker in ALL_HISTORICAL_VN30_TICKERS:
     df_t = fetch_ticker_data(ticker, n_bars=4000)
     if df_t is not None and not df_t.empty:
+        df_t = df_t.drop_duplicates(subset=['Date'], keep='last').sort_values('Date')
         df_t.set_index('Date', inplace=True)
+        # Loại bỏ triệt để mọi nhãn ngày trùng lặp nếu có từ API
+        df_t = df_t[~df_t.index.duplicated(keep='last')]
         stocks_close[ticker] = df_t['Close']
         stocks_volume[f'{ticker}_V'] = df_t['Volume']
         stocks_high[f'{ticker}_H'] = df_t['High']
@@ -215,13 +221,14 @@ try:
     macro_df = pd.read_csv('markets_database10years.csv')
     macro_df = macro_df[['Date', 'DXY', 'US10Y', 'USD_VND']]
     macro_df['Date'] = pd.to_datetime(macro_df['Date']).dt.strftime('%Y-%m-%d')
-    macro_df = macro_df.sort_values('Date').reset_index(drop=True)
+    macro_df = macro_df.drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
 except Exception as e:
     sys.exit(f"🛑 LỖI ĐỌC FILE VĨ MÔ: {e}")
 
 market_context = vnindex_df[['Date', 'VN_MFI', 'VNINDEX', 'MA200']].copy()
 market_context['VN_Dist_MA200'] = market_context['VNINDEX'] / market_context['MA200']
 market_context['Date'] = pd.to_datetime(market_context['Date']).dt.strftime('%Y-%m-%d')
+market_context = market_context.drop_duplicates(subset=['Date'], keep='last')
 
 macro_df = macro_df.merge(market_context, on='Date', how='left').ffill()
 macro_cols = ['DXY', 'US10Y', 'USD_VND']
