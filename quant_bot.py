@@ -305,6 +305,7 @@ def run_ai_quant_system():
     VOL_BREAKOUT_RATIO = 1.2           # Hạ từ 1.5x -> 1.2x (bluechip VN30 khó nổ volume 1.5x)
     MARKET_ENTRY_MA = 'MA100'          # Hạ cửa vào từ VNINDEX > MA200 -> VNINDEX > MA100
     ADX_MIN = 18                       # Hạ từ ADX > 22 -> ADX > 18 (bắt trend sớm hơn)
+    MAX_BUYS_PER_DAY = 2               # Tối đa 2 lệnh mua / ngày (Giải ngân phân lớp, chống Timing Risk & bẫy Bull-trap)
     TRAILING_STOP_TRIGGER = 0.15       # Kích hoạt trailing stop tiêu chuẩn khi lãi đỉnh >= 15%
     TRAILING_STOP_DROP = 0.08          # Rớt 8% từ đỉnh thì chốt (cho vị thế thường)
     SUPER_WINNER_PEAK = 0.20           # Cổ phiếu dẫn dắt (Leader/Super-Winner): Lãi đỉnh >= 20%
@@ -548,30 +549,32 @@ def run_ai_quant_system():
                             'Signal': 'Breakout'
                         })
 
-                    # ========= TÍN HIỆU 2: PULLBACK BÚT (MỚI) =========
+                    # ========= TÍN HIỆU 2: PULLBACK (BẬT TĂNG TỪ HỖ TRỢ) =========
                     # Giá hồi về chạm MA20 nhưng vẫn trên MA50 (bật lên từ vùng hỗ trợ)
-                    # RSI trong vùng 40-60 (không quá mua) + AI Score cao >= 0.60
+                    # RSI trong vùng 35-60 (không quá mua) + AI Score cao >= 0.60
+                    # ĐIỀU KIỆN TIÊN QUYẾT: VN-Index PHẢI TRÊN MA50 (Thị trường chung phải đang trong uptrend ngắn hạn)
                     elif (pd.notna(s_ma20_val) and pd.notna(s_ma50_val)
                           and curr_price >= s_ma20_val * 0.98    # Chạm hoặc sát MA20
                           and curr_price <= s_ma20_val * 1.02
                           and curr_price > s_ma50_val            # Vẫn trên MA50 (uptrend)
                           and 35 <= r_rsi <= 60                  # RSI không quá mua
                           and score >= 0.60                      # AI tin tưởng
-                          and idx > market_ma200):               # Thị trường chung phải mạnh để pullback entry
+                          and idx > market_ma50):                # Thị trường chung phải trên MA50 để tránh bắt dao rơi
                         buy_candidates.append({
                             'Ticker': c, 'Score': score, 'Price': curr_price,
                             'Vol_Ratio': round(v_ratio, 1), 'RSI': round(r_rsi, 1),
                             'Signal': 'Pullback'
                         })
 
-            # Ưu tiên theo AI Score
+            # Ưu tiên theo AI Score và Giải ngân phân lớp (Tối đa 2 lệnh / ngày)
             if buy_candidates:
                 buy_candidates = sorted(buy_candidates, key=lambda x: x['Score'], reverse=True)
 
                 target_slot_size = current_nav / MAX_SLOTS
+                buys_today = 0
 
                 for cand in buy_candidates:
-                    if empty_slots <= 0 or cash <= 1_000_000:
+                    if empty_slots <= 0 or cash <= 1_000_000 or buys_today >= MAX_BUYS_PER_DAY:
                         break
                     c = cand['Ticker']
                     buy_price = cand['Price']
@@ -603,6 +606,7 @@ def run_ai_quant_system():
                                 'VN_MFI': round(market_mfi, 1)
                             })
                             empty_slots -= 1
+                            buys_today += 1
 
     # Chốt NAV phiên cuối cùng
     final_stock_val = sum([
