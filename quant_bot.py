@@ -57,41 +57,42 @@ def calc_macd_hist(series, fast=12, slow=26, signal=9):
     return macd - macd_signal
 
 # ==========================================
-# HÀM TẢI DỮ LIỆU ĐA NGUỒN (TRADINGVIEW + VNDIRECT FALLBACK)
+# HÀM TẢI DỮ LIỆU ĐA NGUỒN TỐC ĐỘ CAO (DNSE + VNDIRECT + TCBS + TRADINGVIEW)
 # ==========================================
 def fetch_ticker_data(symbol, n_bars=4000):
     """
-    Tải dữ liệu từ TradingView. Nếu mã bị hủy niêm yết hoặc thiếu dữ liệu,
-    tự động fallback sang VNDirect DChart API để có trọn vẹn 10 năm.
+    Tải dữ liệu chứng khoán tốc độ cao từ các nguồn trực tiếp Việt Nam:
+    1. DNSE (Entrade API) - Siêu nhanh, không bị chặn IP, đầy đủ 10 năm.
+    2. VNDirect (DChart API) - Nguồn dữ liệu bảng giá chính thức.
+    3. TCBS (Techcom Securities) - Nguồn dữ liệu tài chính lớn.
+    4. TradingView (tvDatafeed) - Chỉ làm phương án dự phòng cuối cùng.
     """
-    # 1. Thử sàn HOSE
+    now_ts = int(datetime.datetime.now().timestamp())
+    start_ts = int((datetime.datetime.now() - datetime.timedelta(days=12*365)).timestamp())
+
+    # 1. Nguồn 1: DNSE Entrade API (Tốc độ ~50ms, không bao giờ timeout, đủ 10 năm)
     try:
-        df = tv.get_hist(symbol=symbol, exchange='HOSE', interval=Interval.in_daily, n_bars=n_bars)
-        if df is not None and len(df) > 50:
-            df = df.reset_index()
-            df.rename(columns={'datetime': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
-            df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None).dt.normalize()
-            return df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].sort_values('Date').reset_index(drop=True)
+        url = f"https://services.entrade.com.vn/chart-api/v2/ohlcs/stock?from={start_ts}&to={now_ts}&symbol={symbol}&resolution=1D"
+        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}, timeout=6)
+        if res.status_code == 200:
+            data = res.json()
+            if 't' in data and len(data['t']) > 50:
+                df = pd.DataFrame({
+                    'Date': pd.to_datetime(data['t'], unit='s').tz_localize(None).normalize(),
+                    'Open': data['o'],
+                    'High': data['h'],
+                    'Low': data['l'],
+                    'Close': data['c'],
+                    'Volume': data.get('v', [0]*len(data['t']))
+                })
+                return df.sort_values('Date').reset_index(drop=True)
     except Exception:
         pass
 
-    # 2. Thử sàn UPCOM (cho các mã bị chuyển sàn như FLC, ITA...)
+    # 2. Nguồn 2: VNDirect DChart API
     try:
-        df = tv.get_hist(symbol=symbol, exchange='UPCOM', interval=Interval.in_daily, n_bars=n_bars)
-        if df is not None and len(df) > 50:
-            df = df.reset_index()
-            df.rename(columns={'datetime': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
-            df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None).dt.normalize()
-            return df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].sort_values('Date').reset_index(drop=True)
-    except Exception:
-        pass
-
-    # 3. Fallback sang VNDirect DChart API
-    try:
-        now_ts = int(datetime.datetime.now().timestamp())
-        start_ts = int((datetime.datetime.now() - datetime.timedelta(days=12*365)).timestamp())
         url = f"https://dchart-api.vndirect.com.vn/dchart/history?resolution=D&symbol={symbol}&from={start_ts}&to={now_ts}"
-        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=12)
+        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}, timeout=6)
         if res.status_code == 200:
             data = res.json()
             if data.get('s') == 'ok' and len(data.get('t', [])) > 50:
@@ -104,6 +105,31 @@ def fetch_ticker_data(symbol, n_bars=4000):
                     'Volume': data.get('v', [0]*len(data['t']))
                 })
                 return df.sort_values('Date').reset_index(drop=True)
+    except Exception:
+        pass
+
+    # 3. Nguồn 3: TCBS Public API
+    try:
+        url = f"https://apipubaws.tcbs.com.vn/stock-insight/v1/stock/bars-long-term?ticker={symbol}&type=stock&resolution=D&from={start_ts}&to={now_ts}"
+        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}, timeout=6)
+        if res.status_code == 200:
+            data = res.json().get('data', [])
+            if len(data) > 50:
+                df = pd.DataFrame(data)
+                df.rename(columns={'tradingDate': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
+                df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None).dt.normalize()
+                return df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].sort_values('Date').reset_index(drop=True)
+    except Exception:
+        pass
+
+    # 4. Nguồn 4: TradingView (Phương án dự phòng cuối cùng)
+    try:
+        df = tv.get_hist(symbol=symbol, exchange='HOSE', interval=Interval.in_daily, n_bars=n_bars)
+        if df is not None and len(df) > 50:
+            df = df.reset_index()
+            df.rename(columns={'datetime': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
+            df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None).dt.normalize()
+            return df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].sort_values('Date').reset_index(drop=True)
     except Exception:
         pass
 
@@ -272,11 +298,13 @@ def run_ai_quant_system():
     VOL_BREAKOUT_RATIO = 1.2           # Hạ từ 1.5x -> 1.2x (bluechip VN30 khó nổ volume 1.5x)
     MARKET_ENTRY_MA = 'MA100'          # Hạ cửa vào từ VNINDEX > MA200 -> VNINDEX > MA100
     ADX_MIN = 18                       # Hạ từ ADX > 22 -> ADX > 18 (bắt trend sớm hơn)
-    TRAILING_STOP_TRIGGER = 0.15       # Kích hoạt trailing stop khi lãi đỉnh >= 15% (trước: 12%)
-    TRAILING_STOP_DROP = 0.08          # Rớt 8% từ đỉnh thì chốt (trước: 6%) - cho winner chạy lâu hơn
-    MA20_PROFIT_EXIT = 0.07            # Chốt khi thủng MA20 và lãi > 7% (trước: 5%)
-    HARD_STOPLOSS = -0.12              # Cắt lỗ cứng -12% (trước: không có) - bảo vệ vốn
-    PORTFOLIO_MDD_LIMIT = -0.15        # Nếu tổng NAV giảm 15% từ đỉnh -> bán hết (Portfolio Stop)
+    TRAILING_STOP_TRIGGER = 0.15       # Kích hoạt trailing stop tiêu chuẩn khi lãi đỉnh >= 15%
+    TRAILING_STOP_DROP = 0.08          # Rớt 8% từ đỉnh thì chốt (cho vị thế thường)
+    SUPER_WINNER_PEAK = 0.20           # Cổ phiếu dẫn dắt (Leader/Super-Winner): Lãi đỉnh >= 20%
+    SUPER_WINNER_DROP = 0.10           # Siêu cổ phiếu: Trailing stop nới rộng 10% từ đỉnh cao nhất
+    MA20_PROFIT_EXIT = 0.10            # Nâng lên 10% (trước: 7%) để tránh chốt non do rung rũ ngắn hạn
+    HARD_STOPLOSS = -0.10              # Cắt lỗ cứng -10% - bảo vệ vốn từng vị thế
+    PORTFOLIO_MDD_LIMIT = -0.18        # Nếu tổng NAV giảm 18% từ đỉnh -> bán hết (Portfolio Stop)
     
     cash = 100_000_000.0               # Vốn khởi điểm 100 triệu VNĐ
     total_bank_interest = 0.0
@@ -356,6 +384,16 @@ def run_ai_quant_system():
         # ===== BẢO VỆ 1: PORTFOLIO-LEVEL STOP LOSS =====
         # Nếu tổng NAV sụt >= 18% từ đỉnh -> bán toàn bộ danh mục để bảo vệ vốn
         portfolio_dd = (temp_nav - nav_peak) / nav_peak if nav_peak > 0 else 0.0
+
+        # ===== BẢO VỆ 2: CÔNG TẮC VĨ MÔ - XÁC NHẬN GÃY MA100 (ANTI-WHIPSAW FILTER) =====
+        # Lọc sạch bẫy nhiễu 1 phiên: Chỉ kích hoạt bán tháo Macro khi:
+        # 1. VN-Index gãy sâu dứt khoát > 1.5% dưới MA100 (Sập mạnh, không chần chừ)
+        # HOẶC
+        # 2. Đóng cửa dưới MA100 liên tiếp 2 phiên (Xác nhận gãy xu hướng thực sự)
+        prev_idx = backtest['VNINDEX'].iloc[i-1] if i > 0 else idx
+        prev_ma100 = backtest['MA100'].iloc[i-1] if i > 0 else market_ma100
+        is_macro_breakdown = (idx < market_ma100 * 0.985) or (idx < market_ma100 and prev_idx < prev_ma100)
+
         if portfolio_dd <= -0.18 and len(held) > 0:
             for c in list(held.keys()):
                 curr_p = stocks_close.at[date, c] if c in stocks_close.columns else np.nan
@@ -363,14 +401,16 @@ def run_ai_quant_system():
                 if held[c]['hold_days'] >= MIN_HOLD_DAYS and pd.notna(curr_p) and curr_p > 0 and not is_liquidity_locked(c):
                     to_sell.append((c, 'SELL (Portfolio Stop -18%)'))
 
-        # ===== BẢO VỆ 2: CÔNG TẮC VĨ MÔ - Gãy MA100 =====
-        elif idx < market_ma100:
+        elif is_macro_breakdown and len(held) > 0:
             for c in list(held.keys()):
                 curr_p = stocks_close.at[date, c] if c in stocks_close.columns else np.nan
                 # Chỉ bán khi có giá giao dịch thực tế hôm nay và không bị nghẽn sàn
                 if held[c]['hold_days'] >= MIN_HOLD_DAYS and pd.notna(curr_p) and curr_p > 0 and not is_liquidity_locked(c):
                     to_sell.append((c, 'SELL (Cắt Macro gãy MA100)'))
+
         else:
+            # Nếu chỉ mới là phiên chớm rung lắc dưới MA100 (chưa xác nhận gãy), hoặc VNINDEX > MA100:
+            # -> KHÔNG hoảng loạn bán tháo cổ phiếu khỏe! Quản trị riêng từng vị thế:
             for c in list(held.keys()):
                 if held[c]['hold_days'] < MIN_HOLD_DAYS:
                     continue
@@ -390,14 +430,27 @@ def run_ai_quant_system():
                 if c not in active_vn30:
                     to_sell.append((c, 'SELL (Rời rổ VN30)'))
                 # LÝ DO 2: CẮT LỖ CỨNG -10% (Bảo vệ từng vị thế riêng lẻ)
-                elif profit_margin <= -0.10:
+                elif profit_margin <= HARD_STOPLOSS:
                     to_sell.append((c, 'SELL (Cắt lỗ cứng -10%)'))
-                # LÝ DO 3: Trailing Stop (Lãi đỉnh >= 15% nhưng rớt 8% từ đỉnh)
-                elif peak_margin >= TRAILING_STOP_TRIGGER and curr_price < (held[c]['highest'] * (1.0 - TRAILING_STOP_DROP)):
-                    to_sell.append((c, 'SELL (Trailing Stop chốt lời)'))
-                # LÝ DO 4: Gãy MA20 khi đang có lãi > 7%
-                elif c in stocks_ma20.columns and pd.notna(stocks_ma20.at[date, c]) and curr_price < stocks_ma20.at[date, c] and profit_margin > MA20_PROFIT_EXIT:
-                    to_sell.append((c, 'SELL (Thủng MA20 bảo toàn lãi)'))
+                # LÝ DO 3: QUẢN TRỊ SIÊU CỔ PHIẾU (Lãi đỉnh >= 20% - Cho không gian bay cao x2, x3)
+                elif peak_margin >= SUPER_WINNER_PEAK:
+                    # Trailing Stop nới rộng: Rớt 10% từ đỉnh cao nhất
+                    if curr_price < (held[c]['highest'] * (1.0 - SUPER_WINNER_DROP)):
+                        to_sell.append((c, 'SELL (Trailing Stop chốt siêu cổ)'))
+                    # Xu hướng trung hạn: Gãy hẳn MA50 mới chốt (không bị rung rũ bởi MA20)
+                    elif c in stocks_ma50.columns and pd.notna(stocks_ma50.at[date, c]) and curr_price < stocks_ma50.at[date, c]:
+                        to_sell.append((c, 'SELL (Gãy MA50 chốt lời sóng lớn)'))
+                    # Khóa lãi tối thiểu: Không bao giờ để siêu cổ phiếu rơi về hòa vốn hay lỗ
+                    elif profit_margin <= 0.08:
+                        to_sell.append((c, 'SELL (Khóa lãi sàn bảo vệ +8%)'))
+                # LÝ DO 4: VỊ THẾ BÌNH THƯỜNG (Lãi đỉnh < 20%)
+                else:
+                    # Trailing Stop tiêu chuẩn: Lãi đỉnh >= 15% nhưng rớt 8% từ đỉnh
+                    if peak_margin >= TRAILING_STOP_TRIGGER and curr_price < (held[c]['highest'] * (1.0 - TRAILING_STOP_DROP)):
+                        to_sell.append((c, 'SELL (Trailing Stop chốt lời)'))
+                    # Thủng MA20 khi đã đạt mức lãi tối thiểu > 10% (tránh chốt non khi vừa lãi 7%)
+                    elif c in stocks_ma20.columns and pd.notna(stocks_ma20.at[date, c]) and curr_price < stocks_ma20.at[date, c] and profit_margin > MA20_PROFIT_EXIT:
+                        to_sell.append((c, 'SELL (Thủng MA20 bảo toàn lãi)'))
 
         # Khớp các lệnh bán hợp lệ (GIÁ THẬT 100%, KHÔNG CẦN FFILL)
         for c, reason in to_sell:
@@ -553,12 +606,12 @@ def run_ai_quant_system():
 
     df_nav = pd.DataFrame(daily_nav_history)
     df_trades = pd.DataFrame(trade_log)
-    return df_trades, df_nav, final_nav, total_bank_interest
+    return df_trades, df_nav, final_nav, total_bank_interest, held
 
 # ==========================================
 # CHẠY CHIẾN LƯỢC & XUẤT BÁO CÁO TOÀN DIỆN
 # ==========================================
-df_trade_log, df_nav_hist, final_nav, total_interest = run_ai_quant_system()
+df_trade_log, df_nav_hist, final_nav, total_interest, current_held = run_ai_quant_system()
 
 # Ghi nhận file trading_log.csv cho Power BI
 df_trade_log.to_csv('trading_log.csv', index=False)
@@ -653,7 +706,21 @@ if not df_trade_log.empty:
                 sell_count += 1
 
 if buy_count == 0 and sell_count == 0:
-    msg += "<i>⏳ Đứng ngoài quan sát, thị trường chưa có điểm nổ Alpha đạt chuẩn (Tiền mặt nhận lãi Bank 4%/năm).</i>\n\n"
+    msg += "<i>⏳ Không có lệnh Mua/Bán mới trong phiên hôm nay.</i>\n\n"
+
+# Báo cáo chi tiết danh mục đang nắm giữ
+msg += f"💼 <b>DANH MỤC HIỆN TẠI ({len(current_held)}/5 vị thế):</b>\n"
+if current_held:
+    for ticker, pos in current_held.items():
+        curr_p = stocks_close.iloc[-1][ticker] if ticker in stocks_close.columns and pd.notna(stocks_close.iloc[-1][ticker]) else pos.get('last_price', pos['buy_price'])
+        unrealized_pnl = ((curr_p / pos['buy_price']) - 1.0) * 100.0
+        icon = "🟢" if unrealized_pnl >= 0 else "🔴"
+        peak_pnl = ((pos['highest'] / pos['buy_price']) - 1.0) * 100.0
+        leader_badge = " 👑 [Leader]" if peak_pnl >= 20.0 else ""
+        msg += f"{icon} <b>{ticker}</b>: {curr_p:,.0f} | Lãi tạm: <b>{unrealized_pnl:+.1f}%</b> (Đỉnh: +{peak_pnl:.1f}%){leader_badge} | T+{pos['hold_days']}\n"
+    msg += "\n"
+else:
+    msg += "<i>100% Tiền mặt (Bảo toàn vốn tối đa, nhận lãi Bank 4%/năm).</i>\n\n"
 
 msg += f"➖➖➖➖➖➖➖➖➖➖\n"
 msg += f"🏦 NAV Hiện tại: <b>{final_nav:,.0f} VNĐ</b> | Max Drawdown: <b>{max_mdd:.2f}%</b>"
