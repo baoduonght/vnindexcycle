@@ -139,14 +139,22 @@ for ticker in ALL_HISTORICAL_VN30_TICKERS:
 
 print(f"   ✅ Đã nạp thành công {len(loaded_tickers)} mã vào tập huấn luyện.")
 
-stocks_ma50 = stocks_close.rolling(50).mean()
-stocks_vol_ma20 = stocks_volume.rolling(20).mean().shift(1)
-
+# KHÔNG DÙNG LỆNH FILL: Tính chỉ báo trực tiếp trên dữ liệu giao dịch thực tế của từng mã
+stocks_ma50 = pd.DataFrame(index=stocks_close.index)
+stocks_vol_ma20 = pd.DataFrame(index=stocks_close.index)
 stocks_rsi = pd.DataFrame(index=stocks_close.index)
 stocks_macd = pd.DataFrame(index=stocks_close.index)
+
 for c in loaded_tickers:
-    stocks_rsi[c] = calc_rsi(stocks_close[c])
-    stocks_macd[c] = calc_macd_hist(stocks_close[c])
+    s_c = stocks_close[c].dropna()
+    if len(s_c) >= 20:
+        stocks_ma50[c] = s_c.rolling(50).mean()
+        stocks_rsi[c] = calc_rsi(s_c)
+        stocks_macd[c] = calc_macd_hist(s_c)
+    if f'{c}_V' in stocks_volume.columns:
+        s_v = stocks_volume[f'{c}_V'].dropna()
+        if len(s_v) >= 20:
+            stocks_vol_ma20[f'{c}_V'] = s_v.rolling(20).mean().shift(1)
 
 # ==========================================
 # 3. CHUẨN BỊ TẬP DỮ LIỆU ĐỂ AI HỌC (TRAIN DATA)
