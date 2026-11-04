@@ -251,11 +251,25 @@ def run_ai_quant_system():
     DAILY_BANK_RATE = ANNUAL_BANK_RATE / 252
     MIN_HOLD_DAYS = 3                  # Chu kỳ T+2.5 (mua T, bán sớm nhất T+3)
     
+    # ==========================================================
+    # THAM SỐ CHIẾN LƯỢC ĐÃ TỐI ƯU (V2 - TĂNG TẦN SUẤT + GIẢM MDD)
+    # ==========================================================
+    AI_THRESHOLD = 0.55                # Hạ ngưỡng AI từ 0.65 -> 0.55 (cho phép nhiều tín hiệu hơn)
+    VOL_BREAKOUT_RATIO = 1.2           # Hạ từ 1.5x -> 1.2x (bluechip VN30 khó nổ volume 1.5x)
+    MARKET_ENTRY_MA = 'MA100'          # Hạ cửa vào từ VNINDEX > MA200 -> VNINDEX > MA100
+    ADX_MIN = 18                       # Hạ từ ADX > 22 -> ADX > 18 (bắt trend sớm hơn)
+    TRAILING_STOP_TRIGGER = 0.15       # Kích hoạt trailing stop khi lãi đỉnh >= 15% (trước: 12%)
+    TRAILING_STOP_DROP = 0.08          # Rớt 8% từ đỉnh thì chốt (trước: 6%) - cho winner chạy lâu hơn
+    MA20_PROFIT_EXIT = 0.07            # Chốt khi thủng MA20 và lãi > 7% (trước: 5%)
+    HARD_STOPLOSS = -0.12              # Cắt lỗ cứng -12% (trước: không có) - bảo vệ vốn
+    PORTFOLIO_MDD_LIMIT = -0.15        # Nếu tổng NAV giảm 15% từ đỉnh -> bán hết (Portfolio Stop)
+    
     cash = 100_000_000.0               # Vốn khởi điểm 100 triệu VNĐ
     total_bank_interest = 0.0
     held = {}                          # {ticker: {'qty': ..., 'buy_price': ..., 'highest': ..., 'buy_date': ..., 'hold_days': 0}}
     trade_log = []
     daily_nav_history = []
+    nav_peak = cash                    # Theo dõi đỉnh NAV cho Portfolio Stop
 
     for i in range(len(backtest)):
         date = backtest['Date'].iloc[i]
@@ -294,7 +308,6 @@ def run_ai_quant_system():
             """
             Nếu cổ phiếu rơi sàn (~-7%) và thanh khoản bị nghẽn kiệt (<15% MA20 volume),
             nhà đầu tư KHÔNG THỂ BÁN ĐƯỢC trên sàn HOSE thực tế (như OGC 2015, NVL 2022).
-            Lệnh phải chờ đến khi thanh khoản được giải cứu mở sàn.
             """
             if i == 0 or ticker not in stocks_close.columns:
                 return False
@@ -307,29 +320,41 @@ def run_ai_quant_system():
             v_ma = stocks_vol_ma20.at[date, f'{ticker}_V']
             if pd.isna(c_p) or pd.isna(p_p) or pd.isna(c_v) or pd.isna(v_ma):
                 return False
-            # Rơi sát sàn và thanh khoản tắt ngúm
             if p_p > 0 and (c_p <= p_p * 0.933) and (v_ma > 0 and c_v < v_ma * 0.15):
                 return True
             return False
 
         # ------------------------------------------------------------------
-        # BƯỚC 1: XỬ LÝ CÁC TÍN HIỆU BÁN (EXIT STRATEGY)
+        # BƯỚC 1: XỬ LÝ CÁC TÍN HIỆU BÁN (EXIT STRATEGY V2)
         # ------------------------------------------------------------------
-        to_sell = [] # list of tuples: (ticker, reason)
+        to_sell = []
 
-        # CÔNG TẮC VĨ MÔ: Gãy MA100 -> Kích hoạt lệnh bán toàn bộ danh mục
-        if idx < market_ma100:
+        # Tính NAV tạm thời để kiểm tra Portfolio Stop
+        temp_stock_val = sum([
+            held[c]['qty'] * stocks_close.at[date, c]
+            for c in held.keys()
+            if c in stocks_close.columns and pd.notna(stocks_close.at[date, c])
+        ])
+        temp_nav = cash + temp_stock_val
+        nav_peak = max(nav_peak, temp_nav)
+
+        # ===== BẢO VỆ 1: PORTFOLIO-LEVEL STOP LOSS =====
+        # Nếu tổng NAV sụt >= 15% từ đỉnh -> bán toàn bộ danh mục ngay lập tức
+        portfolio_dd = (temp_nav - nav_peak) / nav_peak
+        if portfolio_dd <= PORTFOLIO_MDD_LIMIT and len(held) > 0:
             for c in list(held.keys()):
-                if held[c]['hold_days'] >= MIN_HOLD_DAYS:
-                    if not is_liquidity_locked(c):
-                        to_sell.append((c, 'SELL (Cắt Macro gãy MA100)'))
+                if held[c]['hold_days'] >= MIN_HOLD_DAYS and not is_liquidity_locked(c):
+                    to_sell.append((c, 'SELL (Portfolio Stop -15%)'))
+
+        # ===== BẢO VỆ 2: CÔNG TẮC VĨ MÔ - Gãy MA100 =====
+        elif idx < market_ma100:
+            for c in list(held.keys()):
+                if held[c]['hold_days'] >= MIN_HOLD_DAYS and not is_liquidity_locked(c):
+                    to_sell.append((c, 'SELL (Cắt Macro gãy MA100)'))
         else:
             for c in list(held.keys()):
-                # Kiểm tra chu kỳ T+2.5
                 if held[c]['hold_days'] < MIN_HOLD_DAYS:
                     continue
-
-                # Nếu bị kẹt thanh khoản (múa bên trăng), không thể bán hôm nay!
                 if is_liquidity_locked(c):
                     continue
 
@@ -341,14 +366,17 @@ def run_ai_quant_system():
                 profit_margin = (curr_price - buy_price) / buy_price
                 peak_margin = (held[c]['highest'] - buy_price) / buy_price
 
-                # LÝ DO 1: Bị HOSE loại khỏi rổ VN30 tại kỳ đảo danh mục (như OGC 2015, ROS 2021, NVL 2023)
+                # LÝ DO 1: Bị HOSE loại khỏi rổ VN30
                 if c not in active_vn30:
                     to_sell.append((c, 'SELL (Rời rổ VN30)'))
-                # LÝ DO 2: Trailing Stop (Lãi đỉnh >= 12% nhưng tụt 6% từ đỉnh thì chốt khóa lãi)
-                elif peak_margin >= 0.12 and curr_price < (held[c]['highest'] * 0.94):
+                # LÝ DO 2: CẮT LỖ CỨNG -12% (MỚI - bảo vệ vốn)
+                elif profit_margin <= HARD_STOPLOSS:
+                    to_sell.append((c, 'SELL (Cắt lỗ cứng -12%)'))
+                # LÝ DO 3: Trailing Stop (Lãi đỉnh >= 15% nhưng rớt 8% từ đỉnh)
+                elif peak_margin >= TRAILING_STOP_TRIGGER and curr_price < (held[c]['highest'] * (1.0 - TRAILING_STOP_DROP)):
                     to_sell.append((c, 'SELL (Trailing Stop chốt lời)'))
-                # LÝ DO 3: Gãy MA20 ngắn hạn khi đang có lãi nhẹ
-                elif c in stocks_ma20.columns and pd.notna(stocks_ma20.at[date, c]) and curr_price < stocks_ma20.at[date, c] and profit_margin > 0.05:
+                # LÝ DO 4: Gãy MA20 khi đang có lãi > 7%
+                elif c in stocks_ma20.columns and pd.notna(stocks_ma20.at[date, c]) and curr_price < stocks_ma20.at[date, c] and profit_margin > MA20_PROFIT_EXIT:
                     to_sell.append((c, 'SELL (Thủng MA20 bảo toàn lãi)'))
 
         # Khớp các lệnh bán hợp lệ
@@ -356,8 +384,7 @@ def run_ai_quant_system():
             if c in held:
                 sell_price = stocks_close.at[date, c]
                 qty = held[c]['qty']
-                gross_val = qty * sell_price
-                net_val = gross_val * (1.0 - SELL_FRICTION)
+                net_val = qty * sell_price * (1.0 - SELL_FRICTION)
                 cash += net_val
                 pnl_pct = ((sell_price * (1.0 - SELL_FRICTION)) / (held[c]['buy_price'] * (1.0 + BUY_FRICTION)) - 1.0) * 100.0
                 trade_log.append({
@@ -371,9 +398,8 @@ def run_ai_quant_system():
                 del held[c]
 
         # ------------------------------------------------------------------
-        # BƯỚC 2: TÍNH TOÁN VỐN VÀ QUÉT TÍN HIỆU MUA (BUY STRATEGY)
+        # BƯỚC 2: TÍNH TOÁN VỐN VÀ QUÉT TÍN HIỆU MUA (BUY STRATEGY V2)
         # ------------------------------------------------------------------
-        # Tính tổng NAV hiện tại (Tiền mặt + Giá trị thị trường các cổ phiếu đang giữ)
         stock_val_now = sum([
             held[c]['qty'] * stocks_close.at[date, c]
             for c in held.keys()
@@ -383,14 +409,24 @@ def run_ai_quant_system():
         daily_nav_history.append({'Date': date, 'NAV': current_nav})
 
         empty_slots = MAX_SLOTS - len(held)
-        max_exposure = 0.4 if (idx < market_ma50 or market_atr_pct > 0.018) else 1.0
+        
+        # Giảm tỷ trọng cổ phiếu khi thị trường yếu hoặc biến động cao
+        if idx < market_ma50 or market_atr_pct > 0.020:
+            max_exposure = 0.4       # Thị trường yếu: chỉ cho phép 40% NAV vào cổ phiếu
+        elif idx < market_ma100:
+            max_exposure = 0.6       # Thị trường hồi phục sớm: 60%
+        else:
+            max_exposure = 1.0       # Thị trường mạnh: 100%
+        
         allowed_stock_cap = (current_nav * max_exposure) - stock_val_now
 
-        # Điều kiện thị trường cho phép giải ngân: VNINDEX > MA200 và ADX > 22
-        if empty_slots > 0 and (idx > market_ma200) and (market_adx > 22) and (allowed_stock_cap > 0):
+        # ====================================================================
+        # ĐIỀU KIỆN VÀO LỆNH MỚI (V2 - NỚI LỎNG CÓ KIỂM SOÁT)
+        # Cửa vào: VNINDEX > MA100 (thay vì MA200) + ADX > 18 (thay vì 22)
+        # ====================================================================
+        if empty_slots > 0 and (idx > market_ma100) and (market_adx > ADX_MIN) and (allowed_stock_cap > 0):
             buy_candidates = []
 
-            # QUAN TRỌNG NHẤT: CHỈ QUÉT CÁC CỔ PHIẾU NẰM TRONG RỔ VN30 TẠI NGÀY HÔM ĐÓ!
             for c in active_vn30:
                 if c not in held and c in loaded_tickers and c in stocks_close.columns:
                     curr_price = stocks_close.at[date, c]
@@ -400,26 +436,47 @@ def run_ai_quant_system():
 
                     if pd.isna(curr_price) or pd.isna(curr_vol) or pd.isna(prev_h20) or pd.isna(prev_v_ma):
                         continue
+                    if prev_v_ma <= 0 or curr_price <= 0:
+                        continue
 
-                    # Điểm nổ Von (Volume Breakout) và vượt đỉnh 20 phiên
-                    if curr_price > prev_h20 and prev_v_ma > 0 and curr_vol > (prev_v_ma * 1.5):
-                        score = ai_dict.get(c, {}).get(date_str, np.nan)
-                        if pd.notna(score) and score >= 0.65: # Chuẩn Alpha AI >= 65%
-                            v_ratio = curr_vol / prev_v_ma
-                            r_rsi = stocks_rsi.at[date, c] if c in stocks_rsi.columns else 50.0
-                            buy_candidates.append({
-                                'Ticker': c,
-                                'Score': score,
-                                'Price': curr_price,
-                                'Vol_Ratio': v_ratio,
-                                'RSI': r_rsi
-                            })
+                    score = ai_dict.get(c, {}).get(date_str, np.nan)
+                    if pd.isna(score):
+                        continue
 
-            # Ưu tiên mã có điểm AI Score cao nhất
+                    v_ratio = curr_vol / prev_v_ma
+                    r_rsi = stocks_rsi.at[date, c] if c in stocks_rsi.columns else 50.0
+                    s_ma20_val = stocks_ma20.at[date, c] if c in stocks_ma20.columns else np.nan
+                    s_ma50_val = stocks_ma50[c].at[date] if c in stocks_ma50.columns else np.nan
+
+                    # ========= TÍN HIỆU 1: MOMENTUM BREAKOUT (Giống cũ, nới lỏng) =========
+                    # Vượt đỉnh 20 phiên + Volume >= 1.2x MA20 + AI >= 0.55
+                    if curr_price > prev_h20 and v_ratio >= VOL_BREAKOUT_RATIO and score >= AI_THRESHOLD:
+                        buy_candidates.append({
+                            'Ticker': c, 'Score': score, 'Price': curr_price,
+                            'Vol_Ratio': round(v_ratio, 1), 'RSI': round(r_rsi, 1),
+                            'Signal': 'Breakout'
+                        })
+
+                    # ========= TÍN HIỆU 2: PULLBACK BÚT (MỚI) =========
+                    # Giá hồi về chạm MA20 nhưng vẫn trên MA50 (bật lên từ vùng hỗ trợ)
+                    # RSI trong vùng 40-60 (không quá mua) + AI Score cao >= 0.60
+                    elif (pd.notna(s_ma20_val) and pd.notna(s_ma50_val)
+                          and curr_price >= s_ma20_val * 0.98    # Chạm hoặc sát MA20
+                          and curr_price <= s_ma20_val * 1.02
+                          and curr_price > s_ma50_val            # Vẫn trên MA50 (uptrend)
+                          and 35 <= r_rsi <= 60                  # RSI không quá mua
+                          and score >= 0.60                      # AI tin tưởng
+                          and idx > market_ma200):               # Thị trường chung phải mạnh để pullback entry
+                        buy_candidates.append({
+                            'Ticker': c, 'Score': score, 'Price': curr_price,
+                            'Vol_Ratio': round(v_ratio, 1), 'RSI': round(r_rsi, 1),
+                            'Signal': 'Pullback'
+                        })
+
+            # Ưu tiên theo AI Score
             if buy_candidates:
                 buy_candidates = sorted(buy_candidates, key=lambda x: x['Score'], reverse=True)
 
-                # LÃI KÉP TOÀN DIỆN (COMPOUNDING): Chia đều NAV hiện tại cho 5 slot
                 target_slot_size = current_nav / MAX_SLOTS
 
                 for cand in buy_candidates:
@@ -430,14 +487,14 @@ def run_ai_quant_system():
                     alloc = min(target_slot_size, cash, allowed_stock_cap)
 
                     if alloc >= 2_000_000 and buy_price > 0:
-                        actual_cost_per_share = buy_price * (1.0 + BUY_FRICTION)
-                        shares_to_buy = np.floor(alloc / actual_cost_per_share)
-                        if shares_to_buy > 0:
-                            total_spent = shares_to_buy * actual_cost_per_share
+                        actual_cost = buy_price * (1.0 + BUY_FRICTION)
+                        shares = np.floor(alloc / actual_cost)
+                        if shares > 0:
+                            total_spent = shares * actual_cost
                             cash -= total_spent
                             allowed_stock_cap -= total_spent
                             held[c] = {
-                                'qty': shares_to_buy,
+                                'qty': shares,
                                 'buy_price': buy_price,
                                 'highest': buy_price,
                                 'buy_date': date_str,
@@ -445,12 +502,12 @@ def run_ai_quant_system():
                             }
                             trade_log.append({
                                 'Date': date_str,
-                                'Action': 'BUY',
+                                'Action': f"BUY ({cand['Signal']})",
                                 'Ticker': c,
                                 'Price': round(buy_price, 2),
                                 'AI_Score': round(cand['Score'], 2),
-                                'Vol_Ratio': round(cand['Vol_Ratio'], 1),
-                                'RSI': round(cand['RSI'], 1),
+                                'Vol_Ratio': cand['Vol_Ratio'],
+                                'RSI': cand['RSI'],
                                 'VN_MFI': round(market_mfi, 1)
                             })
                             empty_slots -= 1
