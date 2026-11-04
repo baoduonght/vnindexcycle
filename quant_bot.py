@@ -155,17 +155,31 @@ print(f"   ✅ Đã nạp thành công {len(loaded_tickers)} mã.")
 if delisted_or_empty:
     print(f"   ⚠️ Các mã không có dữ liệu (đã hủy niêm yết triệt để): {', '.join(delisted_or_empty)}")
 
-# Tính các đường trung bình và chỉ báo panel
-stocks_high_20 = stocks_close.rolling(20).max().shift(1)
-stocks_ma20 = stocks_close.rolling(20).mean()
-stocks_ma50 = stocks_close.rolling(50).mean()
-stocks_vol_ma20 = stocks_volume.rolling(20).mean().shift(1)
-
+# =====================================================================
+# KHÔNG DÙNG LỆNH FILL: DỮ LIỆU NGUYÊN BẢN 100% (RAW MARKET DATA)
+# Không vẽ nến ảo, không kéo dài giá cổ phiếu đã hủy niêm yết.
+# Tính chỉ báo kỹ thuật trực tiếp trên các phiên giao dịch thực tế của từng mã.
+# =====================================================================
+stocks_high_20 = pd.DataFrame(index=stocks_close.index)
+stocks_ma20 = pd.DataFrame(index=stocks_close.index)
+stocks_ma50 = pd.DataFrame(index=stocks_close.index)
+stocks_vol_ma20 = pd.DataFrame(index=stocks_close.index)
 stocks_rsi = pd.DataFrame(index=stocks_close.index)
 stocks_macd = pd.DataFrame(index=stocks_close.index)
+
 for c in loaded_tickers:
-    stocks_rsi[c] = calc_rsi(stocks_close[c])
-    stocks_macd[c] = calc_macd_hist(stocks_close[c])
+    s_c = stocks_close[c].dropna()
+    if len(s_c) >= 20:
+        stocks_ma20[c] = s_c.rolling(20).mean()
+        stocks_ma50[c] = s_c.rolling(50).mean()
+        stocks_high_20[c] = s_c.rolling(20).max().shift(1)
+        stocks_rsi[c] = calc_rsi(s_c)
+        stocks_macd[c] = calc_macd_hist(s_c)
+    
+    if f'{c}_V' in stocks_volume.columns:
+        s_v = stocks_volume[f'{c}_V'].dropna()
+        if len(s_v) >= 20:
+            stocks_vol_ma20[f'{c}_V'] = s_v.rolling(20).mean().shift(1)
 
 # ==========================================
 # 3. TẢI BỘ NHỚ AI & ĐỒNG BỘ VĨ MÔ CSV
@@ -299,7 +313,8 @@ def run_ai_quant_system():
             held[c]['hold_days'] += 1
             curr_p = stocks_close.at[date, c] if c in stocks_close.columns else np.nan
             if pd.notna(curr_p) and curr_p > 0:
-                held[c]['highest'] = max(held[c]['highest'], curr_p)
+                held[c]['highest'] = max(held[c].get('highest', curr_p), curr_p)
+                held[c]['last_price'] = curr_p
 
         # ------------------------------------------------------------------
         # HÀM KIỂM TRA TẮC THANH KHOẢN ("TRẮNG BÊN MUA" / MÚA BÊN TRĂNG)
@@ -325,31 +340,35 @@ def run_ai_quant_system():
             return False
 
         # ------------------------------------------------------------------
-        # BƯỚC 1: XỬ LÝ CÁC TÍN HIỆU BÁN (EXIT STRATEGY V2)
+        # BƯỚC 1: XỬ LÝ CÁC TÍN HIỆU BÁN (EXIT STRATEGY THỰC TẾ 100%)
         # ------------------------------------------------------------------
         to_sell = []
 
-        # Tính NAV tạm thời để kiểm tra Portfolio Stop
+        # Tính giá trị cổ phiếu hiện tại (Dùng giá đóng cửa phiên gần nhất nếu hôm nay không có giao dịch)
         temp_stock_val = sum([
-            held[c]['qty'] * stocks_close.at[date, c]
+            held[c]['qty'] * (stocks_close.at[date, c] if (c in stocks_close.columns and pd.notna(stocks_close.at[date, c]) and stocks_close.at[date, c] > 0) else held[c]['last_price'])
             for c in held.keys()
-            if c in stocks_close.columns and pd.notna(stocks_close.at[date, c])
         ])
         temp_nav = cash + temp_stock_val
-        nav_peak = max(nav_peak, temp_nav)
+        if pd.notna(temp_nav) and temp_nav > nav_peak:
+            nav_peak = temp_nav
 
         # ===== BẢO VỆ 1: PORTFOLIO-LEVEL STOP LOSS =====
-        # Nếu tổng NAV sụt >= 15% từ đỉnh -> bán toàn bộ danh mục ngay lập tức
-        portfolio_dd = (temp_nav - nav_peak) / nav_peak
-        if portfolio_dd <= PORTFOLIO_MDD_LIMIT and len(held) > 0:
+        # Nếu tổng NAV sụt >= 18% từ đỉnh -> bán toàn bộ danh mục để bảo vệ vốn
+        portfolio_dd = (temp_nav - nav_peak) / nav_peak if nav_peak > 0 else 0.0
+        if portfolio_dd <= -0.18 and len(held) > 0:
             for c in list(held.keys()):
-                if held[c]['hold_days'] >= MIN_HOLD_DAYS and not is_liquidity_locked(c):
-                    to_sell.append((c, 'SELL (Portfolio Stop -15%)'))
+                curr_p = stocks_close.at[date, c] if c in stocks_close.columns else np.nan
+                # Chỉ bán khi có giá giao dịch thực tế hôm nay và không bị nghẽn sàn
+                if held[c]['hold_days'] >= MIN_HOLD_DAYS and pd.notna(curr_p) and curr_p > 0 and not is_liquidity_locked(c):
+                    to_sell.append((c, 'SELL (Portfolio Stop -18%)'))
 
         # ===== BẢO VỆ 2: CÔNG TẮC VĨ MÔ - Gãy MA100 =====
         elif idx < market_ma100:
             for c in list(held.keys()):
-                if held[c]['hold_days'] >= MIN_HOLD_DAYS and not is_liquidity_locked(c):
+                curr_p = stocks_close.at[date, c] if c in stocks_close.columns else np.nan
+                # Chỉ bán khi có giá giao dịch thực tế hôm nay và không bị nghẽn sàn
+                if held[c]['hold_days'] >= MIN_HOLD_DAYS and pd.notna(curr_p) and curr_p > 0 and not is_liquidity_locked(c):
                     to_sell.append((c, 'SELL (Cắt Macro gãy MA100)'))
         else:
             for c in list(held.keys()):
@@ -359,6 +378,7 @@ def run_ai_quant_system():
                     continue
 
                 curr_price = stocks_close.at[date, c] if c in stocks_close.columns else np.nan
+                # Nếu hôm nay mã này không có giao dịch, KHÔNG THỂ BÁN HÔM NAY -> Chờ phiên sau có giá thực
                 if pd.isna(curr_price) or curr_price <= 0:
                     continue
 
@@ -369,9 +389,9 @@ def run_ai_quant_system():
                 # LÝ DO 1: Bị HOSE loại khỏi rổ VN30
                 if c not in active_vn30:
                     to_sell.append((c, 'SELL (Rời rổ VN30)'))
-                # LÝ DO 2: CẮT LỖ CỨNG -12% (MỚI - bảo vệ vốn)
-                elif profit_margin <= HARD_STOPLOSS:
-                    to_sell.append((c, 'SELL (Cắt lỗ cứng -12%)'))
+                # LÝ DO 2: CẮT LỖ CỨNG -10% (Bảo vệ từng vị thế riêng lẻ)
+                elif profit_margin <= -0.10:
+                    to_sell.append((c, 'SELL (Cắt lỗ cứng -10%)'))
                 # LÝ DO 3: Trailing Stop (Lãi đỉnh >= 15% nhưng rớt 8% từ đỉnh)
                 elif peak_margin >= TRAILING_STOP_TRIGGER and curr_price < (held[c]['highest'] * (1.0 - TRAILING_STOP_DROP)):
                     to_sell.append((c, 'SELL (Trailing Stop chốt lời)'))
@@ -379,33 +399,44 @@ def run_ai_quant_system():
                 elif c in stocks_ma20.columns and pd.notna(stocks_ma20.at[date, c]) and curr_price < stocks_ma20.at[date, c] and profit_margin > MA20_PROFIT_EXIT:
                     to_sell.append((c, 'SELL (Thủng MA20 bảo toàn lãi)'))
 
-        # Khớp các lệnh bán hợp lệ
+        # Khớp các lệnh bán hợp lệ (GIÁ THẬT 100%, KHÔNG CẦN FFILL)
         for c, reason in to_sell:
             if c in held:
-                sell_price = stocks_close.at[date, c]
+                sell_price = stocks_close.at[date, c] if c in stocks_close.columns else np.nan
+                # Nếu không có giá giao dịch hôm nay, hoãn bán chờ phiên tiếp theo
+                if pd.isna(sell_price) or sell_price <= 0:
+                    continue
+
                 qty = held[c]['qty']
-                net_val = qty * sell_price * (1.0 - SELL_FRICTION)
+                gross_val = qty * sell_price
+                net_val = gross_val * (1.0 - SELL_FRICTION)
                 cash += net_val
+
                 pnl_pct = ((sell_price * (1.0 - SELL_FRICTION)) / (held[c]['buy_price'] * (1.0 + BUY_FRICTION)) - 1.0) * 100.0
                 trade_log.append({
                     'Date': date_str,
                     'Action': reason,
                     'Ticker': c,
-                    'Price': round(sell_price, 2),
-                    'Profit(%)': round(pnl_pct, 2),
+                    'Price': round(float(sell_price), 2),
+                    'Profit(%)': round(float(pnl_pct), 2),
                     'Hold_Days': held[c]['hold_days']
                 })
                 del held[c]
+
+        # Reset đỉnh NAV khi tài khoản đang ở 100% tiền mặt để tránh vòng lặp stop-out
+        if len(held) == 0:
+            nav_peak = cash
 
         # ------------------------------------------------------------------
         # BƯỚC 2: TÍNH TOÁN VỐN VÀ QUÉT TÍN HIỆU MUA (BUY STRATEGY V2)
         # ------------------------------------------------------------------
         stock_val_now = sum([
-            held[c]['qty'] * stocks_close.at[date, c]
+            held[c]['qty'] * (stocks_close.at[date, c] if (c in stocks_close.columns and pd.notna(stocks_close.at[date, c]) and stocks_close.at[date, c] > 0) else held[c]['last_price'])
             for c in held.keys()
-            if c in stocks_close.columns and pd.notna(stocks_close.at[date, c])
         ])
         current_nav = cash + stock_val_now
+        if current_nav > nav_peak:
+            nav_peak = current_nav
         daily_nav_history.append({'Date': date, 'NAV': current_nav})
 
         empty_slots = MAX_SLOTS - len(held)
@@ -418,7 +449,7 @@ def run_ai_quant_system():
         else:
             max_exposure = 1.0       # Thị trường mạnh: 100%
         
-        allowed_stock_cap = (current_nav * max_exposure) - stock_val_now
+        allowed_stock_cap = max(0.0, (current_nav * max_exposure) - stock_val_now)
 
         # ====================================================================
         # ĐIỀU KIỆN VÀO LỆNH MỚI (V2 - NỚI LỎNG CÓ KIỂM SOÁT)
@@ -497,6 +528,7 @@ def run_ai_quant_system():
                                 'qty': shares,
                                 'buy_price': buy_price,
                                 'highest': buy_price,
+                                'last_price': buy_price,
                                 'buy_date': date_str,
                                 'hold_days': 0
                             }
@@ -514,9 +546,8 @@ def run_ai_quant_system():
 
     # Chốt NAV phiên cuối cùng
     final_stock_val = sum([
-        held[c]['qty'] * stocks_close.iloc[-1][c]
+        held[c]['qty'] * (stocks_close.iloc[-1][c] if (c in stocks_close.columns and pd.notna(stocks_close.iloc[-1][c]) and stocks_close.iloc[-1][c] > 0) else held[c].get('last_price', held[c]['buy_price']))
         for c in held.keys()
-        if c in stocks_close.columns and pd.notna(stocks_close.iloc[-1][c])
     ])
     final_nav = cash + final_stock_val
 
