@@ -62,18 +62,65 @@ def calc_macd_hist(series, fast=12, slow=26, signal=9):
 # ==========================================
 def fetch_ticker_data(symbol, n_bars=4000):
     """
-    Tải dữ liệu chứng khoán tốc độ cao từ các nguồn trực tiếp Việt Nam:
-    1. DNSE (Entrade API) - Siêu nhanh, không bị chặn IP, đầy đủ 10 năm.
-    2. VNDirect (DChart API) - Nguồn dữ liệu bảng giá chính thức.
-    3. TCBS (Techcom Securities) - Nguồn dữ liệu tài chính lớn.
-    4. TradingView (tvDatafeed) - Chỉ làm phương án dự phòng cuối cùng.
+    Tải dữ liệu chứng khoán tốc độ cao:
+    - VNINDEX: ƯU TIÊN SỐ 1 đọc trực tiếp từ markets_database10years.csv (10 năm chuẩn),
+               nếu có phiên mới hôm nay thì tải thêm từ API để nối vào.
+    - Cổ phiếu VN30: Tải trực tiếp 10 năm từ DNSE Entrade (/ohlcs/stock).
     """
     now_ts = int(datetime.datetime.now().timestamp())
     start_ts = int((datetime.datetime.now() - datetime.timedelta(days=12*365)).timestamp())
 
-    # 1. Nguồn 1: DNSE Entrade API (Tốc độ ~50ms, không bao giờ timeout, đủ 10 năm)
+    # =========================================================================
+    # 🌟 ƯU TIÊN SỐ 1 CHO VNINDEX: ĐỌC TRỰC TIẾP TỪ markets_database10years.csv
+    # =========================================================================
+    if symbol.upper() == 'VNINDEX' and os.path.exists('markets_database10years.csv'):
+        try:
+            csv_df = pd.read_csv('markets_database10years.csv')
+            if 'VNINDEX' in csv_df.columns:
+                c_df = csv_df[['Date', 'VNINDEX', 'VN_VOLUME']].dropna(subset=['VNINDEX']).copy()
+                c_df['Date'] = pd.to_datetime(c_df['Date']).dt.tz_localize(None).dt.normalize()
+                c_df.rename(columns={'VNINDEX': 'Close', 'VN_VOLUME': 'Volume'}, inplace=True)
+                c_df['Open'] = c_df['Close']
+                c_df['High'] = c_df['Close']
+                c_df['Low'] = c_df['Close']
+                c_df = c_df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
+
+                # Kiểm tra nếu phiên hôm nay mới hơn ngày cuối trong CSV -> tải thêm nến mới nối vào
+                max_csv_date = c_df['Date'].max()
+                today_ts = pd.Timestamp.now().normalize()
+                if max_csv_date < today_ts:
+                    try:
+                        latest_url = f"https://services.entrade.com.vn/chart-api/v2/ohlcs/index?from={int(max_csv_date.timestamp())}&to={now_ts}&symbol=VNINDEX&resolution=1D"
+                        res = requests.get(latest_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}, timeout=5)
+                        if res.status_code == 200:
+                            data = res.json()
+                            if 't' in data and len(data['t']) > 0:
+                                df_live = pd.DataFrame({
+                                    'Date': pd.to_datetime(data['t'], unit='s').tz_localize(None).normalize(),
+                                    'Open': data['o'],
+                                    'High': data['h'],
+                                    'Low': data['l'],
+                                    'Close': data['c'],
+                                    'Volume': data.get('v', [0]*len(data['t']))
+                                })
+                                newer = df_live[df_live['Date'] > max_csv_date]
+                                if not newer.empty:
+                                    c_df = pd.concat([c_df, newer], ignore_index=True).drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
+                    except Exception:
+                        pass
+                return c_df
+        except Exception as e:
+            print(f"   ⚠️ Đọc markets_database10years.csv lỗi ({e}), chuyển sang API...")
+
+    # Phân loại Index vs Stock để gọi đúng endpoint của DNSE Entrade:
+    # VNINDEX, VN30, VN100, VNXALL, HNX, HNX30 -> /ohlcs/index
+    # Các mã cổ phiếu thường -> /ohlcs/stock
+    is_index = symbol.upper() in ['VNINDEX', 'VN30', 'VN100', 'VNXALL', 'HNX', 'HNX30', 'UPCOM']
+    entrade_endpoint = 'index' if is_index else 'stock'
+
+    # 1. Nguồn 1: DNSE Entrade API (Tốc độ ~50ms, không bao giờ timeout, đầy đủ 10 năm từ 2014)
     try:
-        url = f"https://services.entrade.com.vn/chart-api/v2/ohlcs/stock?from={start_ts}&to={now_ts}&symbol={symbol}&resolution=1D"
+        url = f"https://services.entrade.com.vn/chart-api/v2/ohlcs/{entrade_endpoint}?from={start_ts}&to={now_ts}&symbol={symbol}&resolution=1D"
         res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}, timeout=6)
         if res.status_code == 200:
             data = res.json()
@@ -123,7 +170,7 @@ def fetch_ticker_data(symbol, n_bars=4000):
     except Exception:
         pass
 
-    # 4. Nguồn 4: TradingView (Phương án dự phòng cuối cùng)
+    # 4. Nguồn 4: TradingView (Phương án dự phòng)
     try:
         df = tv.get_hist(symbol=symbol, exchange='HOSE', interval=Interval.in_daily, n_bars=n_bars)
         if df is not None and len(df) > 50:
@@ -145,9 +192,9 @@ if vnindex_raw is None or vnindex_raw.empty:
     sys.exit("❌ LỖI: Không thể tải dữ liệu VNINDEX.")
 
 vnindex_df = vnindex_raw.rename(columns={'Close': 'VNINDEX'}).drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
-vnindex_df['MA50'] = vnindex_df['VNINDEX'].rolling(50).mean()
-vnindex_df['MA100'] = vnindex_df['VNINDEX'].rolling(100).mean()
-vnindex_df['MA200'] = vnindex_df['VNINDEX'].rolling(200).mean()
+vnindex_df['MA50'] = vnindex_df['VNINDEX'].rolling(50, min_periods=20).mean()
+vnindex_df['MA100'] = vnindex_df['VNINDEX'].rolling(100, min_periods=40).mean()
+vnindex_df['MA200'] = vnindex_df['VNINDEX'].rolling(200, min_periods=80).mean()
 vnindex_df['ADX'] = calc_adx(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14)
 vnindex_df['ATR_PCT'] = calc_atr(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14) / vnindex_df['VNINDEX']
 vnindex_df['VN_MFI'] = calc_mfi(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], vnindex_df['Volume'], 14)
@@ -185,7 +232,7 @@ stocks_macd = pd.DataFrame(index=stocks_close.index)
 for c in loaded_tickers:
     s_c = stocks_close[c].dropna()
     if len(s_c) >= 20:
-        stocks_ma50[c] = s_c.rolling(50).mean()
+        stocks_ma50[c] = s_c.rolling(50, min_periods=20).mean()
         stocks_rsi[c] = calc_rsi(s_c)
         stocks_macd[c] = calc_macd_hist(s_c)
     if f'{c}_V' in stocks_volume.columns:
@@ -211,15 +258,15 @@ market_context['VN_Dist_MA200'] = market_context['VNINDEX'] / market_context['MA
 market_context['Date'] = pd.to_datetime(market_context['Date']).dt.strftime('%Y-%m-%d')
 market_context = market_context.drop_duplicates(subset=['Date'], keep='last')
 
-macro_df = macro_df.merge(market_context[['Date', 'VN_MFI', 'VN_Dist_MA200']], on='Date', how='left').ffill()
+macro_df = macro_df.merge(market_context[['Date', 'VN_MFI', 'VN_Dist_MA200']], on='Date', how='inner')
 
 macro_cols = ['DXY', 'US10Y', 'USD_VND']
 for col in macro_cols:
-    macro_df[f'Z_{col}'] = (macro_df[col] - macro_df[col].rolling(120).mean()) / macro_df[col].rolling(120).std()
+    macro_df[f'Z_{col}'] = (macro_df[col] - macro_df[col].rolling(120, min_periods=30).mean()) / macro_df[col].rolling(120, min_periods=30).std()
 z_cols = [f'Z_{c}' for c in macro_cols]
 
 clean_dates_str = pd.to_datetime(stocks_close.index).strftime('%Y-%m-%d')
-vn_close_aligned = vnindex_df.set_index('Date')['VNINDEX'].reindex(stocks_close.index).ffill()
+vn_close_aligned = vnindex_df.set_index('Date')['VNINDEX'].reindex(stocks_close.index)
 # Lợi nhuận 30 phiên tới của VNINDEX
 vn_future_return = vn_close_aligned.shift(-30) / vn_close_aligned - 1
 
