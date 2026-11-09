@@ -543,18 +543,13 @@ def run_ai_quant_system():
                     'Action': reason,
                     'Ticker': c,
                     'Price': round(float(sell_price), 2),
-                    'Trade_Value': round(float(net_val), 0),
-                    'PnL_VND': round(float(pnl_vnd), 0),
+                    'Trade_Value': int(round(net_val)),
+                    'PnL_VND': int(round(pnl_vnd)),
                     'Profit(%)': round(float(pnl_pct), 2),
-                    'Hold_Days': hold_days,
-                    'AI_Score': None,
-                    'Vol_Ratio': None,
-                    'RSI': None,
-                    'VN_MFI': round(float(market_mfi), 1) if pd.notna(market_mfi) else None,
-                    'Cash_Balance': round(float(cash), 0),
-                    'Total_NAV': round(float(trade_nav), 0),
+                    'Hold_Days': int(hold_days),
+                    'Total_NAV': int(round(trade_nav)),
                     'Portfolio_Return(%)': round(float(cum_ret_pct), 2),
-                    'Bank_Interest_Accumulated': round(float(total_bank_interest), 0)
+                    'AI_Score': None
                 })
 
         # Reset đỉnh NAV khi tài khoản đang ở 100% tiền mặt để tránh vòng lặp stop-out
@@ -569,11 +564,11 @@ def run_ai_quant_system():
         if current_nav > nav_peak:
             nav_peak = current_nav
         daily_nav_history.append({
-            'Date': date,
-            'NAV': current_nav,
-            'Cash': cash,
-            'Bank_Interest': total_bank_interest,
-            'Portfolio_Return(%)': ((current_nav / INITIAL_CAPITAL) - 1.0) * 100.0
+            'Date': date_str,
+            'NAV': int(round(current_nav)),
+            'Cash': int(round(cash)),
+            'Bank_Interest': int(round(total_bank_interest)),
+            'Portfolio_Return(%)': round(((current_nav / INITIAL_CAPITAL) - 1.0) * 100.0, 2)
         })
 
         empty_slots = MAX_SLOTS - len(held)
@@ -694,18 +689,13 @@ def run_ai_quant_system():
                                 'Action': f"BUY ({cand['Signal']})",
                                 'Ticker': c,
                                 'Price': round(float(buy_price), 2),
-                                'Trade_Value': round(float(total_spent), 0),
-                                'PnL_VND': 0.0,
+                                'Trade_Value': int(round(total_spent)),
+                                'PnL_VND': None,
                                 'Profit(%)': None,
-                                'Hold_Days': 0,
-                                'AI_Score': round(float(cand['Score']), 2),
-                                'Vol_Ratio': cand['Vol_Ratio'],
-                                'RSI': cand['RSI'],
-                                'VN_MFI': round(float(market_mfi), 1) if pd.notna(market_mfi) else None,
-                                'Cash_Balance': round(float(cash), 0),
-                                'Total_NAV': round(float(trade_nav), 0),
+                                'Hold_Days': None,
+                                'Total_NAV': int(round(trade_nav)),
                                 'Portfolio_Return(%)': round(float(cum_ret_pct), 2),
-                                'Bank_Interest_Accumulated': round(float(total_bank_interest), 0)
+                                'AI_Score': round(float(cand['Score']), 2)
                             })
                             empty_slots -= 1
                             buys_today += 1
@@ -719,11 +709,19 @@ def run_ai_quant_system():
 
     desired_cols = [
         'Date', 'Action', 'Ticker', 'Price', 'Trade_Value', 'PnL_VND',
-        'Profit(%)', 'Hold_Days', 'AI_Score', 'Vol_Ratio', 'RSI', 'VN_MFI',
-        'Cash_Balance', 'Total_NAV', 'Portfolio_Return(%)', 'Bank_Interest_Accumulated'
+        'Profit(%)', 'Hold_Days', 'Total_NAV', 'Portfolio_Return(%)', 'AI_Score'
     ]
     final_cols = [col for col in desired_cols if col in df_trades.columns]
     df_trades = df_trades[final_cols]
+
+    # Ép kiểu Int64 nullable để xuất file sạch 100%, không bị đuôi .0
+    for int_col in ['Trade_Value', 'PnL_VND', 'Hold_Days', 'Total_NAV']:
+        if int_col in df_trades.columns:
+            df_trades[int_col] = pd.to_numeric(df_trades[int_col], errors='coerce').round(0).astype('Int64')
+
+    for nav_int in ['NAV', 'Cash', 'Bank_Interest']:
+        if nav_int in df_nav.columns:
+            df_nav[nav_int] = pd.to_numeric(df_nav[nav_int], errors='coerce').round(0).astype('Int64')
 
     return df_trades, df_nav, final_nav, total_bank_interest, held
 
@@ -732,13 +730,13 @@ def run_ai_quant_system():
 # ==========================================
 df_trade_log, df_nav_hist, final_nav, total_interest, current_held = run_ai_quant_system()
 
-# Ghi nhận file trading_log.csv cho Power BI
-df_trade_log.to_csv('trading_log.csv', index=False)
-print("✅ Đã ghi nhận sổ kế toán giao dịch vào file trading_log.csv (Sẵn sàng cho Power BI)!")
+# Ghi nhận file trading_log.csv cho Power BI (Sổ lệnh tinh gọn, không rác số thập phân)
+df_trade_log.to_csv('trading_log.csv', index=False, na_rep='', float_format='%.2f')
+print("✅ Đã ghi nhận sổ kế toán giao dịch tinh gọn vào file trading_log.csv!")
 
-# Ghi nhận file daily_nav.csv cho Power BI theo dõi biến động tài sản hàng ngày
-df_nav_hist.to_csv('daily_nav.csv', index=False)
-print("✅ Đã ghi nhận biến động tài sản hàng ngày vào file daily_nav.csv!")
+# Ghi nhận file daily_nav.csv cho Power BI (Số nguyên tròn trịa, không tràn số thập phân)
+df_nav_hist.to_csv('daily_nav.csv', index=False, na_rep='', float_format='%.2f')
+print("✅ Đã ghi nhận biến động tài sản hàng ngày chuẩn vào file daily_nav.csv!")
 
 # ==========================================
 # TÍNH TOÁN METRICS ĐỊNH LƯỢNG RỦI RO & HIỆU SUẤT
@@ -747,7 +745,8 @@ initial_capital = 100_000_000.0
 total_return_pct = ((final_nav / initial_capital) - 1.0) * 100.0
 
 # Tính CAGR (Lợi nhuận kép theo năm)
-n_years = (df_nav_hist['Date'].iloc[-1] - df_nav_hist['Date'].iloc[0]).days / 365.25
+nav_dates = pd.to_datetime(df_nav_hist['Date'])
+n_years = (nav_dates.iloc[-1] - nav_dates.iloc[0]).days / 365.25
 cagr = ((final_nav / initial_capital) ** (1.0 / n_years) - 1.0) * 100.0
 
 # Tính Maximum Drawdown (MDD)
@@ -757,7 +756,9 @@ max_mdd = df_nav_hist['Drawdown'].min() * 100.0
 
 # Tìm đáy sụt giảm sâu nhất
 trough_idx = df_nav_hist['Drawdown'].idxmin()
-trough_date = df_nav_hist['Date'].iloc[trough_idx]
+trough_date = pd.to_datetime(df_nav_hist['Date'].iloc[trough_idx])
+peak_sub = df_nav_hist.iloc[:trough_idx+1]
+peak_date = pd.to_datetime(peak_sub.loc[peak_sub['NAV'] == peak_sub['Peak'].max(), 'Date'].iloc[-1])
 peak_sub = df_nav_hist.iloc[:trough_idx+1]
 peak_date = peak_sub.loc[peak_sub['NAV'] == peak_sub['Peak'].max(), 'Date'].iloc[-1]
 
