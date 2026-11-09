@@ -361,12 +361,19 @@ def run_ai_quant_system():
     HARD_STOPLOSS = -0.10              # Cắt lỗ cứng -10% - bảo vệ vốn từng vị thế
     PORTFOLIO_MDD_LIMIT = -0.18        # Nếu tổng NAV giảm 18% từ đỉnh -> bán hết (Portfolio Stop)
     
-    cash = 100_000_000.0               # Vốn khởi điểm 100 triệu VNĐ
+    INITIAL_CAPITAL = 100_000_000.0    # Vốn khởi điểm 100 triệu VNĐ
+    cash = INITIAL_CAPITAL
     total_bank_interest = 0.0
     held = {}                          # {ticker: {'qty': ..., 'buy_price': ..., 'highest': ..., 'buy_date': ..., 'hold_days': 0}}
     trade_log = []
     daily_nav_history = []
     nav_peak = cash                    # Theo dõi đỉnh NAV cho Portfolio Stop
+
+    def get_current_stock_valuation(d):
+        return sum([
+            held[k]['qty'] * (stocks_close.at[d, k] if (k in stocks_close.columns and pd.notna(stocks_close.at[d, k]) and stocks_close.at[d, k] > 0) else held[k].get('last_price', held[k]['buy_price']))
+            for k in held.keys()
+        ])
 
     for i in range(len(backtest)):
         date = backtest['Date'].iloc[i]
@@ -518,18 +525,37 @@ def run_ai_quant_system():
                 qty = held[c]['qty']
                 gross_val = qty * sell_price
                 net_val = gross_val * (1.0 - SELL_FRICTION)
+                buy_cost = qty * held[c]['buy_price'] * (1.0 + BUY_FRICTION)
+                pnl_vnd = net_val - buy_cost
                 cash += net_val
 
                 pnl_pct = ((sell_price * (1.0 - SELL_FRICTION)) / (held[c]['buy_price'] * (1.0 + BUY_FRICTION)) - 1.0) * 100.0
+                hold_days = held[c]['hold_days']
+                del held[c]
+
+                # Cập nhật trạng thái danh mục theo thời gian thực ngay sau lệnh bán
+                rem_stock_val = get_current_stock_valuation(date)
+                trade_nav = cash + rem_stock_val
+                cum_ret_pct = ((trade_nav / INITIAL_CAPITAL) - 1.0) * 100.0
+
                 trade_log.append({
                     'Date': date_str,
                     'Action': reason,
                     'Ticker': c,
                     'Price': round(float(sell_price), 2),
+                    'Trade_Value': round(float(net_val), 0),
+                    'PnL_VND': round(float(pnl_vnd), 0),
                     'Profit(%)': round(float(pnl_pct), 2),
-                    'Hold_Days': held[c]['hold_days']
+                    'Hold_Days': hold_days,
+                    'AI_Score': None,
+                    'Vol_Ratio': None,
+                    'RSI': None,
+                    'VN_MFI': round(float(market_mfi), 1) if pd.notna(market_mfi) else None,
+                    'Cash_Balance': round(float(cash), 0),
+                    'Total_NAV': round(float(trade_nav), 0),
+                    'Portfolio_Return(%)': round(float(cum_ret_pct), 2),
+                    'Bank_Interest_Accumulated': round(float(total_bank_interest), 0)
                 })
-                del held[c]
 
         # Reset đỉnh NAV khi tài khoản đang ở 100% tiền mặt để tránh vòng lặp stop-out
         if len(held) == 0:
@@ -538,14 +564,17 @@ def run_ai_quant_system():
         # ------------------------------------------------------------------
         # BƯỚC 2: TÍNH TOÁN VỐN VÀ QUÉT TÍN HIỆU MUA (BUY STRATEGY V2)
         # ------------------------------------------------------------------
-        stock_val_now = sum([
-            held[c]['qty'] * (stocks_close.at[date, c] if (c in stocks_close.columns and pd.notna(stocks_close.at[date, c]) and stocks_close.at[date, c] > 0) else held[c]['last_price'])
-            for c in held.keys()
-        ])
+        stock_val_now = get_current_stock_valuation(date)
         current_nav = cash + stock_val_now
         if current_nav > nav_peak:
             nav_peak = current_nav
-        daily_nav_history.append({'Date': date, 'NAV': current_nav})
+        daily_nav_history.append({
+            'Date': date,
+            'NAV': current_nav,
+            'Cash': cash,
+            'Bank_Interest': total_bank_interest,
+            'Portfolio_Return(%)': ((current_nav / INITIAL_CAPITAL) - 1.0) * 100.0
+        })
 
         empty_slots = MAX_SLOTS - len(held)
         
@@ -655,28 +684,47 @@ def run_ai_quant_system():
                                 'buy_date': date_str,
                                 'hold_days': 0
                             }
+                            # Cập nhật trạng thái danh mục theo thời gian thực ngay sau lệnh mua
+                            rem_stock_val = get_current_stock_valuation(date)
+                            trade_nav = cash + rem_stock_val
+                            cum_ret_pct = ((trade_nav / INITIAL_CAPITAL) - 1.0) * 100.0
+
                             trade_log.append({
                                 'Date': date_str,
                                 'Action': f"BUY ({cand['Signal']})",
                                 'Ticker': c,
-                                'Price': round(buy_price, 2),
-                                'AI_Score': round(cand['Score'], 2),
+                                'Price': round(float(buy_price), 2),
+                                'Trade_Value': round(float(total_spent), 0),
+                                'PnL_VND': 0.0,
+                                'Profit(%)': None,
+                                'Hold_Days': 0,
+                                'AI_Score': round(float(cand['Score']), 2),
                                 'Vol_Ratio': cand['Vol_Ratio'],
                                 'RSI': cand['RSI'],
-                                'VN_MFI': round(market_mfi, 1)
+                                'VN_MFI': round(float(market_mfi), 1) if pd.notna(market_mfi) else None,
+                                'Cash_Balance': round(float(cash), 0),
+                                'Total_NAV': round(float(trade_nav), 0),
+                                'Portfolio_Return(%)': round(float(cum_ret_pct), 2),
+                                'Bank_Interest_Accumulated': round(float(total_bank_interest), 0)
                             })
                             empty_slots -= 1
                             buys_today += 1
 
     # Chốt NAV phiên cuối cùng
-    final_stock_val = sum([
-        held[c]['qty'] * (stocks_close.iloc[-1][c] if (c in stocks_close.columns and pd.notna(stocks_close.iloc[-1][c]) and stocks_close.iloc[-1][c] > 0) else held[c].get('last_price', held[c]['buy_price']))
-        for c in held.keys()
-    ])
+    final_stock_val = get_current_stock_valuation(backtest['Date'].iloc[-1])
     final_nav = cash + final_stock_val
 
     df_nav = pd.DataFrame(daily_nav_history)
     df_trades = pd.DataFrame(trade_log)
+
+    desired_cols = [
+        'Date', 'Action', 'Ticker', 'Price', 'Trade_Value', 'PnL_VND',
+        'Profit(%)', 'Hold_Days', 'AI_Score', 'Vol_Ratio', 'RSI', 'VN_MFI',
+        'Cash_Balance', 'Total_NAV', 'Portfolio_Return(%)', 'Bank_Interest_Accumulated'
+    ]
+    final_cols = [col for col in desired_cols if col in df_trades.columns]
+    df_trades = df_trades[final_cols]
+
     return df_trades, df_nav, final_nav, total_bank_interest, held
 
 # ==========================================
@@ -686,7 +734,11 @@ df_trade_log, df_nav_hist, final_nav, total_interest, current_held = run_ai_quan
 
 # Ghi nhận file trading_log.csv cho Power BI
 df_trade_log.to_csv('trading_log.csv', index=False)
-print("✅ Đã ghi nhận lịch sử giao dịch vào file trading_log.csv (Sẵn sàng cho Power BI)!")
+print("✅ Đã ghi nhận sổ kế toán giao dịch vào file trading_log.csv (Sẵn sàng cho Power BI)!")
+
+# Ghi nhận file daily_nav.csv cho Power BI theo dõi biến động tài sản hàng ngày
+df_nav_hist.to_csv('daily_nav.csv', index=False)
+print("✅ Đã ghi nhận biến động tài sản hàng ngày vào file daily_nav.csv!")
 
 # ==========================================
 # TÍNH TOÁN METRICS ĐỊNH LƯỢNG RỦI RO & HIỆU SUẤT
@@ -769,11 +821,13 @@ if not df_trade_log.empty:
     if not latest_trades.empty:
         for _, row in latest_trades.iterrows():
             if 'BUY' in row['Action']:
-                msg += f"🟢 <b>MUA: {row['Ticker']}</b> (Giá: {row['Price']:,.0f}) | AI: <b>{row['AI_Score'] * 100:.1f}%</b>\n\n"
+                trade_val = f" | Tiền: {row['Trade_Value']:,.0f} VNĐ" if 'Trade_Value' in row and pd.notna(row['Trade_Value']) else ""
+                msg += f"🟢 <b>MUA: {row['Ticker']}</b> (Giá: {row['Price']:,.2f}{trade_val}) | AI: <b>{row['AI_Score'] * 100:.1f}%</b>\n\n"
                 buy_count += 1
             elif 'SELL' in row['Action']:
                 icon = "🔥" if row['Profit(%)'] > 0 else "🩸"
-                msg += f"🔴 <b>BÁN: {row['Ticker']}</b> ({row['Action']}) | Lãi/Lỗ: {icon} <b>{row['Profit(%)']}%</b>\n\n"
+                pnl_str = f" ({row['PnL_VND']:+,.0f} VNĐ)" if 'PnL_VND' in row and pd.notna(row['PnL_VND']) else ""
+                msg += f"🔴 <b>BÁN: {row['Ticker']}</b> ({row['Action']}) | Lãi/Lỗ: {icon} <b>{row['Profit(%)']}%</b>{pnl_str}\n\n"
                 sell_count += 1
 
 if buy_count == 0 and sell_count == 0:
