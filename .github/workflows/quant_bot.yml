@@ -6,7 +6,7 @@ on:
     # Giờ VN (UTC+7) là 15:30 -> Giờ UTC là 08:30
     - cron: '30 8 * * 1-5'
     
-    # 🧠 NHÁNH HỌC TẬP: Chạy train_bot.py vào 09:00 sáng Thứ 7
+    # 🧠 NHÁNH HỌC TẬP: Chạy train_bot.py vào 08:00 sáng cn
     - cron: '0 8 * * 0'
     
   # Cho phép bác bấm nút "Run workflow" bằng tay trên Github để test thử bot Telegram
