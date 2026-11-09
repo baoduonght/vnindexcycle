@@ -7,8 +7,7 @@ on:
     - cron: '30 8 * * 1-5'
     
     # 🧠 NHÁNH HỌC TẬP: Chạy train_bot.py vào 09:00 sáng Thứ 7
-    # Giờ VN (UTC+7) là 09:00 -> Giờ UTC là 02:00
-    - cron: '0 2 * * 6'
+    - cron: '0 8 * * 0'
     
   # Cho phép bác bấm nút "Run workflow" bằng tay trên Github để test thử bot Telegram
   workflow_dispatch:
