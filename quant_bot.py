@@ -759,8 +759,6 @@ trough_idx = df_nav_hist['Drawdown'].idxmin()
 trough_date = pd.to_datetime(df_nav_hist['Date'].iloc[trough_idx])
 peak_sub = df_nav_hist.iloc[:trough_idx+1]
 peak_date = pd.to_datetime(peak_sub.loc[peak_sub['NAV'] == peak_sub['Peak'].max(), 'Date'].iloc[-1])
-peak_sub = df_nav_hist.iloc[:trough_idx+1]
-peak_date = peak_sub.loc[peak_sub['NAV'] == peak_sub['Peak'].max(), 'Date'].iloc[-1]
 
 calmar_ratio = abs(cagr / max_mdd) if max_mdd != 0 else 0.0
 
@@ -781,7 +779,7 @@ print(f"🚀 TỔNG LỢI NHUẬN (Đã trừ phí):    +{total_return_pct:.2f}%
 print(f"📈 Lợi nhuận kép TB (CAGR):        {cagr:.2f}% / năm")
 print(f"----------------------------------------------------------")
 print(f"📉 SỤT GIẢM TỐI ĐA (Max Drawdown): {max_mdd:.2f}%")
-print(f"   (Thời kỳ chịu đựng lớn nhất: Từ đỉnh {peak_date.strftime('%d/%m/%Y')} về đáy {trough_date.strftime('%d/%m/%Y')})")
+print(f"   (Thời kỳ chịu đựng lớn nhất: Từ đỉnh {pd.to_datetime(peak_date).strftime('%d/%m/%Y')} về đáy {pd.to_datetime(trough_date).strftime('%d/%m/%Y')})")
 print(f"⚡ Chỉ số Calmar (CAGR / MDD):     {calmar_ratio:.2f}")
 print(f"----------------------------------------------------------")
 print(f"Tổng số lệnh đã chốt sổ:          {total_sells}")
