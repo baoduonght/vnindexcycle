@@ -590,8 +590,6 @@ def run_ai_quant_system():
                 cash += net_val
 
                 pnl_pct = ((sell_price * (1.0 - SELL_FRICTION)) / (buy_price * (1.0 + BUY_FRICTION)) - 1.0) * 100.0
-                hold_days = held[c]['hold_days']
-                del held[c]
 
                 # Cập nhật trạng thái danh mục theo thời gian thực ngay sau lệnh bán
                 rem_stock_val = get_current_stock_valuation(date)
