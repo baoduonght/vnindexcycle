@@ -371,6 +371,7 @@ def run_ai_quant_system():
     trade_log = []
     daily_nav_history = []
     nav_peak = cash                    # Theo dõi đỉnh NAV cho Portfolio Stop
+    consecutive_above_ma100 = 0        # Đếm số phiên liên tiếp VN-Index nằm trên MA100
 
     def get_current_stock_valuation(d):
         return sum([
@@ -391,6 +392,11 @@ def run_ai_quant_system():
         market_vol = backtest['Volume'].iloc[i] if 'Volume' in backtest.columns else 0.0
         market_vol_ma20 = backtest['VOL_MA20'].iloc[i] if 'VOL_MA20' in backtest.columns else 1.0
         macro_floor = backtest['MACRO_FLOOR'].iloc[i] if 'MACRO_FLOOR' in backtest.columns else (market_ma100 * 0.985)
+
+        if idx > market_ma100:
+            consecutive_above_ma100 += 1
+        else:
+            consecutive_above_ma100 = 0
 
         if date not in stocks_close.index:
             continue
@@ -604,10 +610,42 @@ def run_ai_quant_system():
         allowed_stock_cap = max(0.0, (current_nav * max_exposure) - stock_val_now)
 
         # ====================================================================
-        # ĐIỀU KIỆN VÀO LỆNH MỚI (V2 - NỚI LỎNG CÓ KIỂM SOÁT)
-        # Cửa vào: VNINDEX > MA100 (thay vì MA200) + ADX > 18 (thay vì 22)
+        # ĐIỀU KIỆN VÀO LỆNH MỚI (V3 - DYNAMIC MACRO RE-ENTRY ENGINE)
+        # 1. trend_reentry_confirmed: >= 3 phiên trên MA100 HOẶC Follow-Through Day (V-Shape bùng nổ theo đà)
+        # 2. is_volatility_calm: Biến động hạ nhiệt (market_atr_pct <= 0.020)
+        # 3. is_breadth_healthy: >= 35% số mã VN30 nằm trên MA50 (Dòng tiền lan tỏa đồng thuận)
         # ====================================================================
-        if empty_slots > 0 and (idx > market_ma100) and (market_adx > ADX_MIN) and (allowed_stock_cap > 0):
+        vol_shock_today = (market_vol / market_vol_ma20) if (pd.notna(market_vol_ma20) and market_vol_ma20 > 0) else 1.0
+        prev_idx = backtest['VNINDEX'].iloc[i-1] if i > 0 else idx
+
+        # Ngoại lệ V-Shape: Phiên bùng nổ theo đà (Follow-Through Day)
+        is_follow_through_day = (idx > market_ma100) and (vol_shock_today >= 1.25) and (idx >= prev_idx * 1.010)
+
+        # Xác nhận xu hướng uy tín: Duy trì >= 3 phiên trên MA100 HOẶC có phiên FTD
+        trend_reentry_confirmed = (consecutive_above_ma100 >= 3) or is_follow_through_day
+
+        # Độ biến động đã hạ nhiệt về vùng tích lũy (không hoảng loạn giật nến)
+        is_volatility_calm = (market_atr_pct <= 0.020)
+
+        # Độ rộng thị trường: Tỷ lệ cổ phiếu VN30 đang giữ được MA50 (tránh bẫy kéo trụ ảo)
+        vn30_above_ma50_cnt = sum([
+            1 for ticker in active_vn30
+            if ticker in stocks_close.columns and ticker in stocks_ma50.columns
+            and pd.notna(stocks_close.at[date, ticker]) and pd.notna(stocks_ma50.at[date, ticker])
+            and stocks_close.at[date, ticker] > stocks_ma50.at[date, ticker]
+        ])
+        market_breadth = (vn30_above_ma50_cnt / len(active_vn30)) if len(active_vn30) > 0 else 0.5
+        is_breadth_healthy = (market_breadth >= 0.35)
+
+        can_enter_new_trades = (
+            trend_reentry_confirmed
+            and is_volatility_calm
+            and is_breadth_healthy
+            and (market_adx > ADX_MIN)
+            and (allowed_stock_cap > 0)
+        )
+
+        if empty_slots > 0 and can_enter_new_trades:
             buy_candidates = []
             prev_date = backtest['Date'].iloc[i-1] if i > 0 else None
 
