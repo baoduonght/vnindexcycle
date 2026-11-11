@@ -191,6 +191,7 @@ if vnindex_raw is None or vnindex_raw.empty:
     sys.exit("❌ LỖI: Không thể tải dữ liệu VNINDEX từ cả TradingView lẫn VNDirect!")
 
 vnindex_df = vnindex_raw.rename(columns={'Close': 'VNINDEX'}).drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
+vnindex_df['MA20'] = vnindex_df['VNINDEX'].rolling(20, min_periods=10).mean()
 vnindex_df['MA50'] = vnindex_df['VNINDEX'].rolling(50, min_periods=20).mean()
 vnindex_df['MA100'] = vnindex_df['VNINDEX'].rolling(100, min_periods=40).mean()
 vnindex_df['MA200'] = vnindex_df['VNINDEX'].rolling(200, min_periods=80).mean()
@@ -383,6 +384,7 @@ def run_ai_quant_system():
         date = backtest['Date'].iloc[i]
         date_str = date.strftime('%Y-%m-%d')
         idx = backtest['VNINDEX'].iloc[i]
+        market_ma20 = backtest['MA20'].iloc[i] if 'MA20' in backtest.columns else backtest['MA50'].iloc[i]
         market_ma50 = backtest['MA50'].iloc[i]
         market_ma100 = backtest['MA100'].iloc[i]
         market_ma200 = backtest['MA200'].iloc[i]
@@ -485,14 +487,14 @@ def run_ai_quant_system():
                 curr_p = stocks_close.at[date, c] if c in stocks_close.columns else np.nan
                 # Chỉ bán khi có giá giao dịch thực tế hôm nay và không bị nghẽn sàn
                 if held[c]['hold_days'] >= MIN_HOLD_DAYS and pd.notna(curr_p) and curr_p > 0 and not is_liquidity_locked(c):
-                    to_sell.append((c, 'SELL (Portfolio Stop -18%)'))
+                    to_sell.append((c, 'SELL (Portfolio Stop -18%)', 1.0))
 
         elif is_macro_breakdown and len(held) > 0:
             for c in list(held.keys()):
                 curr_p = stocks_close.at[date, c] if c in stocks_close.columns else np.nan
                 # Chỉ bán khi có giá giao dịch thực tế hôm nay và không bị nghẽn sàn
                 if held[c]['hold_days'] >= MIN_HOLD_DAYS and pd.notna(curr_p) and curr_p > 0 and not is_liquidity_locked(c):
-                    to_sell.append((c, 'SELL (Cắt Macro gãy MA100)'))
+                    to_sell.append((c, 'SELL (Cắt Macro gãy MA100)', 1.0))
 
         else:
             # Nếu chỉ mới là phiên chớm rung lắc dưới MA100 (chưa xác nhận gãy), hoặc VNINDEX > MA100:
@@ -511,49 +513,83 @@ def run_ai_quant_system():
                 buy_price = held[c]['buy_price']
                 profit_margin = (curr_price - buy_price) / buy_price
                 peak_margin = (held[c]['highest'] - buy_price) / buy_price
+                has_scaled = held[c].get('scaled_out', False)
 
                 # LÝ DO 1: Bị HOSE loại khỏi rổ VN30
                 if c not in active_vn30:
-                    to_sell.append((c, 'SELL (Rời rổ VN30)'))
+                    to_sell.append((c, 'SELL (Rời rổ VN30)', 1.0))
                 # LÝ DO 2: CẮT LỖ CỨNG -10% (Bảo vệ từng vị thế riêng lẻ)
                 elif profit_margin <= HARD_STOPLOSS:
-                    to_sell.append((c, 'SELL (Cắt lỗ cứng -10%)'))
-                # LÝ DO 3: QUẢN TRỊ SIÊU CỔ PHIẾU (Lãi đỉnh >= 20% - Cho không gian bay cao x2, x3)
-                elif peak_margin >= SUPER_WINNER_PEAK:
-                    # Trailing Stop nới rộng: Rớt 10% từ đỉnh cao nhất
-                    if curr_price < (held[c]['highest'] * (1.0 - SUPER_WINNER_DROP)):
-                        to_sell.append((c, 'SELL (Trailing Stop chốt siêu cổ)'))
-                    # Xu hướng trung hạn: Gãy hẳn MA50 mới chốt (không bị rung rũ bởi MA20)
-                    elif c in stocks_ma50.columns and pd.notna(stocks_ma50.at[date, c]) and curr_price < stocks_ma50.at[date, c]:
-                        to_sell.append((c, 'SELL (Gãy MA50 chốt lời sóng lớn)'))
-                    # Khóa lãi tối thiểu: Không bao giờ để siêu cổ phiếu rơi về hòa vốn hay lỗ
-                    elif profit_margin <= 0.08:
-                        to_sell.append((c, 'SELL (Khóa lãi sàn bảo vệ +8%)'))
-                # LÝ DO 4: VỊ THẾ BÌNH THƯỜNG (Lãi đỉnh < 20%)
+                    to_sell.append((c, 'SELL (Cắt lỗ cứng -10%)', 1.0))
+
+                # LÝ DO 3: SIÊU CỔ PHIẾU (Lãi đỉnh >= 25%): SIẾT TRAILING STOP ĐỘNG SÁT ĐỈNH
+                elif peak_margin >= 0.25:
+                    # 1. Rớt 7% từ đỉnh cao nhất -> Chốt toàn bộ ngay lập tức (không chờ gãy MA50/MA100)
+                    if curr_price < (held[c]['highest'] * 0.93):
+                        to_sell.append((c, 'SELL (Siết Trailing Stop -7% từ đỉnh)', 1.0))
+                    # 2. Thủng MA20 riêng lẻ -> Chốt sát đỉnh
+                    elif c in stocks_ma20.columns and pd.notna(stocks_ma20.at[date, c]) and curr_price < stocks_ma20.at[date, c]:
+                        to_sell.append((c, 'SELL (Siết MA20 chốt siêu cổ)', 1.0))
+                    # 3. Khóa lãi sàn bảo vệ tối thiểu +10%
+                    elif profit_margin <= 0.10:
+                        to_sell.append((c, 'SELL (Khóa sàn siêu cổ +10%)', 1.0))
+
+                # LÝ DO 4: ĐÃ CHỐT 30% RỒI -> QUẢN TRỊ 70% CÒN LẠI (KHI LÃI ĐỈNH < 25%)
+                elif has_scaled:
+                    # Khóa hòa vốn: Không bao giờ để 70% còn lại biến thành lỗ (giá vốn + 3%)
+                    if profit_margin <= 0.03:
+                        to_sell.append((c, 'SELL (Bảo toàn hòa vốn phần còn lại)', 1.0))
+                    # Thủng MA20 chốt phần còn lại
+                    elif c in stocks_ma20.columns and pd.notna(stocks_ma20.at[date, c]) and curr_price < stocks_ma20.at[date, c]:
+                        to_sell.append((c, 'SELL (Thủng MA20 chốt 70% còn lại)', 1.0))
+
+                # LÝ DO 5: CHỐT LỜI TỪNG PHẦN THEO ĐỘ RỘNG THỊ TRƯỜNG (SCALING OUT 30%)
+                # Đạt mức lãi >= 18% VÀ (Index bắt đầu yếu dưới MA20 HOẶC lãi siêu tốt >= 22%)
+                elif (not has_scaled) and (profit_margin >= 0.18) and (idx < market_ma20 or profit_margin >= 0.22):
+                    to_sell.append((c, 'SELL (Chốt 30% khóa lãi)', 0.30))
+
+                # LÝ DO 6: VỊ THẾ BÌNH THƯỜNG (LÃI ĐỈNH < 25% VÀ CHƯA SCALE OUT)
                 else:
                     # Trailing Stop tiêu chuẩn: Lãi đỉnh >= 15% nhưng rớt 8% từ đỉnh
                     if peak_margin >= TRAILING_STOP_TRIGGER and curr_price < (held[c]['highest'] * (1.0 - TRAILING_STOP_DROP)):
-                        to_sell.append((c, 'SELL (Trailing Stop chốt lời)'))
-                    # Thủng MA20 khi đã đạt mức lãi tối thiểu > 10% (tránh chốt non khi vừa lãi 7%)
+                        to_sell.append((c, 'SELL (Trailing Stop chốt lời)', 1.0))
+                    # Thủng MA20 khi đã đạt mức lãi tối thiểu > 10%
                     elif c in stocks_ma20.columns and pd.notna(stocks_ma20.at[date, c]) and curr_price < stocks_ma20.at[date, c] and profit_margin > MA20_PROFIT_EXIT:
-                        to_sell.append((c, 'SELL (Thủng MA20 bảo toàn lãi)'))
+                        to_sell.append((c, 'SELL (Thủng MA20 bảo toàn lãi)', 1.0))
 
         # Khớp các lệnh bán hợp lệ (GIÁ THẬT 100%, KHÔNG CẦN FFILL)
-        for c, reason in to_sell:
+        for item in to_sell:
+            c = item[0]
+            reason = item[1]
+            sell_ratio = item[2] if len(item) > 2 else 1.0
+
             if c in held:
                 sell_price = stocks_close.at[date, c] if c in stocks_close.columns else np.nan
                 # Nếu không có giá giao dịch hôm nay, hoãn bán chờ phiên tiếp theo
                 if pd.isna(sell_price) or sell_price <= 0:
                     continue
 
-                qty = held[c]['qty']
+                buy_price = held[c]['buy_price']
+                hold_days = held[c]['hold_days']
+                full_qty = held[c]['qty']
+
+                if sell_ratio < 1.0:
+                    qty = int(full_qty * sell_ratio)
+                    if qty <= 0:
+                        continue
+                    held[c]['qty'] -= qty
+                    held[c]['scaled_out'] = True
+                else:
+                    qty = full_qty
+                    del held[c]
+
                 gross_val = qty * sell_price
                 net_val = gross_val * (1.0 - SELL_FRICTION)
-                buy_cost = qty * held[c]['buy_price'] * (1.0 + BUY_FRICTION)
+                buy_cost = qty * buy_price * (1.0 + BUY_FRICTION)
                 pnl_vnd = net_val - buy_cost
                 cash += net_val
 
-                pnl_pct = ((sell_price * (1.0 - SELL_FRICTION)) / (held[c]['buy_price'] * (1.0 + BUY_FRICTION)) - 1.0) * 100.0
+                pnl_pct = ((sell_price * (1.0 - SELL_FRICTION)) / (buy_price * (1.0 + BUY_FRICTION)) - 1.0) * 100.0
                 hold_days = held[c]['hold_days']
                 del held[c]
 
@@ -733,7 +769,8 @@ def run_ai_quant_system():
                                 'highest': buy_price,
                                 'last_price': buy_price,
                                 'buy_date': date_str,
-                                'hold_days': 0
+                                'hold_days': 0,
+                                'scaled_out': False
                             }
                             # Cập nhật trạng thái danh mục theo thời gian thực ngay sau lệnh mua
                             rem_stock_val = get_current_stock_valuation(date)
