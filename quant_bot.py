@@ -361,6 +361,9 @@ def run_ai_quant_system():
     TRAILING_STOP_DROP = 0.08          # Rớt 8% từ đỉnh thì chốt (cho vị thế thường)
     SUPER_WINNER_PEAK = 0.20           # Cổ phiếu dẫn dắt (Leader/Super-Winner): Lãi đỉnh >= 20%
     SUPER_WINNER_DROP = 0.10           # Siêu cổ phiếu: Trailing stop nới rộng 10% từ đỉnh cao nhất
+    PROFIT_PROTECTION_PEAK = 0.12      # Kích hoạt chặn lãi theo đỉnh vị thế khi lãi đỉnh >= 12% (Bảo vệ năm 2026)
+    PROFIT_PROTECTION_DROP = 0.10      # Rớt 10% từ đỉnh thì chốt toàn bộ vị thế
+    PROFIT_PROTECTION_FLOOR = 0.03     # Sàn bảo vệ vốn/lãi tối thiểu +3% (Tuyệt đối không để vị thế từng lãi > 12% thành lỗ)
     MA20_PROFIT_EXIT = 0.10            # Nâng lên 10% (trước: 7%) để tránh chốt non do rung rũ ngắn hạn
     HARD_STOPLOSS = -0.10              # Cắt lỗ cứng -10% - bảo vệ vốn từng vị thế
     PORTFOLIO_MDD_LIMIT = -0.18        # Nếu tổng NAV giảm 18% từ đỉnh -> bán hết (Portfolio Stop)
@@ -487,14 +490,14 @@ def run_ai_quant_system():
                 curr_p = stocks_close.at[date, c] if c in stocks_close.columns else np.nan
                 # Chỉ bán khi có giá giao dịch thực tế hôm nay và không bị nghẽn sàn
                 if held[c]['hold_days'] >= MIN_HOLD_DAYS and pd.notna(curr_p) and curr_p > 0 and not is_liquidity_locked(c):
-                    to_sell.append((c, 'SELL (Portfolio Stop -18%)', 1.0))
+                    to_sell.append((c, 'SELL (Portfolio Stop -18%)'))
 
         elif is_macro_breakdown and len(held) > 0:
             for c in list(held.keys()):
                 curr_p = stocks_close.at[date, c] if c in stocks_close.columns else np.nan
                 # Chỉ bán khi có giá giao dịch thực tế hôm nay và không bị nghẽn sàn
                 if held[c]['hold_days'] >= MIN_HOLD_DAYS and pd.notna(curr_p) and curr_p > 0 and not is_liquidity_locked(c):
-                    to_sell.append((c, 'SELL (Cắt Macro gãy MA100)', 1.0))
+                    to_sell.append((c, 'SELL (Cắt Macro gãy MA100)'))
 
         else:
             # Nếu chỉ mới là phiên chớm rung lắc dưới MA100 (chưa xác nhận gãy), hoặc VNINDEX > MA100:
@@ -513,83 +516,59 @@ def run_ai_quant_system():
                 buy_price = held[c]['buy_price']
                 profit_margin = (curr_price - buy_price) / buy_price
                 peak_margin = (held[c]['highest'] - buy_price) / buy_price
-                has_scaled = held[c].get('scaled_out', False)
 
                 # LÝ DO 1: Bị HOSE loại khỏi rổ VN30
                 if c not in active_vn30:
-                    to_sell.append((c, 'SELL (Rời rổ VN30)', 1.0))
+                    to_sell.append((c, 'SELL (Rời rổ VN30)'))
                 # LÝ DO 2: CẮT LỖ CỨNG -10% (Bảo vệ từng vị thế riêng lẻ)
                 elif profit_margin <= HARD_STOPLOSS:
-                    to_sell.append((c, 'SELL (Cắt lỗ cứng -10%)', 1.0))
-
-                # LÝ DO 3: SIÊU CỔ PHIẾU (Lãi đỉnh >= 25%): SIẾT TRAILING STOP ĐỘNG SÁT ĐỈNH
-                elif peak_margin >= 0.25:
-                    # 1. Rớt 7% từ đỉnh cao nhất -> Chốt toàn bộ ngay lập tức (không chờ gãy MA50/MA100)
-                    if curr_price < (held[c]['highest'] * 0.93):
-                        to_sell.append((c, 'SELL (Siết Trailing Stop -7% từ đỉnh)', 1.0))
-                    # 2. Thủng MA20 riêng lẻ -> Chốt sát đỉnh
-                    elif c in stocks_ma20.columns and pd.notna(stocks_ma20.at[date, c]) and curr_price < stocks_ma20.at[date, c]:
-                        to_sell.append((c, 'SELL (Siết MA20 chốt siêu cổ)', 1.0))
-                    # 3. Khóa lãi sàn bảo vệ tối thiểu +10%
-                    elif profit_margin <= 0.10:
-                        to_sell.append((c, 'SELL (Khóa sàn siêu cổ +10%)', 1.0))
-
-                # LÝ DO 4: ĐÃ CHỐT 30% RỒI -> QUẢN TRỊ 70% CÒN LẠI (KHI LÃI ĐỈNH < 25%)
-                elif has_scaled:
-                    # Khóa hòa vốn: Không bao giờ để 70% còn lại biến thành lỗ (giá vốn + 3%)
-                    if profit_margin <= 0.03:
-                        to_sell.append((c, 'SELL (Bảo toàn hòa vốn phần còn lại)', 1.0))
-                    # Thủng MA20 chốt phần còn lại
-                    elif c in stocks_ma20.columns and pd.notna(stocks_ma20.at[date, c]) and curr_price < stocks_ma20.at[date, c]:
-                        to_sell.append((c, 'SELL (Thủng MA20 chốt 70% còn lại)', 1.0))
-
-                # LÝ DO 5: CHỐT LỜI TỪNG PHẦN THEO ĐỘ RỘNG THỊ TRƯỜNG (SCALING OUT 30%)
-                # Đạt mức lãi >= 18% VÀ (Index bắt đầu yếu dưới MA20 HOẶC lãi siêu tốt >= 22%)
-                elif (not has_scaled) and (profit_margin >= 0.18) and (idx < market_ma20 or profit_margin >= 0.22):
-                    to_sell.append((c, 'SELL (Chốt 30% khóa lãi)', 0.30))
-
-                # LÝ DO 6: VỊ THẾ BÌNH THƯỜNG (LÃI ĐỈNH < 25% VÀ CHƯA SCALE OUT)
+                    to_sell.append((c, 'SELL (Cắt lỗ cứng -10%)'))
+                # LÝ DO 3: QUẢN TRỊ SIÊU CỔ PHIẾU (Lãi đỉnh >= 20% - Cho không gian bay cao x2, x3)
+                elif peak_margin >= SUPER_WINNER_PEAK:
+                    # Trailing Stop nới rộng: Rớt 10% từ đỉnh cao nhất
+                    if curr_price < (held[c]['highest'] * (1.0 - SUPER_WINNER_DROP)):
+                        to_sell.append((c, 'SELL (Trailing Stop chốt siêu cổ)'))
+                    # Xu hướng trung hạn: Gãy hẳn MA50 mới chốt (không bị rung rũ bởi MA20)
+                    elif c in stocks_ma50.columns and pd.notna(stocks_ma50.at[date, c]) and curr_price < stocks_ma50.at[date, c]:
+                        to_sell.append((c, 'SELL (Gãy MA50 chốt lời sóng lớn)'))
+                    # Khóa lãi tối thiểu: Không bao giờ để siêu cổ phiếu rơi về hòa vốn hay lỗ
+                    elif profit_margin <= 0.08:
+                        to_sell.append((c, 'SELL (Khóa lãi sàn bảo vệ +8%)'))
+                # LÝ DO 4: QUY TẮC CHẶN LÃI THEO ĐỈNH VỊ THẾ (Lãi đỉnh 12% - 20% - Giải mã năm 2026)
+                elif peak_margin >= PROFIT_PROTECTION_PEAK:
+                    # Trailing Stop bảo vệ thành quả: Rớt 10% từ đỉnh cao nhất
+                    if curr_price < (held[c]['highest'] * (1.0 - PROFIT_PROTECTION_DROP)):
+                        to_sell.append((c, 'SELL (Trailing Stop chốt lời)'))
+                    # Gãy MA20 khi vẫn còn giữ được mức lãi >= 5%
+                    elif c in stocks_ma20.columns and pd.notna(stocks_ma20.at[date, c]) and curr_price < stocks_ma20.at[date, c] and profit_margin >= 0.05:
+                        to_sell.append((c, 'SELL (Thủng MA20 bảo toàn lãi)'))
+                    # Sàn bảo vệ hòa vốn / giữ lãi +3% (Tuyệt đối không để vị thế từng lãi > 12% biến thành lỗ ngược)
+                    elif profit_margin <= PROFIT_PROTECTION_FLOOR:
+                        to_sell.append((c, 'SELL (Khóa bảo vệ vốn +3%)'))
+                # LÝ DO 5: VỊ THẾ BÌNH THƯỜNG (Lãi đỉnh < 12%)
                 else:
-                    # Trailing Stop tiêu chuẩn: Lãi đỉnh >= 15% nhưng rớt 8% từ đỉnh
-                    if peak_margin >= TRAILING_STOP_TRIGGER and curr_price < (held[c]['highest'] * (1.0 - TRAILING_STOP_DROP)):
-                        to_sell.append((c, 'SELL (Trailing Stop chốt lời)', 1.0))
-                    # Thủng MA20 khi đã đạt mức lãi tối thiểu > 10%
-                    elif c in stocks_ma20.columns and pd.notna(stocks_ma20.at[date, c]) and curr_price < stocks_ma20.at[date, c] and profit_margin > MA20_PROFIT_EXIT:
-                        to_sell.append((c, 'SELL (Thủng MA20 bảo toàn lãi)', 1.0))
+                    # Gãy MA20 khi đã đạt mức lãi bảo toàn >= 6%
+                    if c in stocks_ma20.columns and pd.notna(stocks_ma20.at[date, c]) and curr_price < stocks_ma20.at[date, c] and profit_margin >= 0.06:
+                        to_sell.append((c, 'SELL (Thủng MA20 bảo toàn lãi)'))
 
         # Khớp các lệnh bán hợp lệ (GIÁ THẬT 100%, KHÔNG CẦN FFILL)
-        for item in to_sell:
-            c = item[0]
-            reason = item[1]
-            sell_ratio = item[2] if len(item) > 2 else 1.0
-
+        for c, reason in to_sell:
             if c in held:
                 sell_price = stocks_close.at[date, c] if c in stocks_close.columns else np.nan
                 # Nếu không có giá giao dịch hôm nay, hoãn bán chờ phiên tiếp theo
                 if pd.isna(sell_price) or sell_price <= 0:
                     continue
 
-                buy_price = held[c]['buy_price']
-                hold_days = held[c]['hold_days']
-                full_qty = held[c]['qty']
-
-                if sell_ratio < 1.0:
-                    qty = int(full_qty * sell_ratio)
-                    if qty <= 0:
-                        continue
-                    held[c]['qty'] -= qty
-                    held[c]['scaled_out'] = True
-                else:
-                    qty = full_qty
-                    del held[c]
-
+                qty = held[c]['qty']
                 gross_val = qty * sell_price
                 net_val = gross_val * (1.0 - SELL_FRICTION)
-                buy_cost = qty * buy_price * (1.0 + BUY_FRICTION)
+                buy_cost = qty * held[c]['buy_price'] * (1.0 + BUY_FRICTION)
                 pnl_vnd = net_val - buy_cost
                 cash += net_val
 
-                pnl_pct = ((sell_price * (1.0 - SELL_FRICTION)) / (buy_price * (1.0 + BUY_FRICTION)) - 1.0) * 100.0
+                pnl_pct = ((sell_price * (1.0 - SELL_FRICTION)) / (held[c]['buy_price'] * (1.0 + BUY_FRICTION)) - 1.0) * 100.0
+                hold_days = held[c]['hold_days']
+                del held[c]
 
                 # Cập nhật trạng thái danh mục theo thời gian thực ngay sau lệnh bán
                 rem_stock_val = get_current_stock_valuation(date)
@@ -631,13 +610,21 @@ def run_ai_quant_system():
 
         empty_slots = MAX_SLOTS - len(held)
         
-        # Giảm tỷ trọng cổ phiếu khi thị trường yếu hoặc biến động cao
+        # Giảm tỷ trọng cổ phiếu khi thị trường yếu hoặc mới phục hồi (Scale-in / Pyramiding Risk Management)
         if idx < market_ma50 or market_atr_pct > 0.020:
             max_exposure = 0.4       # Thị trường yếu/biến động cao: chỉ cho phép 40% NAV vào cổ phiếu
         elif idx < market_ma200:
             max_exposure = 0.5       # Thị trường Gấu (dưới MA200): tối đa 50% NAV (phòng thủ chống bull trap)
         elif idx < market_ma100:
             max_exposure = 0.7       # Thị trường hồi phục sớm: 70%
+        elif consecutive_above_ma100 <= 15:
+            # Thị trường mới hồi phục trên MA100 <= 15 phiên: Giải ngân thăm dò từng phần (Scale-in)
+            # Tối đa 40% NAV (tương đương 2 slots), chỉ mở rộng lên 70% khi các vị thế thăm dò đã có lãi xác nhận trend
+            has_profitable_probe = len(held) > 0 and all(
+                (stocks_close.at[date, k] if k in stocks_close.columns and pd.notna(stocks_close.at[date, k]) else held[k].get('last_price', held[k]['buy_price'])) >= held[k]['buy_price'] * 1.02
+                for k in held.keys()
+            )
+            max_exposure = 0.7 if has_profitable_probe else 0.4
         else:
             max_exposure = 1.0       # Thị trường Uptrend mạnh toàn diện: 100%
         
@@ -708,10 +695,26 @@ def run_ai_quant_system():
                     # Nến xanh xác nhận bật tăng (tăng điểm so với phiên trước)
                     is_green_candle = (pd.notna(prev_c_price) and curr_price >= prev_c_price * 1.002)
 
+                    # ========= BỘ LỌC AI SCORE THÍCH ỨNG (DYNAMIC AI FILTER - GIẢI MÃ NĂM 2026) =========
+                    # 1. Khi thị trường mới hồi phục trên MA100 (<= 15 phiên): Nâng lên 0.65 để lọc bẫy Bulltrap (loại LPB, SSB, VIB, GAS, MSN)
+                    # 2. Khi thị trường quá nóng (Index > 1.25x MA200): Nâng lên 0.65 để chống FOMO đu đỉnh
+                    # 3. Khi thị trường gấu (Index < MA200): Nâng lên 0.62
+                    # 4. Khi thị trường Uptrend đã xác nhận vững chắc (> 15 phiên): 0.55 (Breakout) / 0.60 (Pullback)
+                    if consecutive_above_ma100 <= 15:
+                        effective_ai_breakout = 0.65
+                        effective_ai_pullback = 0.65
+                    elif idx < market_ma200:
+                        effective_ai_breakout = 0.62
+                        effective_ai_pullback = 0.62
+                    elif market_ma200 > 0 and (idx / market_ma200) > 1.25:
+                        effective_ai_breakout = 0.65
+                        effective_ai_pullback = 0.65
+                    else:
+                        effective_ai_breakout = AI_THRESHOLD # 0.55
+                        effective_ai_pullback = 0.60
+
                     # ========= TÍN HIỆU 1: MOMENTUM BREAKOUT =========
-                    # Vượt đỉnh 20 phiên + Volume >= 1.2x MA20
-                    # Trong Thị trường Gấu (VNINDEX < MA200), nâng chuẩn AI Score lên >= 0.62 để lọc bẫy vượt đỉnh xả hàng
-                    effective_ai_breakout = 0.62 if idx < market_ma200 else AI_THRESHOLD
+                    # Vượt đỉnh 20 phiên + Volume >= 1.2x MA20 + Đạt chuẩn AI Score động
                     if curr_price > prev_h20 and v_ratio >= VOL_BREAKOUT_RATIO and score >= effective_ai_breakout:
                         buy_candidates.append({
                             'Ticker': c, 'Score': score, 'Price': curr_price,
@@ -724,7 +727,8 @@ def run_ai_quant_system():
                     # 2. RSI trong vùng 35 - 60 (không quá mua)
                     # 3. Nến hôm nay PHẢI LÀ NẾN XANH XÁC NHẬN BẬT TĂNG (không bắt dao rơi nến đỏ cắm xuống)
                     # 4. Thanh khoản tối thiểu >= 0.7x MA20 (không phải phiên trôi dạt thiếu cầu)
-                    # 5. Thị trường chung VN-Index PHẢI TRÊN MA50
+                    # 5. Điểm số AI đạt chuẩn an toàn thích ứng theo chu kỳ
+                    # 6. Thị trường chung VN-Index PHẢI TRÊN MA50
                     elif (pd.notna(s_ma20_val) and pd.notna(s_ma50_val)
                           and curr_price >= s_ma20_val * 0.98    # Chạm hoặc sát MA20
                           and curr_price <= s_ma20_val * 1.02
@@ -732,7 +736,7 @@ def run_ai_quant_system():
                           and 35 <= r_rsi <= 60                  # RSI không quá mua
                           and is_green_candle                    # Bắt buộc nến xanh bật tăng
                           and v_ratio >= 0.7                     # Volume tối thiểu 0.7x
-                          and score >= 0.60                      # AI tin tưởng
+                          and score >= effective_ai_pullback     # AI thích ứng động
                           and idx > market_ma50):                # Thị trường chung phải trên MA50 để tránh bắt dao rơi
                         buy_candidates.append({
                             'Ticker': c, 'Score': score, 'Price': curr_price,
@@ -740,15 +744,16 @@ def run_ai_quant_system():
                             'Signal': 'Pullback'
                         })
 
-            # Ưu tiên theo AI Score và Giải ngân phân lớp (Tối đa 2 lệnh / ngày)
+            # Ưu tiên theo AI Score và Giải ngân phân lớp (Tối đa 1 lệnh/ngày khi mới hồi phục <= 10 phiên, bình thường 2 lệnh/ngày)
             if buy_candidates:
                 buy_candidates = sorted(buy_candidates, key=lambda x: x['Score'], reverse=True)
 
                 target_slot_size = current_nav / MAX_SLOTS
+                effective_max_buys = 1 if consecutive_above_ma100 <= 10 else MAX_BUYS_PER_DAY
                 buys_today = 0
 
                 for cand in buy_candidates:
-                    if empty_slots <= 0 or cash <= 1_000_000 or buys_today >= MAX_BUYS_PER_DAY:
+                    if empty_slots <= 0 or cash <= 1_000_000 or buys_today >= effective_max_buys:
                         break
                     c = cand['Ticker']
                     buy_price = cand['Price']
