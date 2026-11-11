@@ -196,6 +196,9 @@ vnindex_df['MA100'] = vnindex_df['VNINDEX'].rolling(100, min_periods=40).mean()
 vnindex_df['MA200'] = vnindex_df['VNINDEX'].rolling(200, min_periods=80).mean()
 vnindex_df['ADX'] = calc_adx(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14)
 vnindex_df['ATR_PCT'] = calc_atr(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14) / vnindex_df['VNINDEX']
+vnindex_df['ATR_PTS'] = calc_atr(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14)
+vnindex_df['VOL_MA20'] = vnindex_df['Volume'].rolling(20, min_periods=10).mean()
+vnindex_df['MACRO_FLOOR'] = vnindex_df['MA100'] - (1.2 * vnindex_df['ATR_PTS'])
 vnindex_df['VN_MFI'] = calc_mfi(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], vnindex_df['Volume'], 14)
 df_clean = vnindex_df.dropna().drop_duplicates(subset=['Date'], keep='last').copy().reset_index(drop=True)
 
@@ -385,6 +388,9 @@ def run_ai_quant_system():
         market_adx = backtest['ADX'].iloc[i]
         market_atr_pct = backtest['ATR_PCT'].iloc[i]
         market_mfi = backtest['VN_MFI'].iloc[i]
+        market_vol = backtest['Volume'].iloc[i] if 'Volume' in backtest.columns else 0.0
+        market_vol_ma20 = backtest['VOL_MA20'].iloc[i] if 'VOL_MA20' in backtest.columns else 1.0
+        macro_floor = backtest['MACRO_FLOOR'].iloc[i] if 'MACRO_FLOOR' in backtest.columns else (market_ma100 * 0.985)
 
         if date not in stocks_close.index:
             continue
@@ -447,14 +453,26 @@ def run_ai_quant_system():
         # Nếu tổng NAV sụt >= 18% từ đỉnh -> bán toàn bộ danh mục để bảo vệ vốn
         portfolio_dd = (temp_nav - nav_peak) / nav_peak if nav_peak > 0 else 0.0
 
-        # ===== BẢO VỆ 2: CÔNG TẮC VĨ MÔ - XÁC NHẬN GÃY MA100 (ANTI-WHIPSAW FILTER) =====
-        # Lọc sạch bẫy nhiễu 1 phiên: Chỉ kích hoạt bán tháo Macro khi:
-        # 1. VN-Index gãy sâu dứt khoát > 1.5% dưới MA100 (Sập mạnh, không chần chừ)
-        # HOẶC
-        # 2. Đóng cửa dưới MA100 liên tiếp 2 phiên (Xác nhận gãy xu hướng thực sự)
+        # ===== BẢO VỆ 2: CÔNG TẮC VĨ MÔ THÍCH ỨNG (VOLUME CONFIRMATION + DYNAMIC ATR BUFFER) =====
+        # 1. Tránh bẫy chọc râu / nhiễu nến trong Sideway:
+        #    - Khi Index thủng MA100 với Volume cạn kiệt (< 0.9x MA20), đó là rung lắc / rũ cung kỹ thuật.
+        #    - Không bán tháo hoảng loạn cả danh mục, để các mã khỏe tiếp tục chạy.
+        # 2. Cắt sớm hơn 1-2 phiên khi có biến động thực sự:
+        #    - Nếu sập mạnh thủng dải đệm Keltner động (MA100 - 1.2 * ATR), hoặc thủng MA100 kèm Volume >= 1.15x MA20.
         prev_idx = backtest['VNINDEX'].iloc[i-1] if i > 0 else idx
         prev_ma100 = backtest['MA100'].iloc[i-1] if i > 0 else market_ma100
-        is_macro_breakdown = (idx < market_ma100 * 0.985) or (idx < market_ma100 and prev_idx < prev_ma100)
+        vol_shock = (market_vol / market_vol_ma20) if (pd.notna(market_vol_ma20) and market_vol_ma20 > 0) else 1.0
+
+        # Kịch bản 1: Sập dứt khoát thủng kênh ATR động (Breakdown thực sự ngoài tầm rung lắc)
+        hard_atr_breakdown = (idx < macro_floor)
+
+        # Kịch bản 2: Thủng MA100 kèm Volume lớn xác nhận phân phối của tổ chức (Vol >= 1.15x MA20) -> Cắt sớm ngay phiên 1!
+        vol_confirmed_breakdown = (idx < market_ma100) and (vol_shock >= 1.15)
+
+        # Kịch bản 3: Đóng cửa dưới MA100 liên tiếp 2 phiên VÀ áp lực bán không cạn kiệt (Vol >= 0.90x MA20)
+        two_day_breakdown = (idx < market_ma100) and (prev_idx < prev_ma100) and (vol_shock >= 0.90)
+
+        is_macro_breakdown = hard_atr_breakdown or vol_confirmed_breakdown or two_day_breakdown
 
         if portfolio_dd <= -0.18 and len(held) > 0:
             for c in list(held.keys()):
