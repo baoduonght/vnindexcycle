@@ -352,7 +352,7 @@ def run_ai_quant_system():
     # ==========================================================
     # THAM SỐ CHIẾN LƯỢC ĐÃ TỐI ƯU (V2 - TĂNG TẦN SUẤT + GIẢM MDD)
     # ==========================================================
-    AI_THRESHOLD = 0.55                # Hạ ngưỡng AI từ 0.65 -> 0.55 (cho phép nhiều tín hiệu hơn)
+    AI_THRESHOLD = 0.58                # Khóa cứng ngưỡng AI = 0.58 theo kiểm định OOS Robustness (bỏ overfit)
     VOL_BREAKOUT_RATIO = 1.2           # Hạ từ 1.5x -> 1.2x (bluechip VN30 khó nổ volume 1.5x)
     MARKET_ENTRY_MA = 'MA100'          # Hạ cửa vào từ VNINDEX > MA200 -> VNINDEX > MA100
     ADX_MIN = 18                       # Hạ từ ADX > 22 -> ADX > 18 (bắt trend sớm hơn)
@@ -610,21 +610,13 @@ def run_ai_quant_system():
 
         empty_slots = MAX_SLOTS - len(held)
         
-        # Giảm tỷ trọng cổ phiếu khi thị trường yếu hoặc mới phục hồi (Scale-in / Pyramiding Risk Management)
+        # Quản trị tỷ trọng theo trạng thái kỹ thuật Index (Scale-in / Pyramiding Risk Management)
         if idx < market_ma50 or market_atr_pct > 0.020:
             max_exposure = 0.4       # Thị trường yếu/biến động cao: chỉ cho phép 40% NAV vào cổ phiếu
         elif idx < market_ma200:
             max_exposure = 0.5       # Thị trường Gấu (dưới MA200): tối đa 50% NAV (phòng thủ chống bull trap)
         elif idx < market_ma100:
             max_exposure = 0.7       # Thị trường hồi phục sớm: 70%
-        elif consecutive_above_ma100 <= 15:
-            # Thị trường mới hồi phục trên MA100 <= 15 phiên: Giải ngân thăm dò từng phần (Scale-in)
-            # Tối đa 40% NAV (tương đương 2 slots), chỉ mở rộng lên 70% khi các vị thế thăm dò đã có lãi xác nhận trend
-            has_profitable_probe = len(held) > 0 and all(
-                (stocks_close.at[date, k] if k in stocks_close.columns and pd.notna(stocks_close.at[date, k]) else held[k].get('last_price', held[k]['buy_price'])) >= held[k]['buy_price'] * 1.02
-                for k in held.keys()
-            )
-            max_exposure = 0.7 if has_profitable_probe else 0.4
         else:
             max_exposure = 1.0       # Thị trường Uptrend mạnh toàn diện: 100%
         
@@ -695,22 +687,12 @@ def run_ai_quant_system():
                     # Nến xanh xác nhận bật tăng (tăng điểm so với phiên trước)
                     is_green_candle = (pd.notna(prev_c_price) and curr_price >= prev_c_price * 1.002)
 
-                    # ========= BỘ LỌC AI SCORE THÍCH ỨNG (DYNAMIC AI FILTER - GIẢI MÃ NĂM 2026) =========
-                    # 1. Khi thị trường mới hồi phục trên MA100 (<= 15 phiên): Nâng lên 0.65 để lọc bẫy Bulltrap (loại LPB, SSB, VIB, GAS, MSN)
-                    # 2. Khi thị trường kéo dài quá xa MA200 (> 1.15x MA200): Nâng Breakout >= 0.60 (chống đu đỉnh HPG 0.56 ngày 04/02/2026)
-                    # 3. Khi thị trường gấu (Index < MA200): Nâng lên 0.62
-                    # 4. Khi thị trường Uptrend đã xác nhận vững chắc (> 15 phiên): Breakout 0.55 để đón trọn siêu cổ phiếu lịch sử
-                    if consecutive_above_ma100 <= 15:
-                        effective_ai_breakout = 0.65
-                    elif idx < market_ma200:
-                        effective_ai_breakout = 0.62
-                    elif market_ma200 > 0 and (idx / market_ma200) > 1.15:
-                        effective_ai_breakout = 0.60
-                    else:
-                        effective_ai_breakout = AI_THRESHOLD # 0.55
+                    # ========= BỘ LỌC AI SCORE CỐ ĐỊNH (OOS ROBUSTNESS TEST - CHỐNG OVERFITTING) =========
+                    # Khóa cứng ngưỡng AI = 0.58 cho toàn bộ điều kiện thị trường (loại bỏ if/else curve-fitting)
+                    effective_ai_breakout = AI_THRESHOLD # 0.58
 
                     # ========= TÍN HIỆU CHIẾN LƯỢC: MOMENTUM BREAKOUT (ĐỘNG LỰC DÒNG TIỀN) =========
-                    # Vượt đỉnh 20 phiên + Volume >= 1.2x MA20 + Đạt chuẩn AI Score động
+                    # Vượt đỉnh 20 phiên + Volume >= 1.2x MA20 + Đạt chuẩn AI Score cố định
                     # (Tập trung 100% vào Breakout - chiến lược tạo ra 100% lợi nhuận lịch sử, loại bỏ bẫy Pullback bắt dao rơi)
                     if curr_price > prev_h20 and v_ratio >= VOL_BREAKOUT_RATIO and score >= effective_ai_breakout:
                         buy_candidates.append({
@@ -719,16 +701,15 @@ def run_ai_quant_system():
                             'Signal': 'Breakout'
                         })
 
-            # Ưu tiên theo AI Score và Giải ngân phân lớp (Tối đa 1 lệnh/ngày khi mới hồi phục <= 10 phiên, bình thường 2 lệnh/ngày)
+            # Ưu tiên theo AI Score và Giải ngân phân lớp (Tối đa 2 lệnh / ngày)
             if buy_candidates:
                 buy_candidates = sorted(buy_candidates, key=lambda x: x['Score'], reverse=True)
 
                 target_slot_size = current_nav / MAX_SLOTS
-                effective_max_buys = 1 if consecutive_above_ma100 <= 10 else MAX_BUYS_PER_DAY
                 buys_today = 0
 
                 for cand in buy_candidates:
-                    if empty_slots <= 0 or cash <= 1_000_000 or buys_today >= effective_max_buys:
+                    if empty_slots <= 0 or cash <= 1_000_000 or buys_today >= MAX_BUYS_PER_DAY:
                         break
                     c = cand['Ticker']
                     buy_price = cand['Price']
@@ -836,9 +817,17 @@ calmar_ratio = abs(cagr / max_mdd) if max_mdd != 0 else 0.0
 sells = df_trade_log[df_trade_log['Action'].str.contains('SELL', na=False)] if not df_trade_log.empty else pd.DataFrame()
 total_sells = len(sells)
 win_sells = len(sells[sells['Profit(%)'] > 0]) if total_sells > 0 else 0
+loss_sells = total_sells - win_sells
 win_rate = (win_sells / total_sells * 100.0) if total_sells > 0 else 0.0
 best_trade = sells['Profit(%)'].max() if total_sells > 0 else 0.0
 worst_trade = sells['Profit(%)'].min() if total_sells > 0 else 0.0
+
+gross_profit = sells.loc[sells['PnL_VND'] > 0, 'PnL_VND'].sum() if total_sells > 0 else 0.0
+gross_loss = abs(sells.loc[sells['PnL_VND'] < 0, 'PnL_VND'].sum()) if total_sells > 0 else 0.0
+profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else 999.0
+avg_win_pct = sells.loc[sells['Profit(%)'] > 0, 'Profit(%)'].mean() if win_sells > 0 else 0.0
+avg_loss_pct = sells.loc[sells['Profit(%)'] < 0, 'Profit(%)'].mean() if loss_sells > 0 else 0.0
+payoff_ratio = abs(avg_win_pct / avg_loss_pct) if avg_loss_pct != 0 else 999.0
 
 print("\n" + "="*58)
 print("📊 BÁO CÁO ĐỊNH LƯỢNG THỰC CHIẾN 10 NĂM (SURVIVORSHIP-FREE)")
@@ -855,6 +844,8 @@ print(f"⚡ Chỉ số Calmar (CAGR / MDD):     {calmar_ratio:.2f}")
 print(f"----------------------------------------------------------")
 print(f"Tổng số lệnh đã chốt sổ:          {total_sells}")
 print(f"🎯 Tỷ lệ thắng (Win Rate):         {win_rate:.2f}% (Thắng {win_sells}/{total_sells} trận)")
+print(f"⚖️ Profit Factor (Tổng Lãi/Lỗ):    {profit_factor:.2f}")
+print(f"🎲 Payoff Ratio (Lãi TB / Lỗ TB):  {payoff_ratio:.2f}x (Lãi TB: +{avg_win_pct:.2f}% | Lỗ TB: {avg_loss_pct:.2f}%)")
 print(f"💰 Lệnh lãi đơn lẻ cao nhất:       +{best_trade:.2f}%")
 print(f"🩸 Lệnh lỗ đơn lẻ sâu nhất:        {worst_trade:.2f}%")
 print("="*58 + "\n")
