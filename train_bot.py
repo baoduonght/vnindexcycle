@@ -61,18 +61,10 @@ def calc_macd_hist(series, fast=12, slow=26, signal=9):
 # HÀM TẢI DỮ LIỆU ĐA NGUỒN TỐC ĐỘ CAO (DNSE + VNDIRECT + TCBS + TRADINGVIEW)
 # ==========================================
 def fetch_ticker_data(symbol, n_bars=4000):
-    """
-    Tải dữ liệu chứng khoán tốc độ cao:
-    - VNINDEX: ƯU TIÊN SỐ 1 đọc trực tiếp từ markets_database10years.csv (10 năm chuẩn),
-               nếu có phiên mới hôm nay thì tải thêm từ API để nối vào.
-    - Cổ phiếu VN30: Tải trực tiếp 10 năm từ DNSE Entrade (/ohlcs/stock).
-    """
     now_ts = int(datetime.datetime.now().timestamp())
     start_ts = int((datetime.datetime.now() - datetime.timedelta(days=12*365)).timestamp())
 
-    # =========================================================================
-    # 🌟 ƯU TIÊN SỐ 1 CHO VNINDEX: ĐỌC TRỰC TIẾP TỪ markets_database10years.csv
-    # =========================================================================
+    # 1. VNINDEX: Ưu tiên đọc trực tiếp từ markets_database10years.csv
     if symbol.upper() == 'VNINDEX' and os.path.exists('markets_database10years.csv'):
         try:
             csv_df = pd.read_csv('markets_database10years.csv')
@@ -85,7 +77,6 @@ def fetch_ticker_data(symbol, n_bars=4000):
                 c_df['Low'] = c_df['Close']
                 c_df = c_df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
 
-                # Kiểm tra nếu phiên hôm nay mới hơn ngày cuối trong CSV -> tải thêm nến mới nối vào
                 max_csv_date = c_df['Date'].max()
                 today_ts = pd.Timestamp.now().normalize()
                 if max_csv_date < today_ts:
@@ -112,13 +103,10 @@ def fetch_ticker_data(symbol, n_bars=4000):
         except Exception as e:
             print(f"   ⚠️ Đọc markets_database10years.csv lỗi ({e}), chuyển sang API...")
 
-    # Phân loại Index vs Stock để gọi đúng endpoint của DNSE Entrade:
-    # VNINDEX, VN30, VN100, VNXALL, HNX, HNX30 -> /ohlcs/index
-    # Các mã cổ phiếu thường -> /ohlcs/stock
     is_index = symbol.upper() in ['VNINDEX', 'VN30', 'VN100', 'VNXALL', 'HNX', 'HNX30', 'UPCOM']
     entrade_endpoint = 'index' if is_index else 'stock'
 
-    # 1. Nguồn 1: DNSE Entrade API (Tốc độ ~50ms, không bao giờ timeout, đầy đủ 10 năm từ 2014)
+    # 2. Nguồn DNSE Entrade API
     try:
         url = f"https://services.entrade.com.vn/chart-api/v2/ohlcs/{entrade_endpoint}?from={start_ts}&to={now_ts}&symbol={symbol}&resolution=1D"
         res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}, timeout=6)
@@ -137,7 +125,7 @@ def fetch_ticker_data(symbol, n_bars=4000):
     except Exception:
         pass
 
-    # 2. Nguồn 2: VNDirect DChart API
+    # 3. Nguồn VNDirect DChart API
     try:
         url = f"https://dchart-api.vndirect.com.vn/dchart/history?resolution=D&symbol={symbol}&from={start_ts}&to={now_ts}"
         res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}, timeout=6)
@@ -156,7 +144,7 @@ def fetch_ticker_data(symbol, n_bars=4000):
     except Exception:
         pass
 
-    # 3. Nguồn 3: TCBS Public API
+    # 4. Nguồn TCBS Public API
     try:
         url = f"https://apipubaws.tcbs.com.vn/stock-insight/v1/stock/bars-long-term?ticker={symbol}&type=stock&resolution=D&from={start_ts}&to={now_ts}"
         res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}, timeout=6)
@@ -170,7 +158,7 @@ def fetch_ticker_data(symbol, n_bars=4000):
     except Exception:
         pass
 
-    # 4. Nguồn 4: TradingView (Phương án dự phòng)
+    # 5. Nguồn TradingView dự phòng
     try:
         df = tv.get_hist(symbol=symbol, exchange='HOSE', interval=Interval.in_daily, n_bars=n_bars)
         if df is not None and len(df) > 50:
@@ -246,29 +234,29 @@ for c in loaded_tickers:
 print("3. Khởi tạo màng lưới tính toán & Đồng bộ Vĩ mô...")
 try:
     macro_df = pd.read_csv('markets_database10years.csv')
-    macro_df = macro_df[['Date', 'DXY', 'US10Y', 'USD_VND']]
+    macro_df = macro_df[['Date', 'DXY', 'US10Y', 'USD_VND']].copy()
     macro_df['Date'] = pd.to_datetime(macro_df['Date']).dt.strftime('%Y-%m-%d')
     macro_df = macro_df.drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
-    fresh_us_dates = macro_df.dropna(subset=['DXY', 'US10Y', 'USD_VND'])['Date'].tolist()
 except Exception as e:
     sys.exit(f"🛑 LỖI ĐỌC FILE VĨ MÔ: {e}")
 
 market_context = vnindex_df[['Date', 'VN_MFI', 'VNINDEX', 'MA200']].copy()
 market_context['VN_Dist_MA200'] = market_context['VNINDEX'] / market_context['MA200']
 market_context['Date'] = pd.to_datetime(market_context['Date']).dt.strftime('%Y-%m-%d')
-market_context = market_context.drop_duplicates(subset=['Date'], keep='last')
+market_context = market_context.drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
 
 macro_df = macro_df.merge(market_context[['Date', 'VN_MFI', 'VN_Dist_MA200']], on='Date', how='inner')
+macro_df = macro_df.sort_values('Date').reset_index(drop=True)
 
 macro_cols = ['DXY', 'US10Y', 'USD_VND']
 for col in macro_cols:
-    macro_df[f'Z_{col}'] = (macro_df[col] - macro_df[col].rolling(120, min_periods=30).mean()) / macro_df[col].rolling(120, min_periods=30).std()
+    roll_m = macro_df[col].rolling(120, min_periods=20).mean()
+    roll_s = macro_df[col].rolling(120, min_periods=20).std()
+    macro_df[f'Z_{col}'] = (macro_df[col] - roll_m) / roll_s
 z_cols = [f'Z_{c}' for c in macro_cols]
 
 clean_dates_str = pd.to_datetime(stocks_close.index).strftime('%Y-%m-%d')
 vn_close_aligned = vnindex_df.set_index('Date')['VNINDEX'].reindex(stocks_close.index)
-# Lợi nhuận 30 phiên tới của VNINDEX
-vn_future_return = vn_close_aligned.shift(-30) / vn_close_aligned - 1
 
 df_ml_list = []
 for c in loaded_tickers:
@@ -278,54 +266,70 @@ for c in loaded_tickers:
     s_ma50 = stocks_ma50[c]
 
     valid_mask = s_close.notna() & (s_close > 0)
-    if valid_mask.sum() < 60:
+    if valid_mask.sum() < 30:
         continue
 
-    # Lợi nhuận 30 phiên tới của cổ phiếu
-    s_future_ret = s_close.shift(-30) / s_close - 1
+    # Dữ liệu nguyên bản 100% (RAW DATA, TUYỆT ĐỐI KHÔNG DÙNG LỆNH FILL)
+    s_valid_close = s_close[valid_mask]
+    s_future_ret = s_valid_close.shift(-30) / s_valid_close - 1
+    
+    vn_aligned_c = vn_close_aligned.reindex(s_valid_close.index)
+    vn_future_ret = vn_aligned_c.shift(-30) / vn_aligned_c - 1
     
     # KHẮC PHỤC TRIỆT ĐỂ LỖI LABEL POISONING:
-    # Chỉ đánh nhãn Target khi cả s_future_ret VÀ vn_future_return đều KHÔNG NaN.
-    # 30 phiên gần nhất không có dữ liệu tương lai sẽ là NaN và bị loại bỏ khỏi tập train,
-    # thay vì bị ép về Target=0 khiến AI hiểu lầm thị trường sập!
-    valid_future = s_future_ret.notna() & vn_future_return.notna()
-    target_series = np.where(valid_future, (s_future_ret > vn_future_return).astype(int), np.nan)
+    # Chỉ đánh nhãn Target khi cả s_future_ret VÀ vn_future_ret đều KHÔNG NaN.
+    # 30 phiên gần nhất không có dữ liệu tương lai sẽ mang nhãn NaN và bị loại bỏ an toàn
+    valid_future = s_future_ret.notna() & vn_future_ret.notna()
+    target_series = np.where(valid_future, (s_future_ret > vn_future_ret).astype(int), np.nan)
 
     df_c = pd.DataFrame({
-        'Date': clean_dates_str[valid_mask],
+        'Date': pd.to_datetime(s_valid_close.index).strftime('%Y-%m-%d'),
         'Ticker': c,
         'Vol_Ratio': (s_vol[valid_mask] / s_vol_ma[valid_mask].replace(0, np.nan)).values,
-        'Dist_MA50': (s_close[valid_mask] / s_ma50[valid_mask]).values,
+        'Dist_MA50': (s_valid_close / s_ma50[valid_mask]).values,
         'RSI': stocks_rsi[c][valid_mask].values,
         'RSI_Momentum': pd.Series(stocks_rsi[c][valid_mask]).diff(3).values,
         'MACD_Hist': stocks_macd[c][valid_mask].values,
-        'Target': target_series[valid_mask]
+        'Target': target_series
     })
     df_ml_list.append(df_c)
 
 ml_master = pd.concat(df_ml_list, ignore_index=True).merge(macro_df, on='Date', how='left')
 ml_features = ['Vol_Ratio', 'Dist_MA50', 'RSI', 'RSI_Momentum', 'VN_MFI', 'MACD_Hist', 'VN_Dist_MA200'] + z_cols
 
-# Chỉ lấy ngày có dữ liệu vĩ mô và tính năng hợp lệ
-ml_master = ml_master[ml_master['Date'].isin(fresh_us_dates)]
-ml_master_clean = ml_master.dropna(subset=ml_features).copy()
-
 # ==========================================
-# 4. HUẤN LUYỆN XGBOOST ALPHA ENGINE
+# 4. HUẤN LUYỆN XGBOOST ALPHA ENGINE (XỬ LÝ DỮ LIỆU NGUYÊN BẢN)
 # ==========================================
 print("4. 🔄 KHỞI ĐỘNG LÒ LUYỆN ĐAN: HUẤN LUYỆN BỘ NÃO MỚI...")
 
-# Lọc bỏ hoàn toàn các hàng có Target là NaN (30 ngày gần nhất)
-train_data = ml_master_clean.dropna(subset=['Target']).copy()
+# Chỉ lọc bỏ các hàng có Target là NaN (30 ngày gần nhất chưa có tương lai)
+# Các giá trị trống (NaN) ở các biến tính năng được XGBoost xử lý nguyên bản (Native Missing Values Handling)
+# Tuyệt đối không vẽ nến ảo, không dùng bất kỳ lệnh fill nào
+train_data = ml_master.dropna(subset=['Target']).copy()
 train_data['Target'] = train_data['Target'].astype(int)
 
 # Đánh trọng số thời gian: Dữ liệu gần (từ 2023) có trọng số x2.5
 train_data['Weight'] = np.where(train_data['Date'] >= '2023-01-01', 2.5, 1.0)
 
-# Chia tập Out-Of-Time (OOT) để kiểm tra độ tin cậy thực chiến:
-# Train trên dữ liệu trước 2023, Test trên 2023 - 2024
+# Chia tập Out-Of-Time (OOT) để kiểm tra độ tin cậy thực chiến
 train_mask = train_data['Date'] < '2023-01-01'
 test_mask = train_data['Date'] >= '2023-01-01'
+
+# Cơ chế thích ứng chuỗi thời gian: Nếu tập dữ liệu tải về từ API không có ngày trước 2023,
+# tự động chia 70% Train / 30% Test theo chuỗi thời gian chuẩn xác
+if train_mask.sum() == 0 or test_mask.sum() == 0:
+    unique_dates = sorted(train_data['Date'].unique())
+    split_idx = int(len(unique_dates) * 0.70)
+    split_date = unique_dates[split_idx]
+    train_mask = train_data['Date'] < split_date
+    test_mask = train_data['Date'] >= split_date
+    print(f"   ℹ️ Dữ liệu phân tách theo điểm cắt: {split_date} (70% Train / 30% OOT Test)")
+else:
+    print(f"   ℹ️ Phân tách chuẩn OOT: Train (< 2023) | Test (>= 2023)")
+
+print(f"   📊 Tổng số mẫu dữ liệu trích xuất: {len(ml_master):,}")
+print(f"   📊 Số mẫu huấn luyện (Train):      {train_mask.sum():,}")
+print(f"   📊 Số mẫu kiểm tra ngoài mẫu (OOT): {test_mask.sum():,}")
 
 X_train = train_data.loc[train_mask, ml_features]
 y_train = train_data.loc[train_mask, 'Target']
@@ -347,7 +351,8 @@ xgb_model = xgb.XGBClassifier(
     colsample_bytree=0.8,
     scale_pos_weight=scale_weight,
     random_state=42,
-    eval_metric='logloss'
+    eval_metric='logloss',
+    missing=np.nan
 )
 
 print(f"   Đang huấn luyện trên {len(X_train)} mẫu dữ liệu lịch sử...")
