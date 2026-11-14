@@ -8,7 +8,7 @@ on:
     
     # 🧠 NHÁNH HỌC TẬP: Chạy train_bot.py vào 09:00 sáng Thứ 7
     # Giờ VN (UTC+7) là 09:00 -> Giờ UTC là 02:00
-    - cron: '0 2 * * 0'
+    - cron: '0 2 * * 6'
     
   # Cho phép bác bấm nút "Run workflow" bằng tay trên Github để test thử bot Telegram
   workflow_dispatch:
@@ -47,8 +47,8 @@ jobs:
         run: |
           git config --global user.name "Quant AutoBot"
           git config --global user.email "bot@quant.com"
-          git add xgboost_ultimate.json
-          git commit -m "🤖 [Auto-Update] Đã đúc xong não bộ AI tuần mới" || echo "Không có sự thay đổi để commit"
+          git add xgboost_*.json
+          git commit -m "🤖 [Auto-Update] Đã đúc xong não bộ AI Walk-Forward tuần mới" || echo "Không có sự thay đổi để commit"
           git push
 
       # ==========================================
