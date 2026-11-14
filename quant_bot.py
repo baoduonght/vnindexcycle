@@ -111,15 +111,17 @@ def calc_macd_hist(series, fast=12, slow=26, signal=9):
 # ==========================================
 # HÀM TẢI DỮ LIỆU ĐA NGUỒN (DNSE + VNDIRECT + TCBS + TRADINGVIEW)
 # ==========================================
-def fetch_ticker_data(symbol, n_bars=4000):
+def fetch_ticker_data(symbol, n_bars=4500):
     """
     Tải dữ liệu chứng khoán OHLCV THẬT từ API:
     - VNINDEX & các chỉ số: DNSE Entrade /ohlcs/index (Open, High, Low, Close, Volume thật).
       Tuyệt đối KHÔNG làm phẳng nến (Open=High=Low=Close) để đảm bảo ATR/ADX/MFI chuẩn xác 100%.
     - Cổ phiếu VN30: DNSE Entrade /ohlcs/stock.
+    - Lấy dữ liệu từ đầu năm 2012 để có đầy đủ 200-500 phiên nến trước 2014,
+      giúp MA200/MA100/ATR sẵn sàng ngay từ ngày giao dịch đầu tiên của 2014.
     """
     now_ts = int(datetime.datetime.now().timestamp())
-    start_ts = int((datetime.datetime.now() - datetime.timedelta(days=12*365)).timestamp())
+    start_ts = int(datetime.datetime(2012, 1, 1).timestamp())
 
     is_index = symbol.upper() in ['VNINDEX', 'VN30', 'VN100', 'VNXALL', 'HNX', 'HNX30', 'UPCOM']
     entrade_endpoint = 'index' if is_index else 'stock'
@@ -210,15 +212,15 @@ def fetch_ticker_data(symbol, n_bars=4000):
 # 1. TẢI VN-INDEX & LẬP BỘ LỌC THỊ TRƯỜNG (OHLCV THẬT)
 # ==========================================
 print("1. Đang tải Market Proxy (VNINDEX) với nến OHLCV thật...")
-vnindex_raw = fetch_ticker_data('VNINDEX', n_bars=4000)
+vnindex_raw = fetch_ticker_data('VNINDEX', n_bars=4500)
 if vnindex_raw is None or vnindex_raw.empty:
     sys.exit("❌ LỖI: Không thể tải dữ liệu VNINDEX từ API!")
 
 vnindex_df = vnindex_raw.rename(columns={'Close': 'VNINDEX'}).drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
 vnindex_df['MA20'] = vnindex_df['VNINDEX'].rolling(20, min_periods=10).mean()
 vnindex_df['MA50'] = vnindex_df['VNINDEX'].rolling(50, min_periods=20).mean()
-vnindex_df['MA100'] = vnindex_df['VNINDEX'].rolling(100, min_periods=40).mean()
-vnindex_df['MA200'] = vnindex_df['VNINDEX'].rolling(200, min_periods=80).mean()
+vnindex_df['MA100'] = vnindex_df['VNINDEX'].rolling(100, min_periods=30).mean()
+vnindex_df['MA200'] = vnindex_df['VNINDEX'].rolling(200, min_periods=40).mean()
 vnindex_df['ADX'] = calc_adx(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14)
 vnindex_df['ATR_PCT'] = calc_atr(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14) / vnindex_df['VNINDEX']
 # Bổ sung biến độ dao động 20 phiên của VN-Index cho mô hình AI
