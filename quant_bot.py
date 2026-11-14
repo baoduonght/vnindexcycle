@@ -31,6 +31,7 @@ SECTOR_MAP = {
     'CTD': 'REAL_ESTATE', 'ROS': 'REAL_ESTATE', 'FLC': 'REAL_ESTATE',
     'ITA': 'REAL_ESTATE', 'IJC': 'REAL_ESTATE', 'HHS': 'REAL_ESTATE',
     'SJS': 'REAL_ESTATE', 'DIG': 'REAL_ESTATE', 'DXG': 'REAL_ESTATE',
+    'OGC': 'REAL_ESTATE',
     
     # 3. Thép & Kim loại (Steel & Materials)
     'HPG': 'STEEL', 'HSG': 'STEEL', 'NKG': 'STEEL',
@@ -50,14 +51,17 @@ SECTOR_MAP = {
     # 7. Công nghệ & Viễn thông (Technology)
     'FPT': 'TECH',
     
-    # 8. Phân bón, Hóa chất, Cao su & Nông nghiệp (Chemicals & Agriculture)
-    'GVR': 'CHEMICALS', 'DPM': 'CHEMICALS', 'DCM': 'CHEMICALS', 
-    'DRC': 'CHEMICALS', 'CSM': 'CHEMICALS', 'HAG': 'AGRICULTURE', 'HVG': 'AGRICULTURE',
+    # 8. Phân bón, Hóa chất & Cao su (Chemicals & Materials)
+    'GVR': 'CHEMICALS', 'DGC': 'CHEMICALS', 'DPM': 'CHEMICALS', 'DCM': 'CHEMICALS', 
+    'DRC': 'CHEMICALS', 'CSM': 'CHEMICALS',
     
-    # 9. Vận tải & Hàng không (Logistics & Aviation)
+    # 9. Nông nghiệp & Thực phẩm (Agriculture)
+    'HAG': 'AGRICULTURE', 'HNG': 'AGRICULTURE', 'HVG': 'AGRICULTURE',
+    
+    # 10. Vận tải & Hàng không (Logistics & Aviation)
     'VJC': 'LOGISTICS', 'GMD': 'LOGISTICS', 'HVN': 'LOGISTICS',
     
-    # 10. Bảo hiểm (Insurance)
+    # 11. Bảo hiểm (Insurance)
     'BVH': 'INSURANCE'
 }
 
@@ -420,7 +424,7 @@ def run_ai_quant_system():
     DAILY_BANK_RATE = ANNUAL_BANK_RATE / 252
     MIN_HOLD_DAYS = 3                  # Chu kỳ T+2.5 (mua Open ngày t, bán sớm nhất Open ngày t+3)
     
-    AI_THRESHOLD = 0.55                # Ngưỡng AI Score chuẩn mực
+    AI_THRESHOLD = 0.60                # Ngưỡng AI Score chọn lọc cao cấp (Lọc bỏ bẫy Breakout phân khúc 0.55-0.59)
     VOL_BREAKOUT_RATIO = 1.2           # Volume đột biến >= 1.2x MA20
     ADX_MIN = 18                       # Bắt xu hướng thị trường ADX > 18
     MAX_BUYS_PER_DAY = 2               # Tối đa 2 lệnh mua / ngày (Giải ngân phân lớp)
@@ -689,7 +693,9 @@ def run_ai_quant_system():
 
         else:
             # THỊ TRƯỜNG BÌNH THƯỜNG (HOẶC CHƯA XÁC NHẬN SẬP DỨT KHOÁT):
-            # Quản trị rủi ro riêng lẻ từng vị thế (Không bán tháo cả rổ)
+            # Quản trị rủi ro thích ứng & Siết chặt Trailing Stop khi Index suy yếu dưới MA20
+            index_below_ma20 = (pd.notna(market_ma20) and idx < market_ma20)
+
             for c in list(held.keys()):
                 if held[c]['hold_days'] < MIN_HOLD_DAYS or c in already_pending_sells:
                     continue
@@ -700,6 +706,8 @@ def run_ai_quant_system():
                 buy_price = held[c]['buy_price']
                 profit_margin = (curr_price - buy_price) / buy_price
                 peak_margin = (held[c]['highest'] - buy_price) / buy_price
+                ma20_c = stocks_ma20.at[date, c] if c in stocks_ma20.columns else np.nan
+                ma50_c = stocks_ma50.at[date, c] if c in stocks_ma50.columns else np.nan
 
                 # LÝ DO 1: Rời rổ VN30
                 if c not in active_vn30:
@@ -709,27 +717,36 @@ def run_ai_quant_system():
                     pending_sells.append((c, 'SELL (Cắt lỗ cứng -10%)'))
                 # LÝ DO 3: Quản trị Leader / Siêu cổ phiếu (Lãi đỉnh >= 20%)
                 elif peak_margin >= SUPER_WINNER_PEAK:
-                    if curr_price < (held[c]['highest'] * (1.0 - SUPER_WINNER_DROP)):
+                    # Khi Index suy yếu (dưới MA20), siết Trailing Stop từ 10% về 6% để khóa siêu lợi nhuận
+                    drop_allowed = 0.06 if index_below_ma20 else SUPER_WINNER_DROP
+                    if curr_price < (held[c]['highest'] * (1.0 - drop_allowed)):
                         pending_sells.append((c, 'SELL (Trailing Stop chốt siêu cổ)'))
-                    elif c in stocks_ma50.columns and pd.notna(stocks_ma50.at[date, c]) and curr_price < stocks_ma50.at[date, c]:
+                    elif pd.notna(ma50_c) and curr_price < ma50_c:
                         pending_sells.append((c, 'SELL (Gãy MA50 chốt lời sóng lớn)'))
+                    elif index_below_ma20 and pd.notna(ma20_c) and curr_price < ma20_c and profit_margin >= 0.08:
+                        pending_sells.append((c, 'SELL (Thị trường dưới MA20 chốt siêu cổ)'))
                     elif profit_margin <= 0.08:
                         pending_sells.append((c, 'SELL (Khóa lãi sàn bảo vệ +8%)'))
                 # LÝ DO 4: Chặn lãi theo đỉnh vị thế (Lãi đỉnh 10% - 20%)
                 elif peak_margin >= PROFIT_PROTECTION_PEAK:
-                    if curr_price < (held[c]['highest'] * (1.0 - PROFIT_PROTECTION_DROP)):
+                    # Khi Index suy yếu (dưới MA20), siết Trailing Stop từ 8% về 5%
+                    drop_allowed = 0.05 if index_below_ma20 else PROFIT_PROTECTION_DROP
+                    if curr_price < (held[c]['highest'] * (1.0 - drop_allowed)):
                         pending_sells.append((c, 'SELL (Trailing Stop chốt lời)'))
-                    elif c in stocks_ma20.columns and pd.notna(stocks_ma20.at[date, c]) and curr_price < stocks_ma20.at[date, c] and profit_margin >= 0.05:
+                    elif pd.notna(ma20_c) and curr_price < ma20_c and (profit_margin >= 0.03 if index_below_ma20 else 0.05):
                         pending_sells.append((c, 'SELL (Thủng MA20 bảo toàn lãi)'))
                     elif profit_margin <= PROFIT_PROTECTION_FLOOR:
                         pending_sells.append((c, 'SELL (Khóa bảo vệ vốn +2%)'))
-                # LÝ DO 5: Vị thế bình thường
+                # LÝ DO 5: Vị thế bình thường (lãi đỉnh < 10%)
                 else:
-                    if c in stocks_ma20.columns and pd.notna(stocks_ma20.at[date, c]) and curr_price < stocks_ma20.at[date, c] and profit_margin > MA20_PROFIT_EXIT:
+                    # Khi Index dưới MA20 và cổ phiếu thủng MA20 cá nhân -> thoát sớm bảo vệ vốn, không ôm lỗ
+                    if index_below_ma20 and pd.notna(ma20_c) and curr_price < ma20_c:
+                        pending_sells.append((c, 'SELL (Thị trường dưới MA20 cắt vị thế yếu)'))
+                    elif pd.notna(ma20_c) and curr_price < ma20_c and profit_margin > MA20_PROFIT_EXIT:
                         pending_sells.append((c, 'SELL (Thủng MA20 bảo toàn lãi)'))
 
         # =============================================================
-        # (B) QUÉT TÍN HIỆU MUA CHO PHIÊN MAI (HYSTERESIS BUFFER + COOLDOWN + SECTOR CAP)
+        # (B) QUÉT TÍN HIỆU MUA CHO PHIÊN MAI (PRE-MA100 + HYSTERESIS BUFFER + COOLDOWN + SECTOR CAP)
         # =============================================================
         if idx < market_ma50 or market_atr_pct > 0.020:
             max_exposure = 0.4
@@ -748,13 +765,20 @@ def run_ai_quant_system():
         # 2. XU HƯỚNG NGẮN/TRUNG HẠN ĐỒNG THUẬN: MA20 > MA50
         is_ma_trend_ok = (pd.notna(market_ma20) and pd.notna(market_ma50) and market_ma20 > market_ma50)
 
-        # 3. THỜI GIAN CHỜ COOLDOWN: Ít nhất 10 phiên sau lần bán tháo Macro gần nhất (tránh mua đuổi nhịp hồi giả)
+        # 3. PRE-MA100 FILTER: VN-Index phải đóng cửa TRÊN MA20 (Khóa mua mới khi thị trường gãy xu hướng ngắn hạn)
+        is_index_above_ma20 = (pd.notna(market_ma20) and idx >= market_ma20)
+
+        # 4. CHỐNG PHIÊN PHÂN PHỐI MẠNH: Khóa mua khi Index giảm > 1.5% hoặc giảm > 0.8% kèm Volume Shock
+        idx_ret = (idx - prev_idx) / prev_idx if prev_idx > 0 else 0.0
+        is_not_distribution = not ((idx_ret <= -0.015) or (idx_ret < -0.008 and vol_shock >= 1.25))
+
+        # 5. THỜI GIAN CHỜ COOLDOWN: Ít nhất 10 phiên sau lần bán tháo Macro gần nhất (tránh mua đuổi nhịp hồi giả)
         is_cooldown_passed = (i - last_macro_exit_bar > 10)
 
-        # 4. ĐỘ BIẾN ĐỘNG HẠ NHIỆT (market_atr_pct <= 0.020)
+        # 6. ĐỘ BIẾN ĐỘNG HẠ NHIỆT (market_atr_pct <= 0.020)
         is_volatility_calm = (market_atr_pct <= 0.020)
 
-        # 5. ĐỘ RỘNG THỊ TRƯỜNG: >= 35% số mã VN30 nằm trên MA50
+        # 7. ĐỘ RỘNG THỊ TRƯỜNG: >= 35% số mã VN30 nằm trên MA50
         vn30_above_ma50_cnt = sum([
             1 for ticker in active_vn30
             if ticker in stocks_close.columns and ticker in stocks_ma50.columns
@@ -767,6 +791,8 @@ def run_ai_quant_system():
         can_enter_new_trades = (
             is_macro_buffer_ok
             and is_ma_trend_ok
+            and is_index_above_ma20
+            and is_not_distribution
             and is_cooldown_passed
             and is_volatility_calm
             and is_breadth_healthy
@@ -939,10 +965,17 @@ def send_telegram_msg(text_message):
 latest_date = df_clean['Date'].iloc[-1]
 latest_date_str = latest_date.strftime('%Y-%m-%d')
 active_today = get_vn30_constituents(latest_date_str)
+latest_idx = df_clean['VNINDEX'].iloc[-1]
+latest_ma20 = df_clean['MA20'].iloc[-1] if 'MA20' in df_clean.columns else np.nan
+latest_ma100 = df_clean['MA100'].iloc[-1]
 
 msg = f"🤖 <b>SIÊU RADAR VN30 - BÁO CÁO THỰC CHIẾN</b> 🤖\n"
 msg += f"📅 Ngày: <b>{latest_date.strftime('%d/%m/%Y')}</b>\n"
 msg += f"🏛 Rổ VN30 hiệu lực: <b>{len(active_today)} mã chuẩn HOSE</b>\n"
+if pd.notna(latest_ma20) and latest_idx < latest_ma20:
+    msg += f"⚠️ <b>Cảnh báo Thị trường:</b> VN-Index ({latest_idx:,.1f}) < MA20 ({latest_ma20:,.1f}) -> 🔒 <i>Đang khóa Mua mới & siết Trailing Stop</i>\n"
+else:
+    msg += f"📈 <b>Trạng thái Thị trường:</b> VN-Index ({latest_idx:,.1f}) trên MA20 ({latest_ma20:,.1f}) & MA100 ({latest_ma100:,.1f}) -> 🟢 <i>Uptrend</i>\n"
 msg += f"➖➖➖➖➖➖➖➖➖➖\n\n🎯 <b>LỆNH ĐÃ KHỚP HÔM NAY (ATO/OPEN):</b>\n"
 
 buy_count, sell_count = 0, 0
