@@ -14,6 +14,54 @@ warnings.filterwarnings('ignore')
 tv = TvDatafeed()
 
 # ==========================================
+# TỪ ĐIỂN PHÂN LOẠI NGÀNH VN30 (SECTOR MAP)
+# Khống chế rủi ro tập trung ngành (Sector Cap <= 2 mã/ngành)
+# ==========================================
+SECTOR_MAP = {
+    # 1. Ngân hàng (Banking)
+    'VCB': 'BANK', 'BID': 'BANK', 'CTG': 'BANK', 'MBB': 'BANK', 'TCB': 'BANK',
+    'VPB': 'BANK', 'ACB': 'BANK', 'HDB': 'BANK', 'TPB': 'BANK', 'STB': 'BANK',
+    'VIB': 'BANK', 'SSB': 'BANK', 'SHB': 'BANK', 'LPB': 'BANK', 'EIB': 'BANK',
+    'MSB': 'BANK', 'OCB': 'BANK',
+    
+    # 2. Bất động sản, Xây dựng & Hạ tầng (Real Estate & Construction)
+    'VIC': 'REAL_ESTATE', 'VHM': 'REAL_ESTATE', 'VRE': 'REAL_ESTATE', 
+    'NVL': 'REAL_ESTATE', 'KDH': 'REAL_ESTATE', 'PDR': 'REAL_ESTATE', 
+    'BCM': 'REAL_ESTATE', 'KBC': 'REAL_ESTATE', 'CII': 'REAL_ESTATE', 
+    'CTD': 'REAL_ESTATE', 'ROS': 'REAL_ESTATE', 'FLC': 'REAL_ESTATE',
+    'ITA': 'REAL_ESTATE', 'IJC': 'REAL_ESTATE', 'HHS': 'REAL_ESTATE',
+    'SJS': 'REAL_ESTATE', 'DIG': 'REAL_ESTATE', 'DXG': 'REAL_ESTATE',
+    
+    # 3. Thép & Kim loại (Steel & Materials)
+    'HPG': 'STEEL', 'HSG': 'STEEL', 'NKG': 'STEEL',
+    
+    # 4. Chứng khoán (Brokerage)
+    'SSI': 'SECURITIES', 'HCM': 'SECURITIES', 'VND': 'SECURITIES', 'VCI': 'SECURITIES',
+    
+    # 5. Dầu khí, Năng lượng & Tiện ích (Energy & Utilities)
+    'GAS': 'ENERGY', 'PLX': 'ENERGY', 'POW': 'ENERGY', 'PVD': 'ENERGY', 
+    'PVT': 'ENERGY', 'NT2': 'ENERGY', 'PPC': 'ENERGY', 'REE': 'ENERGY', 
+    'VSH': 'ENERGY', 'PGD': 'ENERGY',
+    
+    # 6. Bán lẻ & Tiêu dùng (Retail & Consumer)
+    'MWG': 'CONSUMER', 'MSN': 'CONSUMER', 'SAB': 'CONSUMER', 'VNM': 'CONSUMER', 
+    'PNJ': 'CONSUMER', 'KDC': 'CONSUMER', 'SBT': 'CONSUMER', 'PET': 'CONSUMER',
+    
+    # 7. Công nghệ & Viễn thông (Technology)
+    'FPT': 'TECH',
+    
+    # 8. Phân bón, Hóa chất, Cao su & Nông nghiệp (Chemicals & Agriculture)
+    'GVR': 'CHEMICALS', 'DPM': 'CHEMICALS', 'DCM': 'CHEMICALS', 
+    'DRC': 'CHEMICALS', 'CSM': 'CHEMICALS', 'HAG': 'AGRICULTURE', 'HVG': 'AGRICULTURE',
+    
+    # 9. Vận tải & Hàng không (Logistics & Aviation)
+    'VJC': 'LOGISTICS', 'GMD': 'LOGISTICS', 'HVN': 'LOGISTICS',
+    
+    # 10. Bảo hiểm (Insurance)
+    'BVH': 'INSURANCE'
+}
+
+# ==========================================
 # CÁC HÀM TÍNH TOÁN CHỈ BÁO KỸ THUẬT
 # ==========================================
 def calc_adx(high, low, close, n=14):
@@ -167,7 +215,6 @@ vnindex_df['MA20'] = vnindex_df['VNINDEX'].rolling(20, min_periods=10).mean()
 vnindex_df['MA50'] = vnindex_df['VNINDEX'].rolling(50, min_periods=20).mean()
 vnindex_df['MA100'] = vnindex_df['VNINDEX'].rolling(100, min_periods=40).mean()
 vnindex_df['MA200'] = vnindex_df['VNINDEX'].rolling(200, min_periods=80).mean()
-# ATR, ADX, MFI tính trên High/Low/Close THẬT 100%
 vnindex_df['ADX'] = calc_adx(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14)
 vnindex_df['ATR_PCT'] = calc_atr(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14) / vnindex_df['VNINDEX']
 vnindex_df['ATR_PTS'] = calc_atr(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14)
@@ -293,20 +340,51 @@ ml_features = ['Vol_Ratio', 'Dist_MA50', 'RSI', 'RSI_Momentum', 'VN_MFI', 'MACD_
 for f in ml_features:
     ml_master[f] = pd.to_numeric(ml_master[f], errors='coerce')
 
-MODEL_FILE = "xgboost_ultimate.json"
-xgb_model = xgb.XGBClassifier()
+# =====================================================================
+# NẠP MÔ HÌNH WALK-FORWARD EXPANDING RETRAINING (CUỐN CHIẾU TỪNG NĂM)
+# 100% Out-of-Sample, không Look-Ahead Leakage, không Model Obsolescence
+# =====================================================================
+wf_models = {}
+for y in [2022, 2023, 2024, 2025, 2026]:
+    fn = f"xgboost_model_{y}.json"
+    if os.path.exists(fn):
+        try:
+            m = xgb.XGBClassifier()
+            m.load_model(fn)
+            wf_models[y] = m
+            print(f"   🧠 Đã nạp Walk-Forward Model năm {y}: {fn}")
+        except Exception as e:
+            print(f"   ⚠️ Lỗi đọc {fn}: {e}")
 
-if os.path.exists(MODEL_FILE):
-    xgb_model.load_model(MODEL_FILE)
-    print(f"   🧠 Đã nạp thành công mô hình: {MODEL_FILE}")
+DEFAULT_MODEL_FILE = "xgboost_ultimate.json"
+default_model = xgb.XGBClassifier()
+if os.path.exists(DEFAULT_MODEL_FILE):
+    default_model.load_model(DEFAULT_MODEL_FILE)
+    print(f"   🧠 Đã nạp mô hình cơ sở: {DEFAULT_MODEL_FILE}")
+elif wf_models:
+    default_model = list(wf_models.values())[-1]
 else:
-    sys.exit(f"⚠️ Không tìm thấy {MODEL_FILE}! Bác phải chạy train_bot.py trước.")
+    sys.exit(f"⚠️ Không tìm thấy {DEFAULT_MODEL_FILE}! Bác phải chạy train_bot.py trước.")
 
-# =====================================================================
-# XGBOOST XỬ LÝ NATIVE MISSING VALUES (missing=np.nan)
-# Tuyệt đối không dùng valid_rows filter gây mất dữ liệu khi có ngày nghỉ quốc tế
-# =====================================================================
-ml_master['AI_Score'] = xgb_model.predict_proba(ml_master[ml_features])[:, 1]
+# Chấm điểm AI Score thích ứng Walk-Forward OOS
+ml_master['AI_Score'] = np.nan
+
+# 1. Giai đoạn <= 2021: Dùng mô hình học trên 2014-2021 (model 2022 hoặc default)
+pre_2022_mask = ml_master['Date'] < '2022-01-01'
+base_m = wf_models.get(2022, default_model)
+if pre_2022_mask.sum() > 0:
+    ml_master.loc[pre_2022_mask, 'AI_Score'] = base_m.predict_proba(ml_master.loc[pre_2022_mask, ml_features])[:, 1]
+
+# 2. Các năm Out-of-Sample 2022 -> 2026: Dùng đúng mô hình học trước năm đó!
+for y in [2022, 2023, 2024, 2025, 2026]:
+    if y == 2026:
+        y_mask = ml_master['Date'] >= f"{y}-01-01"
+    else:
+        y_mask = (ml_master['Date'] >= f"{y}-01-01") & (ml_master['Date'] < f"{y+1}-01-01")
+    
+    if y_mask.sum() > 0:
+        m_y = wf_models.get(y, default_model)
+        ml_master.loc[y_mask, 'AI_Score'] = m_y.predict_proba(ml_master.loc[y_mask, ml_features])[:, 1]
 
 # Tạo tra cứu AI Score dạng dict (Key: ticker -> {date_str: score})
 ai_dict = {}
@@ -315,25 +393,22 @@ for c in loaded_tickers:
     ai_dict[c] = dict(zip(c_sub['Date'], c_sub['AI_Score']))
 
 # ==========================================
-# 4. SỔ KẾ TOÁN THỰC CHIẾN (NEXT-DAY OPEN + LÔ CHẴN 100 HOSE)
+# 4. SỔ KẾ TOÁN THỰC CHIẾN (NEXT-DAY OPEN + LÔ CHẴN 100 HOSE + KHÓA TRẦN NGÀNH)
 # ==========================================
-print("4. Chạy Sổ Kế Toán (Point-in-Time VN30 + Khớp Open[t+1] + Lô chẵn 100 + T+2.5)...")
+print("4. Chạy Sổ Kế Toán (Point-in-Time VN30 + Khớp Open[t+1] + Lô chẵn 100 + Khóa trần ngành <=2)...")
 
 def run_ai_quant_system():
-    # Lọc kiểm thử từ 01/2014 đến nay
     backtest = df_clean[df_clean['Date'] >= '2014-01-01'].copy().reset_index(drop=True)
     
     MAX_SLOTS = 5                      # Tối đa 5 vị thế (20% NAV / slot)
+    MAX_PER_SECTOR = 2                 # Khóa trần ngành: Tối đa 2 mã / ngành (Chống sập dây chuyền)
     BUY_FRICTION = 0.0065              # 0.5% trượt giá + 0.15% phí mua
     SELL_FRICTION = 0.0075             # 0.5% trượt giá + 0.15% phí bán + 0.10% thuế
     ANNUAL_BANK_RATE = 0.04            # 4.0% / năm lãi gửi tiền mặt
     DAILY_BANK_RATE = ANNUAL_BANK_RATE / 252
     MIN_HOLD_DAYS = 3                  # Chu kỳ T+2.5 (mua Open ngày t, bán sớm nhất Open ngày t+3)
     
-    # ==========================================================
-    # THAM SỐ CHIẾN LƯỢC ĐÃ TỐI ƯU
-    # ==========================================================
-    AI_THRESHOLD = 0.55                # Ngưỡng AI Score chuẩn mực (bắt các siêu cổ phiếu VN30)
+    AI_THRESHOLD = 0.55                # Ngưỡng AI Score chuẩn mực
     VOL_BREAKOUT_RATIO = 1.2           # Volume đột biến >= 1.2x MA20
     ADX_MIN = 18                       # Bắt xu hướng thị trường ADX > 18
     MAX_BUYS_PER_DAY = 2               # Tối đa 2 lệnh mua / ngày (Giải ngân phân lớp)
@@ -346,7 +421,7 @@ def run_ai_quant_system():
     PROFIT_PROTECTION_FLOOR = 0.02     # Sàn bảo vệ vốn/lãi tối thiểu +2%
     MA20_PROFIT_EXIT = 0.10            # Thủng MA20 chốt lãi khi đã có đệm > 10%
     HARD_STOPLOSS = -0.10              # Cắt lỗ cứng -10%
-    PORTFOLIO_MDD_LIMIT = -0.18        # Portfolio Stop: Tổng NAV giảm 18% từ đỉnh -> bán hết
+    PORTFOLIO_MDD_LIMIT = -0.18        # Portfolio Stop: Tổng NAV giảm 18% từ đỉnh chu kỳ -> bán hết
     
     INITIAL_CAPITAL = 100_000_000.0    # Vốn khởi điểm 100 triệu VNĐ
     cash = INITIAL_CAPITAL
@@ -354,13 +429,9 @@ def run_ai_quant_system():
     held = {}                          # {ticker: {'qty': shares, 'buy_price': open_p, 'highest': ..., 'buy_date': ..., 'hold_days': 0}}
     trade_log = []
     daily_nav_history = []
-    nav_peak = cash
+    nav_peak = cash                    # Đỉnh NAV chu kỳ nắm giữ
     consecutive_above_ma100 = 0
 
-    # =========================================================================
-    # QUEUE LỆNH CHỜ KHỚP TẠI GIÁ MỞ CỬA PHIÊN TIẾP THEO (OPEN[t+1])
-    # Loại bỏ 100% Same-Bar Execution Bias: Tín hiệu ATC ngày t -> Khớp ATO ngày t+1
-    # =========================================================================
     pending_sells = []  # list of (ticker, reason)
     pending_buys = []   # list of {'ticker': c, 'score': score, 'signal': 'Breakout'}
 
@@ -391,7 +462,6 @@ def run_ai_quant_system():
             sells_executed = []
             for c, reason in pending_sells:
                 if c in held:
-                    # Lấy giá Mở cửa hôm nay (Open[t])
                     open_p = stocks_open.at[date, c] if (c in stocks_open.columns and pd.notna(stocks_open.at[date, c]) and stocks_open.at[date, c] > 0) else (stocks_close.at[date, c] if c in stocks_close.columns else np.nan)
                     if pd.isna(open_p) or open_p <= 0:
                         continue  # Tạm ngừng giao dịch -> Giữ lại lệnh bán cho phiên tiếp theo
@@ -446,6 +516,12 @@ def run_ai_quant_system():
                 if c in held:
                     continue
                 
+                # Kiểm tra trần ngành thực tế tại thời điểm khớp
+                cand_sec = SECTOR_MAP.get(c, 'OTHER')
+                current_sec_count = sum(1 for h in held if SECTOR_MAP.get(h, 'OTHER') == cand_sec)
+                if current_sec_count >= MAX_PER_SECTOR:
+                    continue
+
                 open_p = stocks_open.at[date, c] if (c in stocks_open.columns and pd.notna(stocks_open.at[date, c]) and stocks_open.at[date, c] > 0) else (stocks_close.at[date, c] if c in stocks_close.columns else np.nan)
                 if pd.isna(open_p) or open_p <= 0:
                     continue
@@ -503,10 +579,17 @@ def run_ai_quant_system():
             if pd.notna(curr_p) and curr_p > 0:
                 held[c]['last_price'] = curr_p
 
-        # Cập nhật NAV cuối phiên theo Close[t]
+        # Cập nhật NAV cuối phiên chuẩn xác theo Close[t]
         stock_val_close = get_current_stock_valuation(date)
         current_nav = cash + stock_val_close
+        
+        # Cập nhật đỉnh NAV của chu kỳ nắm giữ
         if current_nav > nav_peak:
+            nav_peak = current_nav
+
+        # SỬA LỖI CẮT NON: Reset đỉnh NAV khi tài khoản ở 100% tiền mặt
+        # hoặc bắt đầu chu kỳ giải ngân mới, tránh mang gánh nặng đỉnh cũ của nhiều tháng trước
+        if len(held) == 0:
             nav_peak = current_nav
         
         daily_nav_history.append({
@@ -516,9 +599,6 @@ def run_ai_quant_system():
             'Bank_Interest': int(round(total_bank_interest)),
             'Portfolio_Return(%)': round(((current_nav / INITIAL_CAPITAL) - 1.0) * 100.0, 2)
         })
-
-        if len(held) == 0:
-            nav_peak = cash
 
         # -------------------------------------------------------------
         # 4. CUỐI PHIÊN (ATC): QUÉT TÍN HIỆU CHO PHIÊN HÔM SAU
@@ -539,6 +619,10 @@ def run_ai_quant_system():
         else:
             consecutive_above_ma100 = 0
 
+        # Khởi đầu nhịp sóng mới sau nhịp điều chỉnh -> Reset chuẩn so sánh đỉnh NAV cho chu kỳ mới
+        if consecutive_above_ma100 == 1 and len(held) <= 1:
+            nav_peak = current_nav
+
         active_vn30 = get_vn30_constituents(date_str)
 
         portfolio_dd = (current_nav - nav_peak) / nav_peak if nav_peak > 0 else 0.0
@@ -546,23 +630,56 @@ def run_ai_quant_system():
         prev_ma100 = backtest['MA100'].iloc[i-1] if i > 0 else market_ma100
         vol_shock = (market_vol / market_vol_ma20) if (pd.notna(market_vol_ma20) and market_vol_ma20 > 0) else 1.0
 
+        # =============================================================
+        # CÔNG TẮC VĨ MÔ THÍCH ỨNG (GIẢM ĐỘ NHẠY MA100)
+        # 1. Xác nhận sập dứt khoát -> Thanh lý toàn bộ danh mục
+        # 2. Chớm rung lắc 1 phiên đơn lẻ -> Chỉ bán các vị thế yếu
+        # =============================================================
         hard_atr_breakdown = (idx < macro_floor)
-        vol_confirmed_breakdown = (idx < market_ma100) and (vol_shock >= 1.15)
-        two_day_breakdown = (idx < market_ma100) and (prev_idx < prev_ma100) and (vol_shock >= 0.90)
-        is_macro_breakdown = hard_atr_breakdown or vol_confirmed_breakdown or two_day_breakdown
+        deep_drop_breakdown = (idx < market_ma100 * 0.985)  # Giảm sâu quá MA100 - 1.5%
+        two_day_breakdown = (idx < market_ma100) and (prev_idx < prev_ma100) and (vol_shock >= 0.90) # 2 phiên liên tiếp
+        vol_confirmed_breakdown = (idx < market_ma100) and (vol_shock >= 1.25) # Thủng MA100 kèm volume xả lớn
+
+        is_confirmed_macro_breakdown = hard_atr_breakdown or deep_drop_breakdown or two_day_breakdown or vol_confirmed_breakdown
+        is_early_macro_warning = (idx < market_ma100) and not is_confirmed_macro_breakdown
 
         # (A) QUÉT TÍN HIỆU BÁN ĐỂ KHỚP TẠI OPEN PHIÊN MAI
         already_pending_sells = {item[0] for item in pending_sells}
 
         if portfolio_dd <= -0.18 and len(held) > 0:
+            # CẦU DAO PORTFOLIO STOP: Tổng NAV sụt 18% từ đỉnh chu kỳ -> Bán toàn bộ
             for c in list(held.keys()):
                 if held[c]['hold_days'] >= MIN_HOLD_DAYS and c not in already_pending_sells:
                     pending_sells.append((c, 'SELL (Portfolio Stop -18%)'))
-        elif is_macro_breakdown and len(held) > 0:
+
+        elif is_confirmed_macro_breakdown and len(held) > 0:
+            # SẬP DỨT KHOÁT: Đóng cửa dưới MA100 2 phiên hoặc gãy sâu > 1.5% -> Thanh lý toàn bộ danh mục!
             for c in list(held.keys()):
                 if held[c]['hold_days'] >= MIN_HOLD_DAYS and c not in already_pending_sells:
                     pending_sells.append((c, 'SELL (Cắt Macro gãy MA100)'))
+
+        elif is_early_macro_warning and len(held) > 0:
+            # CHỚM RUNG LẮC 1 PHIÊN DƯỚI MA100: KHÔNG BÁN THÁO CỔ PHIẾU KHỎE!
+            # Chỉ bán ngay các vị thế đang âm hoặc thủng MA20 cá nhân; giữ các vị thế đang lãi khỏe chạy tiếp
+            for c in list(held.keys()):
+                if held[c]['hold_days'] < MIN_HOLD_DAYS or c in already_pending_sells:
+                    continue
+                curr_price = stocks_close.at[date, c] if c in stocks_close.columns else np.nan
+                if pd.isna(curr_price) or curr_price <= 0:
+                    continue
+
+                buy_price = held[c]['buy_price']
+                profit_margin = (curr_price - buy_price) / buy_price
+                c_ma20 = stocks_ma20.at[date, c] if c in stocks_ma20.columns else np.nan
+
+                is_losing = (profit_margin < 0)
+                is_below_ma20 = (pd.notna(c_ma20) and curr_price < c_ma20)
+
+                if is_losing or is_below_ma20:
+                    pending_sells.append((c, 'SELL (Macro chớm gãy MA100 - Cắt vị thế yếu)'))
+
         else:
+            # THỊ TRƯỜNG BÌNH THƯỜNG (VN-INDEX >= MA100): Quản trị rủi ro riêng lẻ từng vị thế
             for c in list(held.keys()):
                 if held[c]['hold_days'] < MIN_HOLD_DAYS or c in already_pending_sells:
                     continue
@@ -601,7 +718,7 @@ def run_ai_quant_system():
                     if c in stocks_ma20.columns and pd.notna(stocks_ma20.at[date, c]) and curr_price < stocks_ma20.at[date, c] and profit_margin > MA20_PROFIT_EXIT:
                         pending_sells.append((c, 'SELL (Thủng MA20 bảo toàn lãi)'))
 
-        # (B) QUÉT TÍN HIỆU MUA ĐỂ KHỚP TẠI OPEN PHIÊN MAI
+        # (B) QUÉT TÍN HIỆU MUA ĐỂ KHỚP TẠI OPEN PHIÊN MAI (CÓ KHÓA TRẦN NGÀNH)
         if idx < market_ma50 or market_atr_pct > 0.020:
             max_exposure = 0.4
         elif idx < market_ma200:
@@ -659,12 +776,31 @@ def run_ai_quant_system():
                     # Tín hiệu Momentum Breakout chuẩn mực
                     if curr_price > prev_h20 and v_ratio >= VOL_BREAKOUT_RATIO and score >= AI_THRESHOLD:
                         buy_candidates.append({
-                            'ticker': c, 'score': score, 'signal': 'Breakout'
+                            'ticker': c, 'score': score, 'signal': 'Breakout',
+                            'sector': SECTOR_MAP.get(c, 'OTHER')
                         })
 
             if buy_candidates:
+                # Sắp xếp ưu tiên AI Score cao nhất
                 buy_candidates = sorted(buy_candidates, key=lambda x: x['score'], reverse=True)
-                pending_buys = buy_candidates[:MAX_BUYS_PER_DAY]
+                
+                # KHÓA TRẦN NGÀNH (SECTOR CAP <= 2 MÃ/NGÀNH)
+                selected_buys = []
+                for cand in buy_candidates:
+                    if len(selected_buys) >= MAX_BUYS_PER_DAY:
+                        break
+                    
+                    sec = cand['sector']
+                    # Đếm số mã thuộc ngành này trong danh mục đang giữ (trừ những mã đã lên lịch bán)
+                    sec_in_held = sum(1 for h in held if SECTOR_MAP.get(h, 'OTHER') == sec and h not in [s[0] for s in pending_sells])
+                    # Đếm số mã thuộc ngành này đã được chọn mua trong hôm nay
+                    sec_in_selected = sum(1 for b in selected_buys if b.get('sector') == sec)
+                    
+                    if (sec_in_held + sec_in_selected) < MAX_PER_SECTOR:
+                        selected_buys.append(cand)
+                    # Nếu ngành đã đầy (ví dụ đã có 2 Bank), bỏ qua để nhường slot cho ngành khác!
+                
+                pending_buys = selected_buys
 
     # Chốt NAV phiên cuối cùng
     final_stock_val = get_current_stock_valuation(backtest['Date'].iloc[-1])
@@ -710,12 +846,10 @@ print("✅ Đã ghi nhận biến động tài sản hàng ngày chuẩn vào fi
 initial_capital = 100_000_000.0
 total_return_pct = ((final_nav / initial_capital) - 1.0) * 100.0
 
-# Tính CAGR (Lợi nhuận kép theo năm)
 nav_dates = pd.to_datetime(df_nav_hist['Date'])
 n_years = (nav_dates.iloc[-1] - nav_dates.iloc[0]).days / 365.25
 cagr = ((final_nav / initial_capital) ** (1.0 / n_years) - 1.0) * 100.0 if n_years > 0 else 0.0
 
-# Tính Maximum Drawdown (MDD)
 df_nav_hist['Peak'] = df_nav_hist['NAV'].cummax()
 df_nav_hist['Drawdown'] = (df_nav_hist['NAV'] - df_nav_hist['Peak']) / df_nav_hist['Peak']
 max_mdd = df_nav_hist['Drawdown'].min() * 100.0
@@ -811,7 +945,8 @@ if buy_count == 0 and sell_count == 0:
 if next_buys or next_sells:
     msg += f"⚡ <b>TÍN HIỆU ĐẶT LỆNH ATO PHIÊN TIẾP THEO:</b>\n"
     for b in next_buys:
-        msg += f"   • 🟢 Mua ATO: <b>{b['ticker']}</b> (AI Score: <b>{b['score']*100:.1f}%</b>)\n"
+        b_sec = SECTOR_MAP.get(b['ticker'], 'OTHER')
+        msg += f"   • 🟢 Mua ATO: <b>{b['ticker']}</b> [{b_sec}] (AI Score: <b>{b['score']*100:.1f}%</b>)\n"
     for s_tick, s_reason in next_sells:
         msg += f"   • 🔴 Bán ATO: <b>{s_tick}</b> ({s_reason})\n"
     msg += "\n"
@@ -826,7 +961,8 @@ if current_held:
         peak_pnl = ((pos['highest'] / pos['buy_price']) - 1.0) * 100.0
         leader_badge = " 👑 [Leader]" if peak_pnl >= 20.0 else ""
         qty_str = f"{int(pos['qty']):,} cp"
-        msg += f"{icon} <b>{ticker}</b> ({qty_str}): Giá {curr_p:,.2f} | Lãi tạm: <b>{unrealized_pnl:+.1f}%</b> (Đỉnh: +{peak_pnl:.1f}%){leader_badge} | T+{pos['hold_days']}\n"
+        sec_name = SECTOR_MAP.get(ticker, 'OTHER')
+        msg += f"{icon} <b>{ticker}</b> [{sec_name}] ({qty_str}): Giá {curr_p:,.2f} | Lãi tạm: <b>{unrealized_pnl:+.1f}%</b> (Đỉnh: +{peak_pnl:.1f}%){leader_badge} | T+{pos['hold_days']}\n"
     msg += "\n"
 else:
     msg += "<i>100% Tiền mặt (Bảo toàn vốn tối đa, nhận lãi Bank 4%/năm).</i>\n\n"
