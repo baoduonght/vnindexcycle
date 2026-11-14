@@ -184,7 +184,7 @@ def fetch_ticker_data(symbol, n_bars=4000):
     except Exception:
         pass
 
-    # Fallback khẩn cấp nếu hoàn toàn mất mạng: đọc từ CSV
+    # Fallback khẩn cấp nếu mất mạng: CSV
     if symbol.upper() == 'VNINDEX' and os.path.exists('markets_database10years.csv'):
         try:
             print("   ⚠️ CẢNH BÁO: Tải API thất bại, buộc đọc VNINDEX từ markets_database10years.csv!")
@@ -217,6 +217,8 @@ vnindex_df['MA100'] = vnindex_df['VNINDEX'].rolling(100, min_periods=40).mean()
 vnindex_df['MA200'] = vnindex_df['VNINDEX'].rolling(200, min_periods=80).mean()
 vnindex_df['ADX'] = calc_adx(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14)
 vnindex_df['ATR_PCT'] = calc_atr(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14) / vnindex_df['VNINDEX']
+# Bổ sung biến độ dao động 20 phiên của VN-Index cho mô hình AI
+vnindex_df['VN_ATR_PCT'] = calc_atr(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 20) / vnindex_df['VNINDEX']
 vnindex_df['ATR_PTS'] = calc_atr(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14)
 vnindex_df['VOL_MA20'] = vnindex_df['Volume'].rolling(20, min_periods=10).mean()
 vnindex_df['MACRO_FLOOR'] = vnindex_df['MA100'] - (1.2 * vnindex_df['ATR_PTS'])
@@ -260,7 +262,7 @@ if delisted_or_empty:
 
 # =====================================================================
 # KHÔNG DÙNG LỆNH FILL: DỮ LIỆU NGUYÊN BẢN 100% (RAW MARKET DATA)
-# Không vẽ nến ảo, tính chỉ báo trực tiếp trên dữ liệu giao dịch thực tế
+# Tính chỉ báo trực tiếp trên dữ liệu giao dịch thực tế
 # =====================================================================
 stocks_high_20 = pd.DataFrame(index=stocks_close.index)
 stocks_ma20 = pd.DataFrame(index=stocks_close.index)
@@ -283,10 +285,19 @@ for c in loaded_tickers:
         if len(s_v) >= 20:
             stocks_vol_ma20[f'{c}_V'] = s_v.rolling(20).mean().shift(1)
 
+# =====================================================================
+# TÍNH ĐỘ RỘNG THỊ TRƯỜNG POINT-IN-TIME (TỶ LỆ MÃ VN30 TRÊN MA50)
+# =====================================================================
+above_ma50_cnt = (stocks_close > stocks_ma50).sum(axis=1)
+valid_ma50_cnt = (stocks_close.notna() & stocks_ma50.notna()).sum(axis=1)
+market_breadth_series = (above_ma50_cnt / valid_ma50_cnt.replace(0, np.nan)).fillna(0.5)
+
+breadth_map = dict(zip(pd.to_datetime(market_breadth_series.index).strftime('%Y-%m-%d'), market_breadth_series.values))
+
 # ==========================================
 # 3. TẢI BỘ NHỚ AI & ĐỒNG BỘ VĨ MÔ CSV
 # ==========================================
-print("3. Đang tải Não bộ AI tĩnh & Đồng bộ Vĩ mô CSV...")
+print("3. Đang tải Não bộ AI tĩnh & Đồng bộ Vĩ mô + Độ rộng...")
 try:
     macro_df = pd.read_csv('markets_database10years.csv')
     macro_df = macro_df[['Date', 'DXY', 'US10Y', 'USD_VND']].copy()
@@ -295,12 +306,13 @@ try:
 except Exception as e:
     sys.exit(f"🛑 LỖI ĐỌC FILE VĨ MÔ: {e}")
 
-market_context = vnindex_df[['Date', 'VN_MFI', 'VNINDEX', 'MA200']].copy()
+market_context = vnindex_df[['Date', 'VN_MFI', 'VNINDEX', 'MA200', 'VN_ATR_PCT']].copy()
 market_context['VN_Dist_MA200'] = market_context['VNINDEX'] / market_context['MA200']
 market_context['Date'] = pd.to_datetime(market_context['Date']).dt.strftime('%Y-%m-%d')
+market_context['VN_Breadth_MA50'] = market_context['Date'].map(breadth_map).fillna(0.5)
 market_context = market_context.drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
 
-macro_df = macro_df.merge(market_context[['Date', 'VN_MFI', 'VN_Dist_MA200']], on='Date', how='inner')
+macro_df = macro_df.merge(market_context[['Date', 'VN_MFI', 'VN_Dist_MA200', 'VN_ATR_PCT', 'VN_Breadth_MA50']], on='Date', how='inner')
 macro_df = macro_df.sort_values('Date').reset_index(drop=True)
 
 macro_cols = ['DXY', 'US10Y', 'USD_VND']
@@ -336,7 +348,7 @@ for c in loaded_tickers:
     df_ml_list.append(df_c)
 
 ml_master = pd.concat(df_ml_list, ignore_index=True).merge(macro_df, on='Date', how='left')
-ml_features = ['Vol_Ratio', 'Dist_MA50', 'RSI', 'RSI_Momentum', 'VN_MFI', 'MACD_Hist', 'VN_Dist_MA200'] + z_cols
+ml_features = ['Vol_Ratio', 'Dist_MA50', 'RSI', 'RSI_Momentum', 'VN_MFI', 'MACD_Hist', 'VN_Dist_MA200', 'VN_Breadth_MA50', 'VN_ATR_PCT'] + z_cols
 for f in ml_features:
     ml_master[f] = pd.to_numeric(ml_master[f], errors='coerce')
 
@@ -393,9 +405,9 @@ for c in loaded_tickers:
     ai_dict[c] = dict(zip(c_sub['Date'], c_sub['AI_Score']))
 
 # ==========================================
-# 4. SỔ KẾ TOÁN THỰC CHIẾN (NEXT-DAY OPEN + LÔ CHẴN 100 HOSE + KHÓA TRẦN NGÀNH)
+# 4. SỔ KẾ TOÁN THỰC CHIẾN (NEXT-DAY OPEN + LÔ CHẴN 100 HOSE + HYSTERESIS BUFFER)
 # ==========================================
-print("4. Chạy Sổ Kế Toán (Point-in-Time VN30 + Khớp Open[t+1] + Lô chẵn 100 + Khóa trần ngành <=2)...")
+print("4. Chạy Sổ Kế Toán (Point-in-Time VN30 + Khớp Open[t+1] + Khóa trần ngành + Hysteresis Buffer)...")
 
 def run_ai_quant_system():
     backtest = df_clean[df_clean['Date'] >= '2014-01-01'].copy().reset_index(drop=True)
@@ -431,6 +443,7 @@ def run_ai_quant_system():
     daily_nav_history = []
     nav_peak = cash                    # Đỉnh NAV chu kỳ nắm giữ
     consecutive_above_ma100 = 0
+    last_macro_exit_bar = -999         # Đánh dấu phiên kích hoạt bán tháo Macro gần nhất (Cooldown 10 phiên)
 
     pending_sells = []  # list of (ticker, reason)
     pending_buys = []   # list of {'ticker': c, 'score': score, 'signal': 'Breakout'}
@@ -588,7 +601,7 @@ def run_ai_quant_system():
             nav_peak = current_nav
 
         # SỬA LỖI CẮT NON: Reset đỉnh NAV khi tài khoản ở 100% tiền mặt
-        # hoặc bắt đầu chu kỳ giải ngân mới, tránh mang gánh nặng đỉnh cũ của nhiều tháng trước
+        # Tránh mang gánh nặng đỉnh cũ của chu kỳ nhiều tháng trước
         if len(held) == 0:
             nav_peak = current_nav
         
@@ -604,8 +617,8 @@ def run_ai_quant_system():
         # 4. CUỐI PHIÊN (ATC): QUÉT TÍN HIỆU CHO PHIÊN HÔM SAU
         # -------------------------------------------------------------
         idx = backtest['VNINDEX'].iloc[i]
-        market_ma20 = backtest['MA20'].iloc[i] if 'MA20' in backtest.columns else backtest['MA50'].iloc[i]
-        market_ma50 = backtest['MA50'].iloc[i]
+        market_ma20 = backtest['MA20'].iloc[i] if 'MA20' in backtest.columns else np.nan
+        market_ma50 = backtest['MA50'].iloc[i] if 'MA50' in backtest.columns else np.nan
         market_ma100 = backtest['MA100'].iloc[i]
         market_ma200 = backtest['MA200'].iloc[i]
         market_adx = backtest['ADX'].iloc[i]
@@ -619,7 +632,7 @@ def run_ai_quant_system():
         else:
             consecutive_above_ma100 = 0
 
-        # Khởi đầu nhịp sóng mới sau nhịp điều chỉnh -> Reset chuẩn so sánh đỉnh NAV cho chu kỳ mới
+        # Khởi đầu nhịp sóng mới sau chu kỳ điều chỉnh -> Reset chuẩn so sánh đỉnh NAV cho chu kỳ mới
         if consecutive_above_ma100 == 1 and len(held) <= 1:
             nav_peak = current_nav
 
@@ -631,17 +644,16 @@ def run_ai_quant_system():
         vol_shock = (market_vol / market_vol_ma20) if (pd.notna(market_vol_ma20) and market_vol_ma20 > 0) else 1.0
 
         # =============================================================
-        # CÔNG TẮC VĨ MÔ THÍCH ỨNG (GIẢM ĐỘ NHẠY MA100)
-        # 1. Xác nhận sập dứt khoát -> Thanh lý toàn bộ danh mục
-        # 2. Chớm rung lắc 1 phiên đơn lẻ -> Chỉ bán các vị thế yếu
+        # CÔNG TẮC VĨ MÔ THÍCH ỨNG: BỘ LỌC THOÁT MA100 CHUẨN XÁC
+        # 1. Gỡ bỏ hoàn toàn điều kiện "chớm gãy MA100" gây bẫy whipsaw
+        # 2. Chỉ thanh lý theo Macro khi VN-Index thủng 1.5% trong 2 phiên liên tiếp
+        # 3. Tuyệt đối KHÔNG bán tháo cổ phiếu có lãi đệm >= +3% theo Macro
         # =============================================================
-        hard_atr_breakdown = (idx < macro_floor)
-        deep_drop_breakdown = (idx < market_ma100 * 0.985)  # Giảm sâu quá MA100 - 1.5%
-        two_day_breakdown = (idx < market_ma100) and (prev_idx < prev_ma100) and (vol_shock >= 0.90) # 2 phiên liên tiếp
-        vol_confirmed_breakdown = (idx < market_ma100) and (vol_shock >= 1.25) # Thủng MA100 kèm volume xả lớn
+        two_day_deep_breakdown = (idx < market_ma100 * 0.985) and (prev_idx < prev_ma100 * 0.985) # Thủng 1.5% 2 phiên liên tiếp
+        hard_keltner_breakdown = (idx < macro_floor)                                             # Rơi tự do thủng sàn Keltner
+        flash_crash_breakdown = (idx < market_ma100 * 0.970)                                     # Sập rất sâu > 3%
 
-        is_confirmed_macro_breakdown = hard_atr_breakdown or deep_drop_breakdown or two_day_breakdown or vol_confirmed_breakdown
-        is_early_macro_warning = (idx < market_ma100) and not is_confirmed_macro_breakdown
+        is_confirmed_macro_breakdown = two_day_deep_breakdown or hard_keltner_breakdown or flash_crash_breakdown
 
         # (A) QUÉT TÍN HIỆU BÁN ĐỂ KHỚP TẠI OPEN PHIÊN MAI
         already_pending_sells = {item[0] for item in pending_sells}
@@ -653,14 +665,10 @@ def run_ai_quant_system():
                     pending_sells.append((c, 'SELL (Portfolio Stop -18%)'))
 
         elif is_confirmed_macro_breakdown and len(held) > 0:
-            # SẬP DỨT KHOÁT: Đóng cửa dưới MA100 2 phiên hoặc gãy sâu > 1.5% -> Thanh lý toàn bộ danh mục!
-            for c in list(held.keys()):
-                if held[c]['hold_days'] >= MIN_HOLD_DAYS and c not in already_pending_sells:
-                    pending_sells.append((c, 'SELL (Cắt Macro gãy MA100)'))
+            # SẬP DỨT KHOÁT: Đóng cửa dưới MA100*0.985 2 phiên hoặc gãy sàn Keltner!
+            # Đánh dấu phiên bán tháo Macro để kích hoạt Cooldown 10 phiên không mua lại
+            last_macro_exit_bar = i
 
-        elif is_early_macro_warning and len(held) > 0:
-            # CHỚM RUNG LẮC 1 PHIÊN DƯỚI MA100: KHÔNG BÁN THÁO CỔ PHIẾU KHỎE!
-            # Chỉ bán ngay các vị thế đang âm hoặc thủng MA20 cá nhân; giữ các vị thế đang lãi khỏe chạy tiếp
             for c in list(held.keys()):
                 if held[c]['hold_days'] < MIN_HOLD_DAYS or c in already_pending_sells:
                     continue
@@ -670,16 +678,18 @@ def run_ai_quant_system():
 
                 buy_price = held[c]['buy_price']
                 profit_margin = (curr_price - buy_price) / buy_price
-                c_ma20 = stocks_ma20.at[date, c] if c in stocks_ma20.columns else np.nan
 
-                is_losing = (profit_margin < 0)
-                is_below_ma20 = (pd.notna(c_ma20) and curr_price < c_ma20)
+                # BẢO VỆ VỊ THẾ CÓ LÃI ĐỆM >= +3%:
+                # Tuyệt đối KHÔNG bán hoảng loạn theo Macro! Để MA20 cá nhân hoặc Trailing Stop tự xử lý!
+                if profit_margin >= 0.03:
+                    continue
 
-                if is_losing or is_below_ma20:
-                    pending_sells.append((c, 'SELL (Macro chớm gãy MA100 - Cắt vị thế yếu)'))
+                # Chỉ cắt các vị thế đang lỗ, hòa hoặc lãi mỏng (< +3%)
+                pending_sells.append((c, 'SELL (Cắt Macro gãy MA100)'))
 
         else:
-            # THỊ TRƯỜNG BÌNH THƯỜNG (VN-INDEX >= MA100): Quản trị rủi ro riêng lẻ từng vị thế
+            # THỊ TRƯỜNG BÌNH THƯỜNG (HOẶC CHƯA XÁC NHẬN SẬP DỨT KHOÁT):
+            # Quản trị rủi ro riêng lẻ từng vị thế (Không bán tháo cả rổ)
             for c in list(held.keys()):
                 if held[c]['hold_days'] < MIN_HOLD_DAYS or c in already_pending_sells:
                     continue
@@ -718,7 +728,9 @@ def run_ai_quant_system():
                     if c in stocks_ma20.columns and pd.notna(stocks_ma20.at[date, c]) and curr_price < stocks_ma20.at[date, c] and profit_margin > MA20_PROFIT_EXIT:
                         pending_sells.append((c, 'SELL (Thủng MA20 bảo toàn lãi)'))
 
-        # (B) QUÉT TÍN HIỆU MUA ĐỂ KHỚP TẠI OPEN PHIÊN MAI (CÓ KHÓA TRẦN NGÀNH)
+        # =============================================================
+        # (B) QUÉT TÍN HIỆU MUA CHO PHIÊN MAI (HYSTERESIS BUFFER + COOLDOWN + SECTOR CAP)
+        # =============================================================
         if idx < market_ma50 or market_atr_pct > 0.020:
             max_exposure = 0.4
         elif idx < market_ma200:
@@ -729,10 +741,20 @@ def run_ai_quant_system():
             max_exposure = 1.0
 
         allowed_stock_cap = max(0.0, (current_nav * max_exposure) - stock_val_close)
-        is_follow_through_day = (idx > market_ma100) and (vol_shock >= 1.25) and (idx >= prev_idx * 1.010)
-        trend_reentry_confirmed = (consecutive_above_ma100 >= 3) or is_follow_through_day
+
+        # 1. VÙNG ĐỆM HYSTERESIS: VN-Index phải vượt MA100 tối thiểu +1.5%
+        is_macro_buffer_ok = (idx >= market_ma100 * 1.015)
+
+        # 2. XU HƯỚNG NGẮN/TRUNG HẠN ĐỒNG THUẬN: MA20 > MA50
+        is_ma_trend_ok = (pd.notna(market_ma20) and pd.notna(market_ma50) and market_ma20 > market_ma50)
+
+        # 3. THỜI GIAN CHỜ COOLDOWN: Ít nhất 10 phiên sau lần bán tháo Macro gần nhất (tránh mua đuổi nhịp hồi giả)
+        is_cooldown_passed = (i - last_macro_exit_bar > 10)
+
+        # 4. ĐỘ BIẾN ĐỘNG HẠ NHIỆT (market_atr_pct <= 0.020)
         is_volatility_calm = (market_atr_pct <= 0.020)
 
+        # 5. ĐỘ RỘNG THỊ TRƯỜNG: >= 35% số mã VN30 nằm trên MA50
         vn30_above_ma50_cnt = sum([
             1 for ticker in active_vn30
             if ticker in stocks_close.columns and ticker in stocks_ma50.columns
@@ -743,7 +765,9 @@ def run_ai_quant_system():
         is_breadth_healthy = (market_breadth >= 0.35)
 
         can_enter_new_trades = (
-            trend_reentry_confirmed
+            is_macro_buffer_ok
+            and is_ma_trend_ok
+            and is_cooldown_passed
             and is_volatility_calm
             and is_breadth_healthy
             and (market_adx > ADX_MIN)
@@ -791,14 +815,12 @@ def run_ai_quant_system():
                         break
                     
                     sec = cand['sector']
-                    # Đếm số mã thuộc ngành này trong danh mục đang giữ (trừ những mã đã lên lịch bán)
                     sec_in_held = sum(1 for h in held if SECTOR_MAP.get(h, 'OTHER') == sec and h not in [s[0] for s in pending_sells])
-                    # Đếm số mã thuộc ngành này đã được chọn mua trong hôm nay
                     sec_in_selected = sum(1 for b in selected_buys if b.get('sector') == sec)
                     
                     if (sec_in_held + sec_in_selected) < MAX_PER_SECTOR:
                         selected_buys.append(cand)
-                    # Nếu ngành đã đầy (ví dụ đã có 2 Bank), bỏ qua để nhường slot cho ngành khác!
+                    # Nếu ngành đã đủ 2 mã (vd Bank), nhường slot cho ngành khác
                 
                 pending_buys = selected_buys
 
