@@ -169,6 +169,8 @@ vnindex_df['MA100'] = vnindex_df['VNINDEX'].rolling(100, min_periods=40).mean()
 vnindex_df['MA200'] = vnindex_df['VNINDEX'].rolling(200, min_periods=80).mean()
 vnindex_df['ADX'] = calc_adx(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14)
 vnindex_df['ATR_PCT'] = calc_atr(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14) / vnindex_df['VNINDEX']
+# Bổ sung biến độ dao động 20 phiên của VN-Index cho mô hình AI
+vnindex_df['VN_ATR_PCT'] = calc_atr(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 20) / vnindex_df['VNINDEX']
 vnindex_df['VN_MFI'] = calc_mfi(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], vnindex_df['Volume'], 14)
 df_clean = vnindex_df.dropna().drop_duplicates(subset=['Date'], keep='last').copy().reset_index(drop=True)
 
@@ -212,10 +214,19 @@ for c in loaded_tickers:
         if len(s_v) >= 20:
             stocks_vol_ma20[f'{c}_V'] = s_v.rolling(20).mean().shift(1)
 
+# =====================================================================
+# TÍNH ĐỘ RỘNG THỊ TRƯỜNG POINT-IN-TIME (TỶ LỆ MÃ VN30 TRÊN MA50)
+# =====================================================================
+above_ma50_cnt = (stocks_close > stocks_ma50).sum(axis=1)
+valid_ma50_cnt = (stocks_close.notna() & stocks_ma50.notna()).sum(axis=1)
+market_breadth_series = (above_ma50_cnt / valid_ma50_cnt.replace(0, np.nan)).fillna(0.5)
+
+breadth_map = dict(zip(pd.to_datetime(market_breadth_series.index).strftime('%Y-%m-%d'), market_breadth_series.values))
+
 # ==========================================
 # 3. CHUẨN BỊ TẬP DỮ LIỆU ĐỂ AI HỌC (TRAIN DATA)
 # ==========================================
-print("3. Khởi tạo màng lưới tính toán & Đồng bộ Vĩ mô...")
+print("3. Khởi tạo màng lưới tính toán & Đồng bộ Vĩ mô + Độ rộng...")
 try:
     macro_df = pd.read_csv('markets_database10years.csv')
     macro_df = macro_df[['Date', 'DXY', 'US10Y', 'USD_VND']].copy()
@@ -224,12 +235,13 @@ try:
 except Exception as e:
     sys.exit(f"🛑 LỖI ĐỌC FILE VĨ MÔ: {e}")
 
-market_context = vnindex_df[['Date', 'VN_MFI', 'VNINDEX', 'MA200']].copy()
+market_context = vnindex_df[['Date', 'VN_MFI', 'VNINDEX', 'MA200', 'VN_ATR_PCT']].copy()
 market_context['VN_Dist_MA200'] = market_context['VNINDEX'] / market_context['MA200']
 market_context['Date'] = pd.to_datetime(market_context['Date']).dt.strftime('%Y-%m-%d')
+market_context['VN_Breadth_MA50'] = market_context['Date'].map(breadth_map).fillna(0.5)
 market_context = market_context.drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
 
-macro_df = macro_df.merge(market_context[['Date', 'VN_MFI', 'VN_Dist_MA200']], on='Date', how='inner')
+macro_df = macro_df.merge(market_context[['Date', 'VN_MFI', 'VN_Dist_MA200', 'VN_ATR_PCT', 'VN_Breadth_MA50']], on='Date', how='inner')
 macro_df = macro_df.sort_values('Date').reset_index(drop=True)
 
 macro_cols = ['DXY', 'US10Y', 'USD_VND']
@@ -278,31 +290,35 @@ for c in loaded_tickers:
     df_ml_list.append(df_c)
 
 ml_master = pd.concat(df_ml_list, ignore_index=True).merge(macro_df, on='Date', how='left')
-ml_features = ['Vol_Ratio', 'Dist_MA50', 'RSI', 'RSI_Momentum', 'VN_MFI', 'MACD_Hist', 'VN_Dist_MA200'] + z_cols
+# Bổ sung VN_Breadth_MA50 và VN_ATR_PCT vào đặc trưng AI
+ml_features = ['Vol_Ratio', 'Dist_MA50', 'RSI', 'RSI_Momentum', 'VN_MFI', 'MACD_Hist', 'VN_Dist_MA200', 'VN_Breadth_MA50', 'VN_ATR_PCT'] + z_cols
 for f in ml_features:
     ml_master[f] = pd.to_numeric(ml_master[f], errors='coerce')
 
 # ==========================================
-# 4. HUẤN LUYỆN WALK-FORWARD EXPANDING RETRAINING (CUỐN CHIẾU TỪNG NĂM)
+# 4. HUẤN LUYỆN WALK-FORWARD ROLLING RETRAINING (CỬA SỔ 5 NĂM GẦN NHẤT)
 # ==========================================
-print("4. 🔄 KHỞI ĐỘNG LÒ LUYỆN ĐAN: HUẤN LUYỆN CUỐN CHIẾU WALK-FORWARD...")
+print("4. 🔄 KHỞI ĐỘNG LÒ LUYỆN ĐAN: HUẤN LUYỆN CUỐN CHIẾU WALK-FORWARD (5-YEAR ROLLING)...")
 
 train_data = ml_master.dropna(subset=['Target']).copy()
 train_data['Target'] = train_data['Target'].astype(int)
 
-# Các năm kiểm thử Out-of-Sample cuốn chiếu
 OOS_YEARS = [2022, 2023, 2024, 2025, 2026]
 models_saved = {}
 
 print(f"   📊 Tổng số mẫu dữ liệu trích xuất hợp lệ: {len(train_data):,}")
 
 for year in OOS_YEARS:
-    train_mask = train_data['Date'] < f"{year}-01-01"
-    test_mask = (train_data['Date'] >= f"{year}-01-01") & (train_data['Date'] < f"{year+1}-01-01")
-
-    # Fallback nếu dữ liệu lịch sử chưa đủ xa
-    if train_mask.sum() < 100:
-        continue
+    # Cửa sổ huấn luyện cuốn chiếu 5 năm gần nhất: [year - 5, year)
+    start_train_date = f"{year - 5}-01-01"
+    end_train_date = f"{year}-01-01"
+    
+    train_mask = (train_data['Date'] >= start_train_date) & (train_data['Date'] < end_train_date)
+    test_mask = (train_data['Date'] >= end_train_date) & (train_data['Date'] < f"{year + 1}-01-01")
+    
+    # Fallback nếu dữ liệu trước 2017 chưa đủ 5 năm: mở rộng từ đầu dữ liệu đến end_train_date
+    if train_mask.sum() < 200:
+        train_mask = train_data['Date'] < end_train_date
 
     X_train = train_data.loc[train_mask, ml_features]
     y_train = train_data.loc[train_mask, 'Target']
@@ -321,10 +337,10 @@ for year in OOS_YEARS:
         missing=np.nan
     )
 
-    print(f"\n   ⚙️ Huấn luyện Model Walk-Forward cho năm {year} (Train trên {train_mask.sum():,} mẫu < {year}-01-01)...")
+    print(f"\n   ⚙️ Huấn luyện Rolling Model cho năm {year} (Khung thời gian {start_train_date} -> {end_train_date}, {train_mask.sum():,} mẫu)...")
     model.fit(X_train, y_train)
 
-    # Đánh giá OOS trên năm tương ứng
+    # Đánh giá Out-of-Sample trên năm tương ứng
     if test_mask.sum() > 0:
         X_test = train_data.loc[test_mask, ml_features]
         y_test = train_data.loc[test_mask, 'Target']
@@ -334,14 +350,14 @@ for year in OOS_YEARS:
             auc = roc_auc_score(y_test, y_pred_proba)
             prec = precision_score(y_test, y_pred, zero_division=0)
             rec = recall_score(y_test, y_pred, zero_division=0)
-            print(f"      🎯 [OOS {year}] AUC: {auc:.4f} | Precision: {prec:.4f} | Recall: {rec:.4f} (Mẫu: {test_mask.sum():,})")
+            print(f"      🎯 [OOS {year}] AUC: {auc:.4f} | Precision: {prec:.4f} | Recall: {rec:.4f} (Mẫu kiểm thử: {test_mask.sum():,})")
 
     # Lưu model cho năm đó
     model_filename = f"xgboost_model_{year}.json"
     model.save_model(model_filename)
     models_saved[year] = model
 
-# Lưu mô hình mới nhất (2026 - học đến 2025) làm mô hình mặc định
+# Mô hình mới nhất (2026 - học từ 2021 đến 2025) lưu làm mô hình mặc định
 LATEST_MODEL_FILE = "xgboost_ultimate.json"
 if 2026 in models_saved:
     models_saved[2026].save_model(LATEST_MODEL_FILE)
@@ -349,7 +365,7 @@ elif models_saved:
     last_year = max(models_saved.keys())
     models_saved[last_year].save_model(LATEST_MODEL_FILE)
 
-print(f"\n✅ Đã hoàn tất huấn luyện Walk-Forward cho tất cả các năm {list(models_saved.keys())}!")
+print(f"\n✅ Đã hoàn tất huấn luyện Rolling Walk-Forward cho các năm {list(models_saved.keys())}!")
 print(f"💾 Mô hình mới nhất đã lưu tại: {LATEST_MODEL_FILE}")
 
 # Bảng xếp hạng Feature Importances của mô hình mới nhất
@@ -357,4 +373,4 @@ latest_model = models_saved.get(2026, list(models_saved.values())[-1])
 importances = pd.Series(latest_model.feature_importances_, index=ml_features).sort_values(ascending=False)
 print("\n🏆 BẢNG XẾP HẠNG TẦM QUAN TRỌNG CỦA CÁC BIẾN (FEATURE IMPORTANCES - LATEST):")
 for feat, imp in importances.items():
-    print(f"   • {feat:<15}: {imp*100:.2f}%")
+    print(f"   • {feat:<18}: {imp*100:.2f}%")
