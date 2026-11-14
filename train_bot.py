@@ -70,7 +70,6 @@ def fetch_ticker_data(symbol, n_bars=4000):
     now_ts = int(datetime.datetime.now().timestamp())
     start_ts = int((datetime.datetime.now() - datetime.timedelta(days=12*365)).timestamp())
 
-    # Phân loại Index vs Stock để gọi đúng endpoint của DNSE Entrade
     is_index = symbol.upper() in ['VNINDEX', 'VN30', 'VN100', 'VNXALL', 'HNX', 'HNX30', 'UPCOM']
     entrade_endpoint = 'index' if is_index else 'stock'
 
@@ -114,7 +113,8 @@ def fetch_ticker_data(symbol, n_bars=4000):
 
     # 3. Nguồn 3: TCBS Public API
     try:
-        url = f"https://apipubaws.tcbs.com.vn/stock-insight/v1/stock/bars-long-term?ticker={symbol}&type=stock&resolution=D&from={start_ts}&to={now_ts}"
+        api_type = 'index' if is_index else 'stock'
+        url = f"https://apipubaws.tcbs.com.vn/stock-insight/v1/stock/bars-long-term?ticker={symbol}&type={api_type}&resolution=D&from={start_ts}&to={now_ts}"
         res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}, timeout=6)
         if res.status_code == 200:
             data = res.json().get('data', [])
@@ -126,7 +126,7 @@ def fetch_ticker_data(symbol, n_bars=4000):
     except Exception:
         pass
 
-    # 4. Nguồn 4: TradingView (Phương án dự phòng)
+    # 4. Nguồn 4: TradingView
     try:
         df = tv.get_hist(symbol=symbol, exchange='HOSE', interval=Interval.in_daily, n_bars=n_bars)
         if df is not None and len(df) > 50:
@@ -137,10 +137,26 @@ def fetch_ticker_data(symbol, n_bars=4000):
     except Exception:
         pass
 
+    # Fallback cuối cùng nếu mất mạng: CSV
+    if symbol.upper() == 'VNINDEX' and os.path.exists('markets_database10years.csv'):
+        try:
+            print("   ⚠️ CẢNH BÁO: Tải API thất bại, đọc VNINDEX từ markets_database10years.csv!")
+            csv_df = pd.read_csv('markets_database10years.csv')
+            if 'VNINDEX' in csv_df.columns:
+                c_df = csv_df[['Date', 'VNINDEX', 'VN_VOLUME']].dropna(subset=['VNINDEX']).copy()
+                c_df['Date'] = pd.to_datetime(c_df['Date']).dt.tz_localize(None).dt.normalize()
+                c_df.rename(columns={'VNINDEX': 'Close', 'VN_VOLUME': 'Volume'}, inplace=True)
+                c_df['Open'] = c_df['Close']
+                c_df['High'] = c_df['Close']
+                c_df['Low'] = c_df['Close']
+                return c_df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
+        except Exception:
+            pass
+
     return None
 
 # ==========================================
-# 1. TẢI VN-INDEX & LẬP BỘ LỌC THỊ TRƯỜNG (OHLCV THẬT — KHÔNG LÀM PHẲNG NẾN)
+# 1. TẢI VN-INDEX & LẬP BỘ LỌC THỊ TRƯỜNG (OHLCV THẬT)
 # ==========================================
 print("1. Đang tải Market Proxy (VNINDEX)...")
 vnindex_raw = fetch_ticker_data('VNINDEX', n_bars=4000)
@@ -151,7 +167,6 @@ vnindex_df = vnindex_raw.rename(columns={'Close': 'VNINDEX'}).drop_duplicates(su
 vnindex_df['MA50'] = vnindex_df['VNINDEX'].rolling(50, min_periods=20).mean()
 vnindex_df['MA100'] = vnindex_df['VNINDEX'].rolling(100, min_periods=40).mean()
 vnindex_df['MA200'] = vnindex_df['VNINDEX'].rolling(200, min_periods=80).mean()
-# ATR, ADX, MFI tính trên High/Low THẬT (không bị làm phẳng)
 vnindex_df['ADX'] = calc_adx(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14)
 vnindex_df['ATR_PCT'] = calc_atr(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14) / vnindex_df['VNINDEX']
 vnindex_df['VN_MFI'] = calc_mfi(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], vnindex_df['Volume'], 14)
@@ -203,7 +218,6 @@ for c in loaded_tickers:
 print("3. Khởi tạo màng lưới tính toán & Đồng bộ Vĩ mô...")
 try:
     macro_df = pd.read_csv('markets_database10years.csv')
-    # Chỉ lấy DXY, US10Y, USD_VND từ CSV (VNINDEX OHLCV đã tải từ API)
     macro_df = macro_df[['Date', 'DXY', 'US10Y', 'USD_VND']].copy()
     macro_df['Date'] = pd.to_datetime(macro_df['Date']).dt.strftime('%Y-%m-%d')
     macro_df = macro_df.drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
@@ -269,90 +283,78 @@ for f in ml_features:
     ml_master[f] = pd.to_numeric(ml_master[f], errors='coerce')
 
 # ==========================================
-# 4. HUẤN LUYỆN XGBOOST (PURGED TIME-SERIES SPLIT — CHỐNG LOOK-AHEAD LEAKAGE)
+# 4. HUẤN LUYỆN WALK-FORWARD EXPANDING RETRAINING (CUỐN CHIẾU TỪNG NĂM)
 # ==========================================
-print("4. 🔄 KHỞI ĐỘNG LÒ LUYỆN ĐAN: HUẤN LUYỆN BỘ NÃO MỚI...")
+print("4. 🔄 KHỞI ĐỘNG LÒ LUYỆN ĐAN: HUẤN LUYỆN CUỐN CHIẾU WALK-FORWARD...")
 
-# Chỉ loại bỏ các hàng có Target là NaN (30 ngày gần nhất chưa có tương lai)
-# XGBoost xử lý NaN ở features nguyên bản (missing=np.nan)
-# TUYỆT ĐỐI KHÔNG dùng fill/ffill/bfill/fillna
 train_data = ml_master.dropna(subset=['Target']).copy()
 train_data['Target'] = train_data['Target'].astype(int)
 
-# =====================================================
-# PURGED TIME-SERIES SPLIT:
-#   In-Sample  (Train): 2014-01-01 → 2021-12-31
-#   Out-of-Sample (OOS): 2022-01-01 → 2026-xx-xx
-# Mô hình CHỈ học từ quá khứ, KHÔNG BAO GIỜ nhìn thấy dữ liệu OOS
-# =====================================================
-train_mask = train_data['Date'] < '2022-01-01'
-test_mask = train_data['Date'] >= '2022-01-01'
+# Các năm kiểm thử Out-of-Sample cuốn chiếu
+OOS_YEARS = [2022, 2023, 2024, 2025, 2026]
+models_saved = {}
 
-# Fallback: Nếu API chỉ trả dữ liệu ngắn (không có trước 2022)
-if train_mask.sum() == 0 or test_mask.sum() == 0:
-    unique_dates = sorted(train_data['Date'].unique())
-    split_idx = int(len(unique_dates) * 0.70)
-    split_date = unique_dates[split_idx]
-    train_mask = train_data['Date'] < split_date
-    test_mask = train_data['Date'] >= split_date
-    print(f"   ℹ️ Dữ liệu phân tách theo điểm cắt: {split_date} (70% Train / 30% OOS)")
-else:
-    print(f"   ℹ️ Purged Split: In-Sample (2014-2021) | Out-of-Sample (2022-2026)")
+print(f"   📊 Tổng số mẫu dữ liệu trích xuất hợp lệ: {len(train_data):,}")
 
-print(f"   📊 Tổng số mẫu dữ liệu trích xuất: {len(ml_master):,}")
-print(f"   📊 Số mẫu huấn luyện (In-Sample):   {train_mask.sum():,}")
-print(f"   📊 Số mẫu kiểm tra (Out-of-Sample):  {test_mask.sum():,}")
+for year in OOS_YEARS:
+    train_mask = train_data['Date'] < f"{year}-01-01"
+    test_mask = (train_data['Date'] >= f"{year}-01-01") & (train_data['Date'] < f"{year+1}-01-01")
 
-X_train = train_data.loc[train_mask, ml_features]
-y_train = train_data.loc[train_mask, 'Target']
+    # Fallback nếu dữ liệu lịch sử chưa đủ xa
+    if train_mask.sum() < 100:
+        continue
 
-X_test = train_data.loc[test_mask, ml_features]
-y_test = train_data.loc[test_mask, 'Target']
+    X_train = train_data.loc[train_mask, ml_features]
+    y_train = train_data.loc[train_mask, 'Target']
+    
+    scale_weight = len(y_train[y_train == 0]) / len(y_train[y_train == 1]) if len(y_train[y_train == 1]) > 0 else 1.0
 
-if len(X_train) == 0:
-    sys.exit("❌ LỖI: Tập X_train rỗng.")
+    model = xgb.XGBClassifier(
+        n_estimators=150,
+        max_depth=5,
+        learning_rate=0.05,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        scale_pos_weight=scale_weight,
+        random_state=42,
+        eval_metric='logloss',
+        missing=np.nan
+    )
 
-scale_weight = len(y_train[y_train == 0]) / len(y_train[y_train == 1]) if len(y_train[y_train == 1]) > 0 else 1.0
+    print(f"\n   ⚙️ Huấn luyện Model Walk-Forward cho năm {year} (Train trên {train_mask.sum():,} mẫu < {year}-01-01)...")
+    model.fit(X_train, y_train)
 
-xgb_model = xgb.XGBClassifier(
-    n_estimators=150,
-    max_depth=5,
-    learning_rate=0.05,
-    subsample=0.8,
-    colsample_bytree=0.8,
-    scale_pos_weight=scale_weight,
-    random_state=42,
-    eval_metric='logloss',
-    missing=np.nan
-)
+    # Đánh giá OOS trên năm tương ứng
+    if test_mask.sum() > 0:
+        X_test = train_data.loc[test_mask, ml_features]
+        y_test = train_data.loc[test_mask, 'Target']
+        if len(y_test.unique()) > 1:
+            y_pred_proba = model.predict_proba(X_test)[:, 1]
+            y_pred = (y_pred_proba >= 0.5).astype(int)
+            auc = roc_auc_score(y_test, y_pred_proba)
+            prec = precision_score(y_test, y_pred, zero_division=0)
+            rec = recall_score(y_test, y_pred, zero_division=0)
+            print(f"      🎯 [OOS {year}] AUC: {auc:.4f} | Precision: {prec:.4f} | Recall: {rec:.4f} (Mẫu: {test_mask.sum():,})")
 
-print(f"   Đang huấn luyện trên {len(X_train)} mẫu In-Sample (2014-2021)...")
-xgb_model.fit(X_train, y_train)
+    # Lưu model cho năm đó
+    model_filename = f"xgboost_model_{year}.json"
+    model.save_model(model_filename)
+    models_saved[year] = model
 
-# Đánh giá Out-of-Sample (OOS) — dữ liệu mô hình CHƯA BAO GIỜ thấy
-if len(X_test) > 0 and len(y_test.unique()) > 1:
-    y_pred_proba = xgb_model.predict_proba(X_test)[:, 1]
-    y_pred = (y_pred_proba >= 0.5).astype(int)
-    auc = roc_auc_score(y_test, y_pred_proba)
-    prec = precision_score(y_test, y_pred, zero_division=0)
-    rec = recall_score(y_test, y_pred, zero_division=0)
-    print(f"\n📊 KẾT QUẢ ĐÁNH GIÁ OUT-OF-SAMPLE (Dữ liệu ngoài mẫu 2022-2026):")
-    print(f"   🎯 ROC-AUC Score: {auc:.4f}")
-    print(f"   🎯 Precision:     {prec:.4f}")
-    print(f"   🎯 Recall:        {rec:.4f}")
+# Lưu mô hình mới nhất (2026 - học đến 2025) làm mô hình mặc định
+LATEST_MODEL_FILE = "xgboost_ultimate.json"
+if 2026 in models_saved:
+    models_saved[2026].save_model(LATEST_MODEL_FILE)
+elif models_saved:
+    last_year = max(models_saved.keys())
+    models_saved[last_year].save_model(LATEST_MODEL_FILE)
 
-# =====================================================
-# LƯU MÔ HÌNH CHỈ TỪ IN-SAMPLE (2014-2021)
-# KHÔNG tái huấn luyện trên toàn bộ dữ liệu → chống Look-Ahead Leakage hoàn toàn
-# =====================================================
-MODEL_FILE = "xgboost_ultimate.json"
-xgb_model.save_model(MODEL_FILE)
+print(f"\n✅ Đã hoàn tất huấn luyện Walk-Forward cho tất cả các năm {list(models_saved.keys())}!")
+print(f"💾 Mô hình mới nhất đã lưu tại: {LATEST_MODEL_FILE}")
 
-print(f"\n✅ XGBoost đã hoàn tất huấn luyện trên {len(X_train)} dòng In-Sample!")
-print(f"💾 Não bộ đã lưu tại: {MODEL_FILE} (Chỉ học 2014-2021, OOS blind test 2022-2026)")
-
-# Bảng xếp hạng Feature Importances
-importances = pd.Series(xgb_model.feature_importances_, index=ml_features).sort_values(ascending=False)
-print("\n🏆 BẢNG XẾP HẠNG TẦM QUAN TRỌNG CỦA CÁC BIẾN (FEATURE IMPORTANCES):")
+# Bảng xếp hạng Feature Importances của mô hình mới nhất
+latest_model = models_saved.get(2026, list(models_saved.values())[-1])
+importances = pd.Series(latest_model.feature_importances_, index=ml_features).sort_values(ascending=False)
+print("\n🏆 BẢNG XẾP HẠNG TẦM QUAN TRỌNG CỦA CÁC BIẾN (FEATURE IMPORTANCES - LATEST):")
 for feat, imp in importances.items():
     print(f"   • {feat:<15}: {imp*100:.2f}%")
