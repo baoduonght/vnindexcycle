@@ -71,14 +71,50 @@ SECTOR_MAP = {
     'BVH': 'INSURANCE'
 }
 
+# ==========================================
+# TỪ ĐIỂN HỆ SINH THÁI / TẬP ĐOÀN LIÊN KẾT (ECOSYSTEM MAP)
+# Khống chế rủi ro sụp đổ chéo cùng họ (Ecosystem Cap <= 1 mã/hệ sinh thái)
+# Triệt tiêu rủi ro sụt giảm đồng thời như cặp VHM + VRE ngày 10/10/2025
+# ==========================================
+ECOSYSTEM_MAP = {
+    # 1. Họ Vingroup
+    'VIC': 'VINGROUP', 'VHM': 'VINGROUP', 'VRE': 'VINGROUP',
+    
+    # 2. Họ Dầu khí / Năng lượng Petrovietnam (PVN)
+    'GAS': 'PVN', 'PVD': 'PVN', 'PVT': 'PVN', 'POW': 'PVN', 'PLX': 'PVN', 'NT2': 'PVN', 'PPC': 'PVN', 'PGD': 'PVN',
+    
+    # 3. Họ Masan
+    'MSN': 'MASAN',
+    
+    # 4. Họ Tập đoàn Hóa chất / Cao su Việt Nam (Vinachem / VRG)
+    'GVR': 'VRG', 'DPM': 'VRG', 'DCM': 'VRG', 'DRC': 'VRG', 'CSM': 'VRG',
+    
+    # 5. Khối Ngân hàng Quốc doanh (Big 4)
+    'VCB': 'BIG4_BANK', 'BID': 'BIG4_BANK', 'CTG': 'BIG4_BANK',
+    
+    # 6. Họ FPT
+    'FPT': 'FPT_GROUP',
+    
+    # 7. Họ Thép & Kim loại
+    'HPG': 'STEEL_GROUP', 'HSG': 'STEEL_GROUP', 'NKG': 'STEEL_GROUP',
+    
+    # 8. Họ Hoàng Anh Gia Lai
+    'HAG': 'HAGL', 'HNG': 'HAGL',
+    
+    # 9. Họ FLC
+    'FLC': 'FLC_GROUP', 'ROS': 'FLC_GROUP',
+}
+
 BACKTEST_START_DATE = os.environ.get('BACKTEST_START_DATE', '2022-01-01')
 
 # ==========================================
-# CỜ TÍNH NĂNG (FEATURE FLAGS - 4 CORE SOLUTIONS)
+# CỜ TÍNH NĂNG (FEATURE FLAGS - 4 CORE SOLUTIONS & ECOSYSTEM CONSTRAINTS)
 # ==========================================
 ENABLE_DYNAMIC_PERCENTILE_AI = os.environ.get('ENABLE_DYNAMIC_PERCENTILE_AI', 'True').lower() in ('true', '1', 'yes')
 ENABLE_ASYMMETRIC_ATR_EXIT = os.environ.get('ENABLE_ASYMMETRIC_ATR_EXIT', 'True').lower() in ('true', '1', 'yes')
 ENABLE_MA20_SLOPE_FILTER = os.environ.get('ENABLE_MA20_SLOPE_FILTER', 'True').lower() in ('true', '1', 'yes')
+MAX_PER_SECTOR = int(os.environ.get('MAX_PER_SECTOR', '1'))        # Mặc định tối đa 1 mã/ngành (hoặc 2 nếu cấu hình)
+MAX_PER_ECOSYSTEM = int(os.environ.get('MAX_PER_ECOSYSTEM', '1'))  # Khóa trần hệ sinh thái: Tối đa 1 mã/hệ sinh thái (Chống sập kép VHM + VRE)
 
 # ==========================================
 # CÁC HÀM TÍNH TOÁN CHỈ BÁO KỸ THUẬT
@@ -294,12 +330,18 @@ def run_ai_quant_system(
     loaded_tickers,
     backtest_start_date=None,
     initial_capital=100_000_000.0,
+    max_per_sector=None,
+    max_per_ecosystem=None,
     enable_dynamic_percentile_ai=ENABLE_DYNAMIC_PERCENTILE_AI,
     enable_asymmetric_atr_exit=ENABLE_ASYMMETRIC_ATR_EXIT,
     enable_ma20_slope_filter=ENABLE_MA20_SLOPE_FILTER
 ):
     if backtest_start_date is None:
         backtest_start_date = BACKTEST_START_DATE
+    if max_per_sector is None:
+        max_per_sector = MAX_PER_SECTOR
+    if max_per_ecosystem is None:
+        max_per_ecosystem = MAX_PER_ECOSYSTEM
     backtest = df_clean[df_clean['Date'] >= backtest_start_date].copy().reset_index(drop=True)
 
     # Bảng tra cứu AI Score để tính Rolling Percentile động (Zero Lookahead Bias)
@@ -308,8 +350,9 @@ def run_ai_quant_system(
         ticker_scores = ai_dict.get(ticker_col, {})
         stocks_ai_scores[ticker_col] = [ticker_scores.get(d.strftime('%Y-%m-%d'), np.nan) for d in backtest['Date']]
     
-    MAX_SLOTS = 5                      # Tối đa 5 vị thế (20% NAV / slot)
-    MAX_PER_SECTOR = 2                 # Khóa trần ngành: Tối đa 2 mã / ngành (Chống sập dây chuyền)
+    MAX_SLOTS = 5                         # Tối đa 5 vị thế (20% NAV / slot)
+    MAX_PER_SECTOR = max_per_sector       # Khóa trần ngành: Mặc định tối đa 1 mã / ngành
+    MAX_PER_ECOSYSTEM = max_per_ecosystem # Khóa trần hệ sinh thái: Tối đa 1 mã / hệ sinh thái (Chống sập kép VHM + VRE)
     BUY_FRICTION = 0.0065              # 0.5% trượt giá + 0.15% phí mua
     SELL_FRICTION = 0.0075             # 0.5% trượt giá + 0.15% phí bán + 0.10% thuế
     ANNUAL_BANK_RATE = 0.04            # 4.0% / năm lãi gửi tiền mặt
@@ -425,10 +468,12 @@ def run_ai_quant_system(
                 if c in held:
                     continue
                 
-                # Kiểm tra trần ngành thực tế tại thời điểm khớp
+                # Kiểm tra trần ngành và hệ sinh thái thực tế tại thời điểm khớp
                 cand_sec = SECTOR_MAP.get(c, 'OTHER')
+                cand_eco = ECOSYSTEM_MAP.get(c, c)
                 current_sec_count = sum(1 for h in held if SECTOR_MAP.get(h, 'OTHER') == cand_sec)
-                if current_sec_count >= MAX_PER_SECTOR:
+                current_eco_count = sum(1 for h in held if ECOSYSTEM_MAP.get(h, h) == cand_eco)
+                if current_sec_count >= MAX_PER_SECTOR or current_eco_count >= MAX_PER_ECOSYSTEM:
                     continue
 
                 open_p = stocks_open.at[date, c] if (c in stocks_open.columns and pd.notna(stocks_open.at[date, c]) and stocks_open.at[date, c] > 0) else (stocks_close.at[date, c] if c in stocks_close.columns else np.nan)
@@ -791,26 +836,32 @@ def run_ai_quant_system(
                     if curr_price > prev_h20 and v_ratio >= vol_breakout_target and score >= current_ai_threshold:
                         buy_candidates.append({
                             'ticker': c, 'score': score, 'signal': 'Breakout',
-                            'sector': SECTOR_MAP.get(c, 'OTHER')
+                            'sector': SECTOR_MAP.get(c, 'OTHER'),
+                            'ecosystem': ECOSYSTEM_MAP.get(c, c)
                         })
 
             if buy_candidates:
                 # Sắp xếp ưu tiên AI Score cao nhất
                 buy_candidates = sorted(buy_candidates, key=lambda x: x['score'], reverse=True)
                 
-                # KHÓA TRẦN NGÀNH (SECTOR CAP <= 2 MÃ/NGÀNH)
+                # KHÓA TRẦN NGÀNH & HỆ SINH THÁI (SECTOR CAP & ECOSYSTEM CAP)
                 selected_buys = []
                 for cand in buy_candidates:
                     if len(selected_buys) >= MAX_BUYS_PER_DAY:
                         break
                     
                     sec = cand['sector']
+                    eco = cand['ecosystem']
+
                     sec_in_held = sum(1 for h in held if SECTOR_MAP.get(h, 'OTHER') == sec and h not in [s[0] for s in pending_sells])
                     sec_in_selected = sum(1 for b in selected_buys if b.get('sector') == sec)
+
+                    eco_in_held = sum(1 for h in held if ECOSYSTEM_MAP.get(h, h) == eco and h not in [s[0] for s in pending_sells])
+                    eco_in_selected = sum(1 for b in selected_buys if b.get('ecosystem') == eco)
                     
-                    if (sec_in_held + sec_in_selected) < MAX_PER_SECTOR:
+                    if (sec_in_held + sec_in_selected) < MAX_PER_SECTOR and (eco_in_held + eco_in_selected) < MAX_PER_ECOSYSTEM:
                         selected_buys.append(cand)
-                    # Nếu ngành đã đủ 2 mã (vd Bank), nhường slot cho ngành khác
+                    # Nếu ngành hoặc hệ sinh thái đã đủ trần, nhường slot cho ngành/hệ sinh thái khác
                 
                 pending_buys = selected_buys
 
@@ -1063,6 +1114,7 @@ def main():
     print(f"   • Solution 2: Rolling Percentile Dynamic AI (Top 20% / 120 bars): {'BẬT' if ENABLE_DYNAMIC_PERCENTILE_AI else 'TẮT (Cố định 0.60)'}")
     print(f"   • Solution 3: Asymmetric Exit Rules (2 nến MA20 + 2.5x ATR Trailing): {'BẬT' if ENABLE_ASYMMETRIC_ATR_EXIT else 'TẮT'}")
     print(f"   • Solution 4: Index MA20 Slope & 1.3x Breakout Volume: {'BẬT' if ENABLE_MA20_SLOPE_FILTER else 'TẮT'}")
+    print(f"   • Ràng buộc Ngành & Hệ sinh thái: Tối đa {MAX_PER_SECTOR} mã/ngành | Tối đa {MAX_PER_ECOSYSTEM} mã/hệ sinh thái (Chống sập kép VHM + VRE)")
     print("="*70 + "\n")
 
     # ==========================================
@@ -1083,6 +1135,8 @@ def main():
         ai_dict=ai_dict,
         loaded_tickers=loaded_tickers,
         backtest_start_date=BACKTEST_START_DATE,
+        max_per_sector=MAX_PER_SECTOR,
+        max_per_ecosystem=MAX_PER_ECOSYSTEM,
         enable_dynamic_percentile_ai=ENABLE_DYNAMIC_PERCENTILE_AI,
         enable_asymmetric_atr_exit=ENABLE_ASYMMETRIC_ATR_EXIT,
         enable_ma20_slope_filter=ENABLE_MA20_SLOPE_FILTER
@@ -1134,8 +1188,8 @@ def main():
 
     print("\n" + "="*58)
     print(f"📊 BÁO CÁO ĐỊNH LƯỢNG THỰC CHIẾN TỪ {BACKTEST_START_DATE[:4]} ĐẾN NAY")
-    print("🧠 MÔ HÌNH: ĐÃ HUẤN LUYỆN TRÊN TOÀN BỘ CHU KỲ 2012 -> 2022")
-    print("🎯 KIỂM THỬ THỰC CHIẾN HOÀN TOÀN OUT-OF-SAMPLE (100% BLIND TEST)")
+    print("🧠 MÔ HÌNH CƠ SỞ (BASE MODEL): HUẤN LUYỆN TRÊN CHU KỲ VÀNG 10 NĂM (2012 -> 2021)")
+    print("🎯 KIỂM THỬ THỰC CHIẾN OOS: TÁI HUẤN LUYỆN CUỐN CHIẾU TỪNG NĂM (100% BLIND TEST / ZERO LEAKAGE)")
     print("="*58)
     print(f"💵 Vốn khởi điểm ({BACKTEST_START_DATE}):        {initial_capital:,.0f} VNĐ")
     print(f"🏦 TỔNG TÀI SẢN HIỆN TẠI (NAV):   {final_nav:,.0f} VNĐ")
