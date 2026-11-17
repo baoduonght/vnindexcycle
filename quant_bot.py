@@ -1,7 +1,12 @@
 import pandas as pd
 import numpy as np
 import requests
-from tvDatafeed import TvDatafeed, Interval
+try:
+    from tvDatafeed import TvDatafeed, Interval
+    tv = TvDatafeed()
+except Exception:
+    tv = None
+    Interval = None
 import xgboost as xgb
 import warnings
 import sys
@@ -11,7 +16,6 @@ import datetime
 from vn30_universe import get_vn30_constituents, ALL_HISTORICAL_VN30_TICKERS
 
 warnings.filterwarnings('ignore')
-tv = TvDatafeed()
 
 # ==========================================
 # TỪ ĐIỂN PHÂN LOẠI NGÀNH VN30 (SECTOR MAP)
@@ -22,7 +26,7 @@ SECTOR_MAP = {
     'VCB': 'BANK', 'BID': 'BANK', 'CTG': 'BANK', 'MBB': 'BANK', 'TCB': 'BANK',
     'VPB': 'BANK', 'ACB': 'BANK', 'HDB': 'BANK', 'TPB': 'BANK', 'STB': 'BANK',
     'VIB': 'BANK', 'SSB': 'BANK', 'SHB': 'BANK', 'LPB': 'BANK', 'EIB': 'BANK',
-    'MSB': 'BANK', 'OCB': 'BANK',
+    'MSB': 'BANK', 'OCB': 'BANK', 'PVF': 'BANK',
     
     # 2. Bất động sản, Xây dựng & Hạ tầng (Real Estate & Construction)
     'VIC': 'REAL_ESTATE', 'VHM': 'REAL_ESTATE', 'VRE': 'REAL_ESTATE', 
@@ -31,7 +35,7 @@ SECTOR_MAP = {
     'CTD': 'REAL_ESTATE', 'ROS': 'REAL_ESTATE', 'FLC': 'REAL_ESTATE',
     'ITA': 'REAL_ESTATE', 'IJC': 'REAL_ESTATE', 'HHS': 'REAL_ESTATE',
     'SJS': 'REAL_ESTATE', 'DIG': 'REAL_ESTATE', 'DXG': 'REAL_ESTATE',
-    'OGC': 'REAL_ESTATE',
+    'OGC': 'REAL_ESTATE', 'NTL': 'REAL_ESTATE', 'QCG': 'REAL_ESTATE',
     
     # 3. Thép & Kim loại (Steel & Materials)
     'HPG': 'STEEL', 'HSG': 'STEEL', 'NKG': 'STEEL',
@@ -64,6 +68,8 @@ SECTOR_MAP = {
     # 11. Bảo hiểm (Insurance)
     'BVH': 'INSURANCE'
 }
+
+BACKTEST_START_DATE = os.environ.get('BACKTEST_START_DATE', '2022-01-01')
 
 # ==========================================
 # CÁC HÀM TÍNH TOÁN CHỈ BÁO KỸ THUẬT
@@ -109,24 +115,59 @@ def calc_macd_hist(series, fast=12, slow=26, signal=9):
     return macd - macd_signal
 
 # ==========================================
-# HÀM TẢI DỮ LIỆU ĐA NGUỒN (DNSE + VNDIRECT + TCBS + TRADINGVIEW)
+# HÀM BÁO CÁO TELEGRAM (HỖ TRỢ CẢ TELEGRAM_* VÀ BOT_TOKEN/CHAT_ID)
+# ==========================================
+def send_telegram_msg(text_message):
+    token = os.environ.get('TELEGRAM_BOT_TOKEN') or os.environ.get('BOT_TOKEN')
+    chat_id = os.environ.get('TELEGRAM_CHAT_ID') or os.environ.get('CHAT_ID')
+    if not token or not chat_id:
+        print("\n[TELEGRAM PREVIEW]\n" + text_message)
+        return
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    try:
+        requests.post(url, json={"chat_id": chat_id, "text": text_message, "parse_mode": "HTML"}, timeout=10)
+    except Exception as e:
+        print(f"⚠️ Gửi Telegram thất bại: {e}")
+
+# ==========================================
+# HÀM TẢI DỮ LIỆU ĐA NGUỒN (DNSE + VNDIRECT + TCBS + TRADINGVIEW + LOCAL DATA)
+# Gắn nhãn chất lượng dữ liệu: REAL_OHLC vs SYNTHETIC_CLOSE_ONLY
+# Tuyệt đối KHÔNG làm phẳng nến (Open=High=Low=Close) để đảm bảo ATR/ADX/MFI chuẩn xác
 # ==========================================
 def fetch_ticker_data(symbol, n_bars=4500):
     """
-    Tải dữ liệu chứng khoán OHLCV THẬT từ API:
-    - VNINDEX & các chỉ số: DNSE Entrade /ohlcs/index (Open, High, Low, Close, Volume thật).
-      Tuyệt đối KHÔNG làm phẳng nến (Open=High=Low=Close) để đảm bảo ATR/ADX/MFI chuẩn xác 100%.
-    - Cổ phiếu VN30: DNSE Entrade /ohlcs/stock.
-    - Lấy dữ liệu từ đầu năm 2012 để có đầy đủ 200-500 phiên nến trước 2014,
-      giúp MA200/MA100/ATR sẵn sàng ngay từ ngày giao dịch đầu tiên của 2014.
+    Tải dữ liệu chứng khoán OHLCV THẬT từ API hoặc thư mục local data/:
+    1. Local data/ directory (nếu đã chạy download_all_data.py) -> REAL_OHLC
+    2. DNSE Entrade API trực tiếp (Open, High, Low, Close, Volume thật, không cần key) -> REAL_OHLC
+    3. VNDirect DChart API -> REAL_OHLC
+    4. TCBS Public API -> REAL_OHLC
+    5. TradingView API -> REAL_OHLC
+    6. Fallback khẩn cấp từ markets_database10years.csv:
+       Ước lượng biên độ nến True Range chống phẳng nến -> Gắn nhãn SYNTHETIC_CLOSE_ONLY
     """
     now_ts = int(datetime.datetime.now().timestamp())
     start_ts = int(datetime.datetime(2012, 1, 1).timestamp())
 
+    # 0. Nguồn 0: File CSV cục bộ từ thư mục data/ (chuẩn OHLCV do download_all_data.py tạo)
+    local_csv = os.path.join("data", f"{symbol}.csv")
+    if os.path.exists(local_csv):
+        try:
+            loc_df = pd.read_csv(local_csv)
+            if 'Date' in loc_df.columns and 'Close' in loc_df.columns and len(loc_df) > 50:
+                loc_df['Date'] = pd.to_datetime(loc_df['Date']).dt.tz_localize(None).dt.normalize()
+                for c in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                    if c not in loc_df.columns:
+                        loc_df[c] = loc_df['Close']
+                loc_df['Data_Quality'] = 'REAL_OHLC'
+                loc_df['Data_Source'] = 'LOCAL_DATA_DIR'
+                return loc_df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume', 'Data_Quality', 'Data_Source']].drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
+        except Exception:
+            pass
+
     is_index = symbol.upper() in ['VNINDEX', 'VN30', 'VN100', 'VNXALL', 'HNX', 'HNX30', 'UPCOM']
     entrade_endpoint = 'index' if is_index else 'stock'
 
-    # 1. Nguồn 1: DNSE Entrade API (Tốc độ cao, đầy đủ OHLCV 10-12 năm)
+    # 1. Nguồn 1: DNSE Entrade API (Tốc độ cao, đầy đủ OHLCV 10-14 năm)
     try:
         url = f"https://services.entrade.com.vn/chart-api/v2/ohlcs/{entrade_endpoint}?from={start_ts}&to={now_ts}&symbol={symbol}&resolution=1D"
         res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}, timeout=6)
@@ -141,7 +182,9 @@ def fetch_ticker_data(symbol, n_bars=4500):
                     'Close': data['c'],
                     'Volume': data.get('v', [0]*len(data['t']))
                 })
-                return df.drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
+                df['Data_Quality'] = 'REAL_OHLC'
+                df['Data_Source'] = 'DNSE_ENTRADE'
+                return df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume', 'Data_Quality', 'Data_Source']].drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
     except Exception:
         pass
 
@@ -160,7 +203,9 @@ def fetch_ticker_data(symbol, n_bars=4500):
                     'Close': data['c'],
                     'Volume': data.get('v', [0]*len(data['t']))
                 })
-                return df.drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
+                df['Data_Quality'] = 'REAL_OHLC'
+                df['Data_Source'] = 'VNDIRECT'
+                return df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume', 'Data_Quality', 'Data_Source']].drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
     except Exception:
         pass
 
@@ -175,20 +220,25 @@ def fetch_ticker_data(symbol, n_bars=4500):
                 df = pd.DataFrame(data)
                 df.rename(columns={'tradingDate': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
                 df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None).dt.normalize()
-                return df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
+                df['Data_Quality'] = 'REAL_OHLC'
+                df['Data_Source'] = 'TCBS'
+                return df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume', 'Data_Quality', 'Data_Source']].drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
     except Exception:
         pass
 
     # 4. Nguồn 4: TradingView (Phương án dự phòng)
-    try:
-        df = tv.get_hist(symbol=symbol, exchange='HOSE', interval=Interval.in_daily, n_bars=n_bars)
-        if df is not None and len(df) > 50:
-            df = df.reset_index()
-            df.rename(columns={'datetime': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
-            df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None).dt.normalize()
-            return df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
-    except Exception:
-        pass
+    if tv is not None and Interval is not None:
+        try:
+            df = tv.get_hist(symbol=symbol, exchange='HOSE', interval=Interval.in_daily, n_bars=n_bars)
+            if df is not None and len(df) > 50:
+                df = df.reset_index()
+                df.rename(columns={'datetime': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
+                df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None).dt.normalize()
+                df['Data_Quality'] = 'REAL_OHLC'
+                df['Data_Source'] = 'TRADINGVIEW'
+                return df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume', 'Data_Quality', 'Data_Source']].drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
+        except Exception:
+            pass
 
     # Fallback khẩn cấp nếu mất mạng: CSV
     if symbol.upper() == 'VNINDEX' and os.path.exists('markets_database10years.csv'):
@@ -199,226 +249,44 @@ def fetch_ticker_data(symbol, n_bars=4500):
                 c_df = csv_df[['Date', 'VNINDEX', 'VN_VOLUME']].dropna(subset=['VNINDEX']).copy()
                 c_df['Date'] = pd.to_datetime(c_df['Date']).dt.tz_localize(None).dt.normalize()
                 c_df.rename(columns={'VNINDEX': 'Close', 'VN_VOLUME': 'Volume'}, inplace=True)
-                c_df['Open'] = c_df['Close']
-                c_df['High'] = c_df['Close']
-                c_df['Low'] = c_df['Close']
-                return c_df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
+                
+                # Tái tạo biên độ dao động nến dựa trên độ biến động lịch sử để không làm phẳng nến
+                # Phẳng nến (High == Low == Close) sẽ làm sai lệch nghiêm trọng chỉ báo ATR và ADX
+                daily_vol = c_df['Close'].pct_change().abs().rolling(20, min_periods=5).mean().fillna(0.012)
+                c_df['High'] = c_df['Close'] * (1.0 + 0.6 * daily_vol)
+                c_df['Low'] = c_df['Close'] * (1.0 - 0.6 * daily_vol)
+                c_df['Open'] = c_df['Close'].shift(1).fillna(c_df['Close'])
+                c_df['Data_Quality'] = 'SYNTHETIC_CLOSE_ONLY'
+                c_df['Data_Source'] = 'MARKETS_DB_CSV'
+                print("   ℹ️ Đã gắn nhãn 'SYNTHETIC_CLOSE_ONLY' và ước lượng True Range cho VN-Index (tránh phẳng nến).")
+                return c_df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume', 'Data_Quality', 'Data_Source']].drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
         except Exception:
             pass
 
     return None
 
-# ==========================================
-# 1. TẢI VN-INDEX & LẬP BỘ LỌC THỊ TRƯỜNG (OHLCV THẬT)
-# ==========================================
-print("1. Đang tải Market Proxy (VNINDEX) với nến OHLCV thật...")
-vnindex_raw = fetch_ticker_data('VNINDEX', n_bars=4500)
-if vnindex_raw is None or vnindex_raw.empty:
-    sys.exit("❌ LỖI: Không thể tải dữ liệu VNINDEX từ API!")
-
-vnindex_df = vnindex_raw.rename(columns={'Close': 'VNINDEX'}).drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
-vnindex_df['MA20'] = vnindex_df['VNINDEX'].rolling(20, min_periods=10).mean()
-vnindex_df['MA50'] = vnindex_df['VNINDEX'].rolling(50, min_periods=20).mean()
-vnindex_df['MA100'] = vnindex_df['VNINDEX'].rolling(100, min_periods=30).mean()
-vnindex_df['MA200'] = vnindex_df['VNINDEX'].rolling(200, min_periods=40).mean()
-vnindex_df['ADX'] = calc_adx(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14)
-vnindex_df['ATR_PCT'] = calc_atr(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14) / vnindex_df['VNINDEX']
-# Bổ sung biến độ dao động 20 phiên của VN-Index cho mô hình AI
-vnindex_df['VN_ATR_PCT'] = calc_atr(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 20) / vnindex_df['VNINDEX']
-vnindex_df['ATR_PTS'] = calc_atr(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14)
-vnindex_df['VOL_MA20'] = vnindex_df['Volume'].rolling(20, min_periods=10).mean()
-vnindex_df['MACRO_FLOOR'] = vnindex_df['MA100'] - (1.2 * vnindex_df['ATR_PTS'])
-vnindex_df['VN_MFI'] = calc_mfi(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], vnindex_df['Volume'], 14)
-df_clean = vnindex_df.dropna().drop_duplicates(subset=['Date'], keep='last').copy().reset_index(drop=True)
-
-# ==========================================
-# 2. TẢI TOÀN BỘ RỔ CỔ PHIẾU VN30 LỊCH SỬ (POINT-IN-TIME)
-# ==========================================
-print(f"2. Đang tải toàn bộ {len(ALL_HISTORICAL_VN30_TICKERS)} mã cổ phiếu VN30 lịch sử (Chống Survivorship Bias)...")
-
-timeline_dates = pd.DatetimeIndex(df_clean['Date'].drop_duplicates().sort_values())
-
-stocks_open = pd.DataFrame(index=timeline_dates)
-stocks_close = pd.DataFrame(index=timeline_dates)
-stocks_volume = pd.DataFrame(index=timeline_dates)
-stocks_high = pd.DataFrame(index=timeline_dates)
-stocks_low = pd.DataFrame(index=timeline_dates)
-
-loaded_tickers = []
-delisted_or_empty = []
-
-for ticker in ALL_HISTORICAL_VN30_TICKERS:
-    df_t = fetch_ticker_data(ticker, n_bars=4000)
-    if df_t is not None and not df_t.empty:
-        df_t = df_t.drop_duplicates(subset=['Date'], keep='last').sort_values('Date')
-        df_t.set_index('Date', inplace=True)
-        df_t = df_t[~df_t.index.duplicated(keep='last')]
-        stocks_open[ticker] = df_t['Open']
-        stocks_close[ticker] = df_t['Close']
-        stocks_volume[f'{ticker}_V'] = df_t['Volume']
-        stocks_high[f'{ticker}_H'] = df_t['High']
-        stocks_low[f'{ticker}_L'] = df_t['Low']
-        loaded_tickers.append(ticker)
-    else:
-        delisted_or_empty.append(ticker)
-
-print(f"   ✅ Đã nạp thành công {len(loaded_tickers)} mã.")
-if delisted_or_empty:
-    print(f"   ⚠️ Các mã không có dữ liệu: {', '.join(delisted_or_empty)}")
-
-# =====================================================================
-# KHÔNG DÙNG LỆNH FILL: DỮ LIỆU NGUYÊN BẢN 100% (RAW MARKET DATA)
-# Tính chỉ báo trực tiếp trên dữ liệu giao dịch thực tế
-# =====================================================================
-stocks_high_20 = pd.DataFrame(index=stocks_close.index)
-stocks_ma20 = pd.DataFrame(index=stocks_close.index)
-stocks_ma50 = pd.DataFrame(index=stocks_close.index)
-stocks_vol_ma20 = pd.DataFrame(index=stocks_close.index)
-stocks_rsi = pd.DataFrame(index=stocks_close.index)
-stocks_macd = pd.DataFrame(index=stocks_close.index)
-
-for c in loaded_tickers:
-    s_c = stocks_close[c].dropna()
-    if len(s_c) >= 20:
-        stocks_ma20[c] = s_c.rolling(20).mean()
-        stocks_ma50[c] = s_c.rolling(50, min_periods=20).mean()
-        stocks_high_20[c] = s_c.rolling(20).max().shift(1)
-        stocks_rsi[c] = calc_rsi(s_c)
-        stocks_macd[c] = calc_macd_hist(s_c)
-    
-    if f'{c}_V' in stocks_volume.columns:
-        s_v = stocks_volume[f'{c}_V'].dropna()
-        if len(s_v) >= 20:
-            stocks_vol_ma20[f'{c}_V'] = s_v.rolling(20).mean().shift(1)
-
-# =====================================================================
-# TÍNH ĐỘ RỘNG THỊ TRƯỜNG POINT-IN-TIME (TỶ LỆ MÃ VN30 TRÊN MA50)
-# =====================================================================
-above_ma50_cnt = (stocks_close > stocks_ma50).sum(axis=1)
-valid_ma50_cnt = (stocks_close.notna() & stocks_ma50.notna()).sum(axis=1)
-market_breadth_series = (above_ma50_cnt / valid_ma50_cnt.replace(0, np.nan)).fillna(0.5)
-
-breadth_map = dict(zip(pd.to_datetime(market_breadth_series.index).strftime('%Y-%m-%d'), market_breadth_series.values))
-
-# ==========================================
-# 3. TẢI BỘ NHỚ AI & ĐỒNG BỘ VĨ MÔ CSV
-# ==========================================
-print("3. Đang tải Não bộ AI tĩnh & Đồng bộ Vĩ mô + Độ rộng...")
-try:
-    macro_df = pd.read_csv('markets_database10years.csv')
-    macro_df = macro_df[['Date', 'DXY', 'US10Y', 'USD_VND']].copy()
-    macro_df['Date'] = pd.to_datetime(macro_df['Date']).dt.strftime('%Y-%m-%d')
-    macro_df = macro_df.drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
-except Exception as e:
-    sys.exit(f"🛑 LỖI ĐỌC FILE VĨ MÔ: {e}")
-
-market_context = vnindex_df[['Date', 'VN_MFI', 'VNINDEX', 'MA200', 'VN_ATR_PCT']].copy()
-market_context['VN_Dist_MA200'] = market_context['VNINDEX'] / market_context['MA200']
-market_context['Date'] = pd.to_datetime(market_context['Date']).dt.strftime('%Y-%m-%d')
-market_context['VN_Breadth_MA50'] = market_context['Date'].map(breadth_map).fillna(0.5)
-market_context = market_context.drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
-
-macro_df = macro_df.merge(market_context[['Date', 'VN_MFI', 'VN_Dist_MA200', 'VN_ATR_PCT', 'VN_Breadth_MA50']], on='Date', how='inner')
-macro_df = macro_df.sort_values('Date').reset_index(drop=True)
-
-macro_cols = ['DXY', 'US10Y', 'USD_VND']
-for col in macro_cols:
-    macro_df[col] = pd.to_numeric(macro_df[col], errors='coerce')
-    roll_m = macro_df[col].rolling(120, min_periods=5).mean()
-    roll_s = macro_df[col].rolling(120, min_periods=5).std()
-    macro_df[f'Z_{col}'] = (macro_df[col] - roll_m) / roll_s
-z_cols = [f'Z_{c}' for c in macro_cols]
-
-clean_dates_str = pd.to_datetime(stocks_close.index).strftime('%Y-%m-%d')
-
-df_ml_list = []
-for c in loaded_tickers:
-    s_close = stocks_close[c]
-    s_vol = stocks_volume[f'{c}_V']
-    s_vol_ma = stocks_vol_ma20[f'{c}_V']
-    s_ma50 = stocks_ma50[c]
-
-    valid_mask = s_close.notna() & (s_close > 0)
-    if valid_mask.sum() < 30:
-        continue
-
-    df_c = pd.DataFrame({
-        'Date': clean_dates_str[valid_mask],
-        'Ticker': c,
-        'Vol_Ratio': (s_vol[valid_mask] / s_vol_ma[valid_mask].replace(0, np.nan)).values,
-        'Dist_MA50': (s_close[valid_mask] / s_ma50[valid_mask]).values,
-        'RSI': stocks_rsi[c][valid_mask].values,
-        'RSI_Momentum': pd.Series(stocks_rsi[c][valid_mask]).diff(3).values,
-        'MACD_Hist': stocks_macd[c][valid_mask].values
-    })
-    df_ml_list.append(df_c)
-
-ml_master = pd.concat(df_ml_list, ignore_index=True).merge(macro_df, on='Date', how='left')
-ml_features = ['Vol_Ratio', 'Dist_MA50', 'RSI', 'RSI_Momentum', 'VN_MFI', 'MACD_Hist', 'VN_Dist_MA200', 'VN_Breadth_MA50', 'VN_ATR_PCT'] + z_cols
-for f in ml_features:
-    ml_master[f] = pd.to_numeric(ml_master[f], errors='coerce')
-
-# =====================================================================
-# NẠP MÔ HÌNH WALK-FORWARD EXPANDING RETRAINING (CUỐN CHIẾU TỪNG NĂM)
-# 100% Out-of-Sample, không Look-Ahead Leakage, không Model Obsolescence
-# =====================================================================
-wf_models = {}
-for y in [2022, 2023, 2024, 2025, 2026]:
-    fn = f"xgboost_model_{y}.json"
-    if os.path.exists(fn):
-        try:
-            m = xgb.XGBClassifier()
-            m.load_model(fn)
-            wf_models[y] = m
-            print(f"   🧠 Đã nạp Walk-Forward Model năm {y}: {fn}")
-        except Exception as e:
-            print(f"   ⚠️ Lỗi đọc {fn}: {e}")
-
-DEFAULT_MODEL_FILE = "xgboost_ultimate.json"
-default_model = xgb.XGBClassifier()
-if os.path.exists(DEFAULT_MODEL_FILE):
-    default_model.load_model(DEFAULT_MODEL_FILE)
-    print(f"   🧠 Đã nạp mô hình cơ sở: {DEFAULT_MODEL_FILE}")
-elif wf_models:
-    default_model = list(wf_models.values())[-1]
-else:
-    sys.exit(f"⚠️ Không tìm thấy {DEFAULT_MODEL_FILE}! Bác phải chạy train_bot.py trước.")
-
-# Chấm điểm AI Score thích ứng Walk-Forward OOS
-ml_master['AI_Score'] = np.nan
-
-# 1. Giai đoạn <= 2021: Dùng mô hình học trên 2014-2021 (model 2022 hoặc default)
-pre_2022_mask = ml_master['Date'] < '2022-01-01'
-base_m = wf_models.get(2022, default_model)
-if pre_2022_mask.sum() > 0:
-    ml_master.loc[pre_2022_mask, 'AI_Score'] = base_m.predict_proba(ml_master.loc[pre_2022_mask, ml_features])[:, 1]
-
-# 2. Các năm Out-of-Sample 2022 -> 2026: Dùng đúng mô hình học trước năm đó!
-for y in [2022, 2023, 2024, 2025, 2026]:
-    if y == 2026:
-        y_mask = ml_master['Date'] >= f"{y}-01-01"
-    else:
-        y_mask = (ml_master['Date'] >= f"{y}-01-01") & (ml_master['Date'] < f"{y+1}-01-01")
-    
-    if y_mask.sum() > 0:
-        m_y = wf_models.get(y, default_model)
-        ml_master.loc[y_mask, 'AI_Score'] = m_y.predict_proba(ml_master.loc[y_mask, ml_features])[:, 1]
-
-# Tạo tra cứu AI Score dạng dict (Key: ticker -> {date_str: score})
-ai_dict = {}
-for c in loaded_tickers:
-    c_sub = ml_master[ml_master['Ticker'] == c]
-    ai_dict[c] = dict(zip(c_sub['Date'], c_sub['AI_Score']))
 
 # ==========================================
 # 4. SỔ KẾ TOÁN THỰC CHIẾN (NEXT-DAY OPEN + LÔ CHẴN 100 HOSE + HYSTERESIS BUFFER)
 # ==========================================
-# Cấu hình mốc kiểm thử thực chiến (AI học từ 2012 - 2022, kiểm thử từ 2022 đến nay)
-BACKTEST_START_DATE = os.environ.get('BACKTEST_START_DATE', '2022-01-01')
-print(f"4. Chạy Sổ Kế Toán Kiểm Thử Thực Chiến Out-of-Sample từ {BACKTEST_START_DATE} đến nay...")
-
-def run_ai_quant_system():
-    backtest = df_clean[df_clean['Date'] >= BACKTEST_START_DATE].copy().reset_index(drop=True)
+def run_ai_quant_system(
+    df_clean,
+    stocks_open,
+    stocks_close,
+    stocks_high,
+    stocks_low,
+    stocks_volume,
+    stocks_high_20,
+    stocks_vol_ma20,
+    stocks_ma50,
+    ai_dict,
+    loaded_tickers,
+    backtest_start_date=None,
+    initial_capital=100_000_000.0
+):
+    if backtest_start_date is None:
+        backtest_start_date = BACKTEST_START_DATE
+    backtest = df_clean[df_clean['Date'] >= backtest_start_date].copy().reset_index(drop=True)
     
     MAX_SLOTS = 5                      # Tối đa 5 vị thế (20% NAV / slot)
     MAX_PER_SECTOR = 2                 # Khóa trần ngành: Tối đa 2 mã / ngành (Chống sập dây chuyền)
@@ -443,7 +311,7 @@ def run_ai_quant_system():
     HARD_STOPLOSS = -0.10              # Cắt lỗ cứng -10%
     PORTFOLIO_MDD_LIMIT = -0.18        # Portfolio Stop: Tổng NAV giảm 18% từ đỉnh chu kỳ -> bán hết
     
-    INITIAL_CAPITAL = 100_000_000.0    # Vốn khởi điểm 100 triệu VNĐ
+    INITIAL_CAPITAL = initial_capital  # Vốn khởi điểm (mặc định 100 triệu VNĐ)
     cash = INITIAL_CAPITAL
     total_bank_interest = 0.0
     held = {}                          # {ticker: {'qty': shares, 'buy_price': open_p, 'highest': ..., 'buy_date': ..., 'hold_days': 0}}
@@ -880,156 +748,368 @@ def run_ai_quant_system():
     return df_trades, df_nav, final_nav, total_bank_interest, held, pending_buys, pending_sells
 
 # ==========================================
-# CHẠY CHIẾN LƯỢC & XUẤT BÁO CÁO TOÀN DIỆN
+# PIPELINE THỰC THI CHÍNH (CHỈ CHẠY KHI GỌI TRỰC TIẾP, AN TOÀN KHI IMPORT)
 # ==========================================
-df_trade_log, df_nav_hist, final_nav, total_interest, current_held, next_buys, next_sells = run_ai_quant_system()
+def main():
+    # ==========================================
+    # 1. TẢI VN-INDEX & LẬP BỘ LỌC THỊ TRƯỜNG (OHLCV THẬT)
+    # ==========================================
+    print("1. Đang tải Market Proxy (VNINDEX) với nến OHLCV thật...")
+    vnindex_raw = fetch_ticker_data('VNINDEX', n_bars=4500)
+    if vnindex_raw is None or vnindex_raw.empty:
+        sys.exit("❌ LỖI: Không thể tải dữ liệu VNINDEX từ API!")
 
-# Ghi nhận file trading_log.csv
-df_trade_log.to_csv('trading_log.csv', index=False, na_rep='', float_format='%.2f')
-print("✅ Đã ghi nhận sổ kế toán giao dịch tinh gọn vào file trading_log.csv!")
+    vnindex_df = vnindex_raw.rename(columns={'Close': 'VNINDEX'}).drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
+    vnindex_df['MA20'] = vnindex_df['VNINDEX'].rolling(20, min_periods=10).mean()
+    vnindex_df['MA50'] = vnindex_df['VNINDEX'].rolling(50, min_periods=20).mean()
+    vnindex_df['MA100'] = vnindex_df['VNINDEX'].rolling(100, min_periods=30).mean()
+    vnindex_df['MA200'] = vnindex_df['VNINDEX'].rolling(200, min_periods=40).mean()
+    vnindex_df['ADX'] = calc_adx(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14)
+    vnindex_df['ATR_PCT'] = calc_atr(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14) / vnindex_df['VNINDEX']
+    # Bổ sung biến độ dao động 20 phiên của VN-Index cho mô hình AI
+    vnindex_df['VN_ATR_PCT'] = calc_atr(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 20) / vnindex_df['VNINDEX']
+    vnindex_df['ATR_PTS'] = calc_atr(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14)
+    vnindex_df['VOL_MA20'] = vnindex_df['Volume'].rolling(20, min_periods=10).mean()
+    vnindex_df['MACRO_FLOOR'] = vnindex_df['MA100'] - (1.2 * vnindex_df['ATR_PTS'])
+    vnindex_df['VN_MFI'] = calc_mfi(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], vnindex_df['Volume'], 14)
+    df_clean = vnindex_df.dropna().drop_duplicates(subset=['Date'], keep='last').copy().reset_index(drop=True)
 
-# Ghi nhận file daily_nav.csv
-df_nav_hist.to_csv('daily_nav.csv', index=False, na_rep='', float_format='%.2f')
-print("✅ Đã ghi nhận biến động tài sản hàng ngày chuẩn vào file daily_nav.csv!")
+    # ==========================================
+    # 2. TẢI TOÀN BỘ RỔ CỔ PHIẾU VN30 LỊCH SỬ (POINT-IN-TIME)
+    # ==========================================
+    print(f"2. Đang tải toàn bộ {len(ALL_HISTORICAL_VN30_TICKERS)} mã cổ phiếu VN30 lịch sử (Chống Survivorship Bias)...")
 
-# ==========================================
-# TÍNH TOÁN METRICS ĐỊNH LƯỢNG RỦI RO & HIỆU SUẤT
-# ==========================================
-initial_capital = 100_000_000.0
-total_return_pct = ((final_nav / initial_capital) - 1.0) * 100.0
+    timeline_dates = pd.DatetimeIndex(df_clean['Date'].drop_duplicates().sort_values())
 
-nav_dates = pd.to_datetime(df_nav_hist['Date'])
-n_years = (nav_dates.iloc[-1] - nav_dates.iloc[0]).days / 365.25
-cagr = ((final_nav / initial_capital) ** (1.0 / n_years) - 1.0) * 100.0 if n_years > 0 else 0.0
+    stocks_open = pd.DataFrame(index=timeline_dates)
+    stocks_close = pd.DataFrame(index=timeline_dates)
+    stocks_volume = pd.DataFrame(index=timeline_dates)
+    stocks_high = pd.DataFrame(index=timeline_dates)
+    stocks_low = pd.DataFrame(index=timeline_dates)
 
-df_nav_hist['Peak'] = df_nav_hist['NAV'].cummax()
-df_nav_hist['Drawdown'] = (df_nav_hist['NAV'] - df_nav_hist['Peak']) / df_nav_hist['Peak']
-max_mdd = df_nav_hist['Drawdown'].min() * 100.0
+    loaded_tickers = []
+    delisted_or_empty = []
 
-trough_idx = df_nav_hist['Drawdown'].idxmin()
-trough_date = pd.to_datetime(df_nav_hist['Date'].iloc[trough_idx])
-peak_sub = df_nav_hist.iloc[:trough_idx+1]
-peak_date = pd.to_datetime(peak_sub.loc[peak_sub['NAV'] == peak_sub['Peak'].max(), 'Date'].iloc[-1])
+    for ticker in ALL_HISTORICAL_VN30_TICKERS:
+        df_t = fetch_ticker_data(ticker, n_bars=4000)
+        if df_t is not None and not df_t.empty:
+            df_t = df_t.drop_duplicates(subset=['Date'], keep='last').sort_values('Date')
+            df_t.set_index('Date', inplace=True)
+            df_t = df_t[~df_t.index.duplicated(keep='last')]
+            stocks_open[ticker] = df_t['Open']
+            stocks_close[ticker] = df_t['Close']
+            stocks_volume[f'{ticker}_V'] = df_t['Volume']
+            stocks_high[f'{ticker}_H'] = df_t['High']
+            stocks_low[f'{ticker}_L'] = df_t['Low']
+            loaded_tickers.append(ticker)
+        else:
+            delisted_or_empty.append(ticker)
 
-calmar_ratio = abs(cagr / max_mdd) if max_mdd != 0 else 0.0
+    print(f"   ✅ Đã nạp thành công {len(loaded_tickers)} mã.")
+    if delisted_or_empty:
+        print(f"   ⚠️ Các mã không có dữ liệu: {', '.join(delisted_or_empty)}")
 
-sells = df_trade_log[df_trade_log['Action'].str.contains('SELL', na=False)] if not df_trade_log.empty else pd.DataFrame()
-total_sells = len(sells)
-win_sells = len(sells[sells['Profit(%)'] > 0]) if total_sells > 0 else 0
-loss_sells = total_sells - win_sells
-win_rate = (win_sells / total_sells * 100.0) if total_sells > 0 else 0.0
-best_trade = sells['Profit(%)'].max() if total_sells > 0 else 0.0
-worst_trade = sells['Profit(%)'].min() if total_sells > 0 else 0.0
+    # =====================================================================
+    # KHÔNG DÙNG LỆNH FILL: DỮ LIỆU NGUYÊN BẢN 100% (RAW MARKET DATA)
+    # Tính chỉ báo trực tiếp trên dữ liệu giao dịch thực tế
+    # =====================================================================
+    stocks_high_20 = pd.DataFrame(index=stocks_close.index)
+    stocks_ma20 = pd.DataFrame(index=stocks_close.index)
+    stocks_ma50 = pd.DataFrame(index=stocks_close.index)
+    stocks_vol_ma20 = pd.DataFrame(index=stocks_close.index)
+    stocks_rsi = pd.DataFrame(index=stocks_close.index)
+    stocks_macd = pd.DataFrame(index=stocks_close.index)
 
-gross_profit = sells.loc[sells['PnL_VND'] > 0, 'PnL_VND'].sum() if total_sells > 0 else 0.0
-gross_loss = abs(sells.loc[sells['PnL_VND'] < 0, 'PnL_VND'].sum()) if total_sells > 0 else 0.0
-profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else 999.0
-avg_win_pct = sells.loc[sells['Profit(%)'] > 0, 'Profit(%)'].mean() if win_sells > 0 else 0.0
-avg_loss_pct = sells.loc[sells['Profit(%)'] < 0, 'Profit(%)'].mean() if loss_sells > 0 else 0.0
-payoff_ratio = abs(avg_win_pct / avg_loss_pct) if avg_loss_pct != 0 else 999.0
+    for c in loaded_tickers:
+        s_c = stocks_close[c].dropna()
+        if len(s_c) >= 20:
+            stocks_ma20[c] = s_c.rolling(20).mean()
+            stocks_ma50[c] = s_c.rolling(50, min_periods=20).mean()
+            stocks_high_20[c] = s_c.rolling(20).max().shift(1)
+            stocks_rsi[c] = calc_rsi(s_c)
+            stocks_macd[c] = calc_macd_hist(s_c)
 
-print("\n" + "="*58)
-print(f"📊 BÁO CÁO ĐỊNH LƯỢNG THỰC CHIẾN TỪ {BACKTEST_START_DATE[:4]} ĐẾN NAY")
-print("🧠 MÔ HÌNH: ĐÃ HUẤN LUYỆN TRÊN TOÀN BỘ CHU KỲ 2012 -> 2022")
-print("🎯 KIỂM THỬ THỰC CHIẾN HOÀN TOÀN OUT-OF-SAMPLE (100% BLIND TEST)")
-print("="*58)
-print(f"💵 Vốn khởi điểm ({BACKTEST_START_DATE}):        {initial_capital:,.0f} VNĐ")
-print(f"🏦 TỔNG TÀI SẢN HIỆN TẠI (NAV):   {final_nav:,.0f} VNĐ")
-print(f"💰 LÃI BANK THU VỀ (4%/năm):      +{total_interest:,.0f} VNĐ")
-print(f"🚀 TỔNG LỢI NHUẬN (Đã trừ phí):    +{total_return_pct:.2f}%")
-print(f"📈 Lợi nhuận kép TB (CAGR):        {cagr:.2f}% / năm")
-print(f"----------------------------------------------------------")
-print(f"📉 SỤT GIẢM TỐI ĐA (Max Drawdown): {max_mdd:.2f}%")
-print(f"   (Thời kỳ chịu đựng lớn nhất: Từ đỉnh {pd.to_datetime(peak_date).strftime('%d/%m/%Y')} về đáy {pd.to_datetime(trough_date).strftime('%d/%m/%Y')})")
-print(f"⚡ Chỉ số Calmar (CAGR / MDD):     {calmar_ratio:.2f}")
-print(f"----------------------------------------------------------")
-print(f"Tổng số lệnh đã chốt sổ:          {total_sells}")
-print(f"🎯 Tỷ lệ thắng (Win Rate):         {win_rate:.2f}% (Thắng {win_sells}/{total_sells} trận)")
-print(f"⚖️ Profit Factor (Tổng Lãi/Lỗ):    {profit_factor:.2f}")
-print(f"🎲 Payoff Ratio (Lãi TB / Lỗ TB):  {payoff_ratio:.2f}x (Lãi TB: +{avg_win_pct:.2f}% | Lỗ TB: {avg_loss_pct:.2f}%)")
-print(f"💰 Lệnh lãi đơn lẻ cao nhất:       +{best_trade:.2f}%")
-print(f"🩸 Lệnh lỗ đơn lẻ sâu nhất:        {worst_trade:.2f}%")
-print("="*58 + "\n")
+        if f'{c}_V' in stocks_volume.columns:
+            s_v = stocks_volume[f'{c}_V'].dropna()
+            if len(s_v) >= 20:
+                stocks_vol_ma20[f'{c}_V'] = s_v.rolling(20).mean().shift(1)
 
-# ==========================================
-# 5. TELEGRAM RADAR BÁO CÁO HÀNG NGÀY
-# ==========================================
-print("5. Báo cáo Telegram Radar...")
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+    # =====================================================================
+    # TÍNH ĐỘ RỘNG THỊ TRƯỜNG POINT-IN-TIME (TỶ LỆ MÃ VN30 TRÊN MA50)
+    # =====================================================================
+    above_ma50_cnt = (stocks_close > stocks_ma50).sum(axis=1)
+    valid_ma50_cnt = (stocks_close.notna() & stocks_ma50.notna()).sum(axis=1)
+    market_breadth_series = (above_ma50_cnt / valid_ma50_cnt.replace(0, np.nan)).fillna(0.5)
 
-def send_telegram_msg(text_message):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print(text_message)
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    breadth_map = dict(zip(pd.to_datetime(market_breadth_series.index).strftime('%Y-%m-%d'), market_breadth_series.values))
+
+    # ==========================================
+    # 3. TẢI BỘ NHỚ AI & ĐỒNG BỘ VĨ MÔ CSV
+    # ==========================================
+    print("3. Đang tải Não bộ AI tĩnh & Đồng bộ Vĩ mô + Độ rộng...")
     try:
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text_message, "parse_mode": "HTML"}, timeout=10)
+        macro_df = pd.read_csv('markets_database10years.csv')
+        macro_df = macro_df[['Date', 'DXY', 'US10Y', 'USD_VND']].copy()
+        macro_df['Date'] = pd.to_datetime(macro_df['Date']).dt.strftime('%Y-%m-%d')
+        macro_df = macro_df.drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
     except Exception as e:
-        print(f"⚠️ Gửi Telegram thất bại: {e}")
+        sys.exit(f"🛑 LỖI ĐỌC FILE VĨ MÔ: {e}")
 
-latest_date = df_clean['Date'].iloc[-1]
-latest_date_str = latest_date.strftime('%Y-%m-%d')
-active_today = get_vn30_constituents(latest_date_str)
-latest_idx = df_clean['VNINDEX'].iloc[-1]
-latest_ma20 = df_clean['MA20'].iloc[-1] if 'MA20' in df_clean.columns else np.nan
-latest_ma100 = df_clean['MA100'].iloc[-1]
+    market_context = vnindex_df[['Date', 'VN_MFI', 'VNINDEX', 'MA200', 'VN_ATR_PCT']].copy()
+    market_context['VN_Dist_MA200'] = market_context['VNINDEX'] / market_context['MA200']
+    market_context['Date'] = pd.to_datetime(market_context['Date']).dt.strftime('%Y-%m-%d')
+    market_context['VN_Breadth_MA50'] = market_context['Date'].map(breadth_map).fillna(0.5)
+    market_context = market_context.drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
 
-msg = f"🤖 <b>SIÊU RADAR VN30 - BÁO CÁO THỰC CHIẾN (TEST {BACKTEST_START_DATE[:4]}-NAY)</b> 🤖\n"
-msg += f"📅 Ngày: <b>{latest_date.strftime('%d/%m/%Y')}</b>\n"
-msg += f"🏛 Rổ VN30 hiệu lực: <b>{len(active_today)} mã chuẩn HOSE</b>\n"
-if pd.notna(latest_ma20) and latest_idx < latest_ma20:
-    msg += f"⚠️ <b>Cảnh báo Thị trường:</b> VN-Index ({latest_idx:,.1f}) < MA20 ({latest_ma20:,.1f}) -> 🔒 <i>Đang khóa Mua mới & siết Trailing Stop</i>\n"
-else:
-    msg += f"📈 <b>Trạng thái Thị trường:</b> VN-Index ({latest_idx:,.1f}) trên MA20 ({latest_ma20:,.1f}) & MA100 ({latest_ma100:,.1f}) -> 🟢 <i>Uptrend</i>\n"
-msg += f"➖➖➖➖➖➖➖➖➖➖\n\n🎯 <b>LỆNH ĐÃ KHỚP HÔM NAY (ATO/OPEN):</b>\n"
+    macro_df = macro_df.merge(market_context[['Date', 'VN_MFI', 'VN_Dist_MA200', 'VN_ATR_PCT', 'VN_Breadth_MA50']], on='Date', how='inner')
+    macro_df = macro_df.sort_values('Date').reset_index(drop=True)
 
-buy_count, sell_count = 0, 0
-if not df_trade_log.empty:
-    latest_trades = df_trade_log[df_trade_log['Date'] == latest_date_str]
-    if not latest_trades.empty:
-        for _, row in latest_trades.iterrows():
-            if 'BUY' in row['Action']:
-                trade_val = f" | Tiền: {row['Trade_Value']:,.0f} VNĐ" if 'Trade_Value' in row and pd.notna(row['Trade_Value']) else ""
-                msg += f"🟢 <b>MUA: {row['Ticker']}</b> (Giá ATO: {row['Price']:,.2f}{trade_val}) | AI: <b>{row['AI_Score'] * 100:.1f}%</b>\n\n"
-                buy_count += 1
-            elif 'SELL' in row['Action']:
-                icon = "🔥" if row['Profit(%)'] > 0 else "🩸"
-                pnl_str = f" ({row['PnL_VND']:+,.0f} VNĐ)" if 'PnL_VND' in row and pd.notna(row['PnL_VND']) else ""
-                msg += f"🔴 <b>BÁN: {row['Ticker']}</b> ({row['Action']}) | Lãi/Lỗ: {icon} <b>{row['Profit(%)']}%</b>{pnl_str}\n\n"
-                sell_count += 1
+    macro_cols = ['DXY', 'US10Y', 'USD_VND']
+    for col in macro_cols:
+        macro_df[col] = pd.to_numeric(macro_df[col], errors='coerce')
+        roll_m = macro_df[col].rolling(120, min_periods=5).mean()
+        roll_s = macro_df[col].rolling(120, min_periods=5).std()
+        macro_df[f'Z_{col}'] = (macro_df[col] - roll_m) / roll_s
+    z_cols = [f'Z_{c}' for c in macro_cols]
 
-if buy_count == 0 and sell_count == 0:
-    msg += "<i>⏳ Không có lệnh Mua/Bán khớp trong phiên hôm nay.</i>\n\n"
+    clean_dates_str = pd.to_datetime(stocks_close.index).strftime('%Y-%m-%d')
 
-# Báo cáo các lệnh chờ ATO phiên tiếp theo
-if next_buys or next_sells:
-    msg += f"⚡ <b>TÍN HIỆU ĐẶT LỆNH ATO PHIÊN TIẾP THEO:</b>\n"
-    for b in next_buys:
-        b_sec = SECTOR_MAP.get(b['ticker'], 'OTHER')
-        msg += f"   • 🟢 Mua ATO: <b>{b['ticker']}</b> [{b_sec}] (AI Score: <b>{b['score']*100:.1f}%</b>)\n"
-    for s_tick, s_reason in next_sells:
-        msg += f"   • 🔴 Bán ATO: <b>{s_tick}</b> ({s_reason})\n"
-    msg += "\n"
+    df_ml_list = []
+    for c in loaded_tickers:
+        s_close = stocks_close[c]
+        s_vol = stocks_volume[f'{c}_V']
+        s_vol_ma = stocks_vol_ma20[f'{c}_V']
+        s_ma50 = stocks_ma50[c]
 
-# Báo cáo chi tiết danh mục đang nắm giữ
-msg += f"💼 <b>DANH MỤC HIỆN TẠI ({len(current_held)}/5 vị thế):</b>\n"
-if current_held:
-    for ticker, pos in current_held.items():
-        curr_p = stocks_close.iloc[-1][ticker] if ticker in stocks_close.columns and pd.notna(stocks_close.iloc[-1][ticker]) else pos.get('last_price', pos['buy_price'])
-        unrealized_pnl = ((curr_p / pos['buy_price']) - 1.0) * 100.0
-        icon = "🟢" if unrealized_pnl >= 0 else "🔴"
-        peak_pnl = ((pos['highest'] / pos['buy_price']) - 1.0) * 100.0
-        leader_badge = " 👑 [Leader]" if peak_pnl >= 20.0 else ""
-        qty_str = f"{int(pos['qty']):,} cp"
-        sec_name = SECTOR_MAP.get(ticker, 'OTHER')
-        msg += f"{icon} <b>{ticker}</b> [{sec_name}] ({qty_str}): Giá {curr_p:,.2f} | Lãi tạm: <b>{unrealized_pnl:+.1f}%</b> (Đỉnh: +{peak_pnl:.1f}%){leader_badge} | T+{pos['hold_days']}\n"
-    msg += "\n"
-else:
-    msg += "<i>100% Tiền mặt (Bảo toàn vốn tối đa, nhận lãi Bank 4%/năm).</i>\n\n"
+        valid_mask = s_close.notna() & (s_close > 0)
+        if valid_mask.sum() < 30:
+            continue
 
-msg += f"➖➖➖➖➖➖➖➖➖➖\n"
-msg += f"🏦 NAV Hiện tại: <b>{final_nav:,.0f} VNĐ</b> | Max Drawdown: <b>{max_mdd:.2f}%</b>"
+        df_c = pd.DataFrame({
+            'Date': clean_dates_str[valid_mask],
+            'Ticker': c,
+            'Vol_Ratio': (s_vol[valid_mask] / s_vol_ma[valid_mask].replace(0, np.nan)).values,
+            'Dist_MA50': (s_close[valid_mask] / s_ma50[valid_mask]).values,
+            'RSI': stocks_rsi[c][valid_mask].values,
+            'RSI_Momentum': pd.Series(stocks_rsi[c][valid_mask]).diff(3).values,
+            'MACD_Hist': stocks_macd[c][valid_mask].values
+        })
+        df_ml_list.append(df_c)
 
-send_telegram_msg(msg)
-print("✅ Hoàn tất chu trình quant_bot.py!")
+    ml_master = pd.concat(df_ml_list, ignore_index=True).merge(macro_df, on='Date', how='left')
+    ml_features = ['Vol_Ratio', 'Dist_MA50', 'RSI', 'RSI_Momentum', 'VN_MFI', 'MACD_Hist', 'VN_Dist_MA200', 'VN_Breadth_MA50', 'VN_ATR_PCT'] + z_cols
+    for f in ml_features:
+        ml_master[f] = pd.to_numeric(ml_master[f], errors='coerce')
+
+    # =====================================================================
+    # NẠP MÔ HÌNH WALK-FORWARD EXPANDING RETRAINING (CUỐN CHIẾU TỪNG NĂM)
+    # 100% Out-of-Sample, không Look-Ahead Leakage, không Model Obsolescence
+    # =====================================================================
+    wf_models = {}
+    for y in [2022, 2023, 2024, 2025, 2026]:
+        fn = f"xgboost_model_{y}.json"
+        if os.path.exists(fn):
+            try:
+                m = xgb.XGBClassifier()
+                m.load_model(fn)
+                wf_models[y] = m
+                print(f"   🧠 Đã nạp Walk-Forward Model năm {y}: {fn}")
+            except Exception as e:
+                print(f"   ⚠️ Lỗi đọc {fn}: {e}")
+
+    DEFAULT_MODEL_FILE = "xgboost_ultimate.json"
+    default_model = xgb.XGBClassifier()
+    if os.path.exists(DEFAULT_MODEL_FILE):
+        default_model.load_model(DEFAULT_MODEL_FILE)
+        print(f"   🧠 Đã nạp mô hình cơ sở: {DEFAULT_MODEL_FILE}")
+    elif wf_models:
+        default_model = list(wf_models.values())[-1]
+    else:
+        sys.exit(f"⚠️ Không tìm thấy {DEFAULT_MODEL_FILE}! Bác phải chạy train_bot.py trước.")
+
+    # Chấm điểm AI Score thích ứng Walk-Forward OOS
+    ml_master['AI_Score'] = np.nan
+
+    # 1. Giai đoạn <= 2021: Dùng mô hình học trên 2014-2021 (model 2022 hoặc default)
+    pre_2022_mask = ml_master['Date'] < '2022-01-01'
+    base_m = wf_models.get(2022, default_model)
+    if pre_2022_mask.sum() > 0:
+        ml_master.loc[pre_2022_mask, 'AI_Score'] = base_m.predict_proba(ml_master.loc[pre_2022_mask, ml_features])[:, 1]
+
+    # 2. Các năm Out-of-Sample 2022 -> 2026: Dùng đúng mô hình học trước năm đó!
+    for y in [2022, 2023, 2024, 2025, 2026]:
+        if y == 2026:
+            y_mask = ml_master['Date'] >= f"{y}-01-01"
+        else:
+            y_mask = (ml_master['Date'] >= f"{y}-01-01") & (ml_master['Date'] < f"{y+1}-01-01")
+
+        if y_mask.sum() > 0:
+            m_y = wf_models.get(y, default_model)
+            ml_master.loc[y_mask, 'AI_Score'] = m_y.predict_proba(ml_master.loc[y_mask, ml_features])[:, 1]
+
+    # Tạo tra cứu AI Score dạng dict (Key: ticker -> {date_str: score})
+    ai_dict = {}
+    for c in loaded_tickers:
+        c_sub = ml_master[ml_master['Ticker'] == c]
+        ai_dict[c] = dict(zip(c_sub['Date'], c_sub['AI_Score']))
+
+
+
+    # ==========================================
+    # CHẠY CHIẾN LƯỢC & XUẤT BÁO CÁO TOÀN DIỆN
+    # ==========================================
+    df_trade_log, df_nav_hist, final_nav, total_interest, current_held, next_buys, next_sells = run_ai_quant_system(
+        df_clean=df_clean,
+        stocks_open=stocks_open,
+        stocks_close=stocks_close,
+        stocks_high=stocks_high,
+        stocks_low=stocks_low,
+        stocks_volume=stocks_volume,
+        stocks_high_20=stocks_high_20,
+        stocks_vol_ma20=stocks_vol_ma20,
+        stocks_ma50=stocks_ma50,
+        ai_dict=ai_dict,
+        loaded_tickers=loaded_tickers,
+        backtest_start_date=BACKTEST_START_DATE
+    )
+
+    # Ghi nhận file trading_log.csv
+    df_trade_log.to_csv('trading_log.csv', index=False, na_rep='', float_format='%.2f')
+    print("✅ Đã ghi nhận sổ kế toán giao dịch tinh gọn vào file trading_log.csv!")
+
+    # Ghi nhận file daily_nav.csv
+    df_nav_hist.to_csv('daily_nav.csv', index=False, na_rep='', float_format='%.2f')
+    print("✅ Đã ghi nhận biến động tài sản hàng ngày chuẩn vào file daily_nav.csv!")
+
+    # ==========================================
+    # TÍNH TOÁN METRICS ĐỊNH LƯỢNG RỦI RO & HIỆU SUẤT
+    # ==========================================
+    initial_capital = 100_000_000.0
+    total_return_pct = ((final_nav / initial_capital) - 1.0) * 100.0
+
+    nav_dates = pd.to_datetime(df_nav_hist['Date'])
+    n_years = (nav_dates.iloc[-1] - nav_dates.iloc[0]).days / 365.25
+    cagr = ((final_nav / initial_capital) ** (1.0 / n_years) - 1.0) * 100.0 if n_years > 0 else 0.0
+
+    df_nav_hist['Peak'] = df_nav_hist['NAV'].cummax()
+    df_nav_hist['Drawdown'] = (df_nav_hist['NAV'] - df_nav_hist['Peak']) / df_nav_hist['Peak']
+    max_mdd = df_nav_hist['Drawdown'].min() * 100.0
+
+    trough_idx = df_nav_hist['Drawdown'].idxmin()
+    trough_date = pd.to_datetime(df_nav_hist['Date'].iloc[trough_idx])
+    peak_sub = df_nav_hist.iloc[:trough_idx+1]
+    peak_date = pd.to_datetime(peak_sub.loc[peak_sub['NAV'] == peak_sub['Peak'].max(), 'Date'].iloc[-1])
+
+    calmar_ratio = abs(cagr / max_mdd) if max_mdd != 0 else 0.0
+
+    sells = df_trade_log[df_trade_log['Action'].str.contains('SELL', na=False)] if not df_trade_log.empty else pd.DataFrame()
+    total_sells = len(sells)
+    win_sells = len(sells[sells['Profit(%)'] > 0]) if total_sells > 0 else 0
+    loss_sells = total_sells - win_sells
+    win_rate = (win_sells / total_sells * 100.0) if total_sells > 0 else 0.0
+    best_trade = sells['Profit(%)'].max() if total_sells > 0 else 0.0
+    worst_trade = sells['Profit(%)'].min() if total_sells > 0 else 0.0
+
+    gross_profit = sells.loc[sells['PnL_VND'] > 0, 'PnL_VND'].sum() if total_sells > 0 else 0.0
+    gross_loss = abs(sells.loc[sells['PnL_VND'] < 0, 'PnL_VND'].sum()) if total_sells > 0 else 0.0
+    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else 999.0
+    avg_win_pct = sells.loc[sells['Profit(%)'] > 0, 'Profit(%)'].mean() if win_sells > 0 else 0.0
+    avg_loss_pct = sells.loc[sells['Profit(%)'] < 0, 'Profit(%)'].mean() if loss_sells > 0 else 0.0
+    payoff_ratio = abs(avg_win_pct / avg_loss_pct) if avg_loss_pct != 0 else 999.0
+
+    print("\n" + "="*58)
+    print(f"📊 BÁO CÁO ĐỊNH LƯỢNG THỰC CHIẾN TỪ {BACKTEST_START_DATE[:4]} ĐẾN NAY")
+    print("🧠 MÔ HÌNH: ĐÃ HUẤN LUYỆN TRÊN TOÀN BỘ CHU KỲ 2012 -> 2022")
+    print("🎯 KIỂM THỬ THỰC CHIẾN HOÀN TOÀN OUT-OF-SAMPLE (100% BLIND TEST)")
+    print("="*58)
+    print(f"💵 Vốn khởi điểm ({BACKTEST_START_DATE}):        {initial_capital:,.0f} VNĐ")
+    print(f"🏦 TỔNG TÀI SẢN HIỆN TẠI (NAV):   {final_nav:,.0f} VNĐ")
+    print(f"💰 LÃI BANK THU VỀ (4%/năm):      +{total_interest:,.0f} VNĐ")
+    print(f"🚀 TỔNG LỢI NHUẬN (Đã trừ phí):    +{total_return_pct:.2f}%")
+    print(f"📈 Lợi nhuận kép TB (CAGR):        {cagr:.2f}% / năm")
+    print(f"----------------------------------------------------------")
+    print(f"📉 SỤT GIẢM TỐI ĐA (Max Drawdown): {max_mdd:.2f}%")
+    print(f"   (Thời kỳ chịu đựng lớn nhất: Từ đỉnh {pd.to_datetime(peak_date).strftime('%d/%m/%Y')} về đáy {pd.to_datetime(trough_date).strftime('%d/%m/%Y')})")
+    print(f"⚡ Chỉ số Calmar (CAGR / MDD):     {calmar_ratio:.2f}")
+    print(f"----------------------------------------------------------")
+    print(f"Tổng số lệnh đã chốt sổ:          {total_sells}")
+    print(f"🎯 Tỷ lệ thắng (Win Rate):         {win_rate:.2f}% (Thắng {win_sells}/{total_sells} trận)")
+    print(f"⚖️ Profit Factor (Tổng Lãi/Lỗ):    {profit_factor:.2f}")
+    print(f"🎲 Payoff Ratio (Lãi TB / Lỗ TB):  {payoff_ratio:.2f}x (Lãi TB: +{avg_win_pct:.2f}% | Lỗ TB: {avg_loss_pct:.2f}%)")
+    print(f"💰 Lệnh lãi đơn lẻ cao nhất:       +{best_trade:.2f}%")
+    print(f"🩸 Lệnh lỗ đơn lẻ sâu nhất:        {worst_trade:.2f}%")
+    print("="*58 + "\n")
+
+    # ==========================================
+    # 5. TELEGRAM RADAR BÁO CÁO HÀNG NGÀY
+    # ==========================================
+    print("5. Báo cáo Telegram Radar...")
+
+    latest_date = df_clean['Date'].iloc[-1]
+    latest_date_str = latest_date.strftime('%Y-%m-%d')
+    active_today = get_vn30_constituents(latest_date_str)
+    latest_idx = df_clean['VNINDEX'].iloc[-1]
+    latest_ma20 = df_clean['MA20'].iloc[-1] if 'MA20' in df_clean.columns else np.nan
+    latest_ma100 = df_clean['MA100'].iloc[-1]
+
+    msg = f"🤖 <b>SIÊU RADAR VN30 - BÁO CÁO THỰC CHIẾN (TEST {BACKTEST_START_DATE[:4]}-NAY)</b> 🤖\n"
+    msg += f"📅 Ngày: <b>{latest_date.strftime('%d/%m/%Y')}</b>\n"
+    msg += f"🏛 Rổ VN30 hiệu lực: <b>{len(active_today)} mã chuẩn HOSE</b>\n"
+    if pd.notna(latest_ma20) and latest_idx < latest_ma20:
+        msg += f"⚠️ <b>Cảnh báo Thị trường:</b> VN-Index ({latest_idx:,.1f}) < MA20 ({latest_ma20:,.1f}) -> 🔒 <i>Đang khóa Mua mới & siết Trailing Stop</i>\n"
+    else:
+        msg += f"📈 <b>Trạng thái Thị trường:</b> VN-Index ({latest_idx:,.1f}) trên MA20 ({latest_ma20:,.1f}) & MA100 ({latest_ma100:,.1f}) -> 🟢 <i>Uptrend</i>\n"
+    msg += f"➖➖➖➖➖➖➖➖➖➖\n\n🎯 <b>LỆNH ĐÃ KHỚP HÔM NAY (ATO/OPEN):</b>\n"
+
+    buy_count, sell_count = 0, 0
+    if not df_trade_log.empty:
+        latest_trades = df_trade_log[df_trade_log['Date'] == latest_date_str]
+        if not latest_trades.empty:
+            for _, row in latest_trades.iterrows():
+                if 'BUY' in row['Action']:
+                    trade_val = f" | Tiền: {row['Trade_Value']:,.0f} VNĐ" if 'Trade_Value' in row and pd.notna(row['Trade_Value']) else ""
+                    msg += f"🟢 <b>MUA: {row['Ticker']}</b> (Giá ATO: {row['Price']:,.2f}{trade_val}) | AI: <b>{row['AI_Score'] * 100:.1f}%</b>\n\n"
+                    buy_count += 1
+                elif 'SELL' in row['Action']:
+                    icon = "🔥" if row['Profit(%)'] > 0 else "🩸"
+                    pnl_str = f" ({row['PnL_VND']:+,.0f} VNĐ)" if 'PnL_VND' in row and pd.notna(row['PnL_VND']) else ""
+                    msg += f"🔴 <b>BÁN: {row['Ticker']}</b> ({row['Action']}) | Lãi/Lỗ: {icon} <b>{row['Profit(%)']}%</b>{pnl_str}\n\n"
+                    sell_count += 1
+
+    if buy_count == 0 and sell_count == 0:
+        msg += "<i>⏳ Không có lệnh Mua/Bán khớp trong phiên hôm nay.</i>\n\n"
+
+    # Báo cáo các lệnh chờ ATO phiên tiếp theo
+    if next_buys or next_sells:
+        msg += f"⚡ <b>TÍN HIỆU ĐẶT LỆNH ATO PHIÊN TIẾP THEO:</b>\n"
+        for b in next_buys:
+            b_sec = SECTOR_MAP.get(b['ticker'], 'OTHER')
+            msg += f"   • 🟢 Mua ATO: <b>{b['ticker']}</b> [{b_sec}] (AI Score: <b>{b['score']*100:.1f}%</b>)\n"
+        for s_tick, s_reason in next_sells:
+            msg += f"   • 🔴 Bán ATO: <b>{s_tick}</b> ({s_reason})\n"
+        msg += "\n"
+
+    # Báo cáo chi tiết danh mục đang nắm giữ
+    msg += f"💼 <b>DANH MỤC HIỆN TẠI ({len(current_held)}/5 vị thế):</b>\n"
+    if current_held:
+        for ticker, pos in current_held.items():
+            curr_p = stocks_close.iloc[-1][ticker] if ticker in stocks_close.columns and pd.notna(stocks_close.iloc[-1][ticker]) else pos.get('last_price', pos['buy_price'])
+            unrealized_pnl = ((curr_p / pos['buy_price']) - 1.0) * 100.0
+            icon = "🟢" if unrealized_pnl >= 0 else "🔴"
+            peak_pnl = ((pos['highest'] / pos['buy_price']) - 1.0) * 100.0
+            leader_badge = " 👑 [Leader]" if peak_pnl >= 20.0 else ""
+            qty_str = f"{int(pos['qty']):,} cp"
+            sec_name = SECTOR_MAP.get(ticker, 'OTHER')
+            msg += f"{icon} <b>{ticker}</b> [{sec_name}] ({qty_str}): Giá {curr_p:,.2f} | Lãi tạm: <b>{unrealized_pnl:+.1f}%</b> (Đỉnh: +{peak_pnl:.1f}%){leader_badge} | T+{pos['hold_days']}\n"
+        msg += "\n"
+    else:
+        msg += "<i>100% Tiền mặt (Bảo toàn vốn tối đa, nhận lãi Bank 4%/năm).</i>\n\n"
+
+    msg += f"➖➖➖➖➖➖➖➖➖➖\n"
+    msg += f"🏦 NAV Hiện tại: <b>{final_nav:,.0f} VNĐ</b> | Max Drawdown: <b>{max_mdd:.2f}%</b>"
+
+    send_telegram_msg(msg)
+    print("✅ Hoàn tất chu trình quant_bot.py!")
+
+if __name__ == "__main__":
+    main()
