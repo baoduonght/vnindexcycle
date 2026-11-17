@@ -312,12 +312,16 @@ def main():
         vn_aligned_c = vn_close_aligned.reindex(s_valid_close.index)
         vn_future_ret = vn_aligned_c.shift(-30) / vn_aligned_c - 1
 
+        # Lưu ngày kết thúc của tương lai 30 phiên để Purged Walk-Forward (chống rò rỉ nhãn)
+        future_dates = pd.Series(s_valid_close.index, index=s_valid_close.index).shift(-30)
+
         # Chỉ đánh nhãn Target khi cả hai future return đều KHÔNG NaN
         valid_future = s_future_ret.notna() & vn_future_ret.notna()
         target_series = np.where(valid_future, (s_future_ret > vn_future_ret).astype(int), np.nan)
 
         df_c = pd.DataFrame({
             'Date': pd.to_datetime(s_valid_close.index).strftime('%Y-%m-%d'),
+            'Future_Date': pd.to_datetime(future_dates).dt.strftime('%Y-%m-%d'),
             'Ticker': c,
             'Vol_Ratio': (s_vol[valid_mask] / s_vol_ma[valid_mask].replace(0, np.nan)).values,
             'Dist_MA50': (s_valid_close / s_ma50[valid_mask]).values,
@@ -345,11 +349,13 @@ def main():
 
     print(f"   📊 Tổng số mẫu dữ liệu trích xuất hợp lệ: {len(train_data):,}")
 
-    # 1. HUẤN LUYỆN NÃO BỘ CƠ SỞ: Học toàn diện 10 năm chu kỳ vàng (2012 -> 2022)
+    # 1. HUẤN LUYỆN NÃO BỘ CƠ SỞ: Học toàn diện 10 năm chu kỳ vàng (2012 -> 2021)
+    # Purged Walk-Forward: Ngày tương lai 30 phiên (Future_Date) phải kết thúc trước 2022-01-01 (100% Zero Leakage)
     print("\n" + "="*65)
-    print("🧠 HUẤN LUYỆN NÃO BỘ CƠ SỞ CHU KỲ VÀNG: 2012 -> 2022 (VỚI TIME DECAY)")
+    print("🧠 HUẤN LUYỆN NÃO BỘ CƠ SỞ CHU KỲ VÀNG: 2012 -> 2021 (VỚI TIME DECAY)")
+    print("   (Purged Walk-Forward: Khóa rò rỉ nhãn tương lai trước 01/01/2022)")
     print("="*65)
-    base_train_mask = (train_data['Date'] >= "2012-01-01") & (train_data['Date'] < "2022-01-01")
+    base_train_mask = (train_data['Date'] >= "2012-01-01") & (train_data['Future_Date'] < "2022-01-01")
     X_base = train_data.loc[base_train_mask, ml_features]
     y_base = train_data.loc[base_train_mask, 'Target']
     scale_base = len(y_base[y_base == 0]) / len(y_base[y_base == 1]) if len(y_base[y_base == 1]) > 0 else 1.0
@@ -382,7 +388,8 @@ def main():
         start_train_date = "2012-01-01"
         end_train_date = f"{year}-01-01"
         
-        train_mask = (train_data['Date'] >= start_train_date) & (train_data['Date'] < end_train_date)
+        # Purged Walk-Forward: Nhãn Target 30 phiên phải kết thúc nghiêm ngặt trước end_train_date
+        train_mask = (train_data['Date'] >= start_train_date) & (train_data['Future_Date'] < end_train_date)
         test_mask = (train_data['Date'] >= end_train_date) & (train_data['Date'] < f"{year + 1}-01-01")
 
         X_train = train_data.loc[train_mask, ml_features]
