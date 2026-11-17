@@ -9,6 +9,7 @@ except Exception:
     Interval = None
 import xgboost as xgb
 import warnings
+import logging
 import sys
 import os
 import datetime
@@ -16,6 +17,7 @@ import datetime
 from vn30_universe import get_vn30_constituents, ALL_HISTORICAL_VN30_TICKERS
 
 warnings.filterwarnings('ignore')
+logging.getLogger("tvDatafeed").setLevel(logging.CRITICAL)
 
 # ==========================================
 # TỪ ĐIỂN PHÂN LOẠI NGÀNH VN30 (SECTOR MAP)
@@ -278,6 +280,7 @@ def run_ai_quant_system(
     stocks_volume,
     stocks_high_20,
     stocks_vol_ma20,
+    stocks_ma20,
     stocks_ma50,
     ai_dict,
     loaded_tickers,
@@ -967,6 +970,7 @@ def main():
         stocks_volume=stocks_volume,
         stocks_high_20=stocks_high_20,
         stocks_vol_ma20=stocks_vol_ma20,
+        stocks_ma20=stocks_ma20,
         stocks_ma50=stocks_ma50,
         ai_dict=ai_dict,
         loaded_tickers=loaded_tickers,
