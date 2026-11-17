@@ -324,8 +324,8 @@ macro_df = macro_df.sort_values('Date').reset_index(drop=True)
 macro_cols = ['DXY', 'US10Y', 'USD_VND']
 for col in macro_cols:
     macro_df[col] = pd.to_numeric(macro_df[col], errors='coerce')
-    roll_m = macro_df[col].rolling(120, min_periods=20).mean()
-    roll_s = macro_df[col].rolling(120, min_periods=20).std()
+    roll_m = macro_df[col].rolling(120, min_periods=5).mean()
+    roll_s = macro_df[col].rolling(120, min_periods=5).std()
     macro_df[f'Z_{col}'] = (macro_df[col] - roll_m) / roll_s
 z_cols = [f'Z_{c}' for c in macro_cols]
 
