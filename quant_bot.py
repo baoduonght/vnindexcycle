@@ -14,6 +14,13 @@ import sys
 import os
 import datetime
 
+# Nạp biến môi trường từ file .env nếu có (dành cho chạy cục bộ)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 from vn30_universe import get_vn30_constituents, ALL_HISTORICAL_VN30_TICKERS
 
 warnings.filterwarnings('ignore')
@@ -422,19 +429,28 @@ def run_ai_quant_system(
                     if pd.isna(open_p) or open_p <= 0:
                         continue  # Tạm ngừng giao dịch -> Giữ lại lệnh bán cho phiên tiếp theo
                     
-                    qty = held[c]['qty']
+                    is_partial_leader_rebalance = ('Hoán đổi 50% tỷ trọng' in reason) and (held[c]['qty'] >= 200)
+                    sell_qty = int(np.floor((held[c]['qty'] * 0.5) / 100.0) * 100.0) if is_partial_leader_rebalance else held[c]['qty']
+                    
                     sell_price_vnd = open_p * 1000.0
                     buy_price_vnd = held[c]['buy_price'] * 1000.0
                     
-                    gross_val = qty * sell_price_vnd
+                    gross_val = sell_qty * sell_price_vnd
                     net_val = gross_val * (1.0 - SELL_FRICTION)
-                    buy_cost = qty * buy_price_vnd * (1.0 + BUY_FRICTION)
+                    buy_cost = sell_qty * buy_price_vnd * (1.0 + BUY_FRICTION)
                     pnl_vnd = net_val - buy_cost
                     pnl_pct = ((sell_price_vnd * (1.0 - SELL_FRICTION)) / (buy_price_vnd * (1.0 + BUY_FRICTION)) - 1.0) * 100.0
                     hold_days = held[c]['hold_days']
                     
                     cash += net_val
-                    del held[c]
+                    
+                    if is_partial_leader_rebalance:
+                        held[c]['qty'] -= sell_qty
+                        held[c]['is_split_size'] = True
+                        held[c]['rebalance_for_leader'] = False
+                    else:
+                        del held[c]
+                        
                     sells_executed.append((c, reason))
                     
                     rem_stock_val = get_current_stock_valuation(date)
@@ -488,8 +504,20 @@ def run_ai_quant_system(
                 cost_per_share_vnd = price_vnd * (1.0 + BUY_FRICTION)
                 cost_per_lot_vnd = cost_per_share_vnd * 100.0
                 
-                # GIẢI PHÁP 1: SPLIT-SIZE ALLOCATION (1/2 VỐN KHI CÙNG NGÀNH HOẶC HỆ SINH THÁI)
-                # Nếu cùng ngành hoặc cùng hệ sinh thái đã có 1 mã (trong held hoặc cùng mua hôm nay), lệnh này nhận 10% NAV thay vì 20% NAV
+                # GIẢI PHÁP 1 & CƠ CHẾ HOÁN ĐỔI TỶ TRỌNG CHO LEADER (LEADER REBALANCE):
+                # Tìm các mã cùng ngành hoặc cùng hệ sinh thái đang nắm giữ
+                held_siblings = [
+                    h for h in held
+                    if (SECTOR_MAP.get(h, 'OTHER') == cand_sec or ECOSYSTEM_MAP.get(h, h) == cand_eco)
+                    and h != c
+                ]
+                
+                # Nếu mã mới có AI Score cao hơn mã cũ trong held:
+                # -> Mã mới là Leader thực sự: Cấp trọn vẹn 20% NAV (slot_multiplier = 1.0)
+                # -> Đánh dấu mã cũ để hoán đổi 50% tỷ trọng nhường vốn cho Leader
+                max_held_sibling_score = max([held[h].get('score', 0.55) for h in held_siblings], default=0.0)
+                is_leader_upgrade = len(held_siblings) > 0 and (cand.get('score', 0.0) > max_held_sibling_score)
+
                 sibling_in_pending = sum(
                     1 for b in pending_buys
                     if b['ticker'] != c and (
@@ -497,8 +525,15 @@ def run_ai_quant_system(
                         ECOSYSTEM_MAP.get(b['ticker'], b['ticker']) == cand_eco
                     )
                 )
-                is_split_pos = (current_sec_count > 0) or (current_eco_count > 0) or (sibling_in_pending > 0) or cand.get('is_split_size', False)
-                slot_multiplier = 0.5 if is_split_pos else 1.0
+
+                if is_leader_upgrade:
+                    slot_multiplier = 1.0
+                    is_split_pos = False
+                    for h in held_siblings:
+                        held[h]['rebalance_for_leader'] = True
+                else:
+                    is_split_pos = (len(held_siblings) > 0) or (sibling_in_pending > 0) or cand.get('is_split_size', False)
+                    slot_multiplier = 0.5 if is_split_pos else 1.0
 
                 alloc = min(target_slot_size * slot_multiplier, cash)
                 lots = np.floor(alloc / cost_per_lot_vnd)
@@ -515,7 +550,9 @@ def run_ai_quant_system(
                         'buy_date': date_str,
                         'hold_days': 0,
                         'consecutive_below_ma20': 0,
-                        'is_split_size': is_split_pos
+                        'is_split_size': is_split_pos,
+                        'score': cand.get('score', 0.55),
+                        'rebalance_for_leader': False
                     }
                     buys_today += 1
                     
@@ -680,6 +717,11 @@ def run_ai_quant_system(
                 if c not in active_vn30:
                     pending_sells.append((c, 'SELL (Rời rổ VN30)'))
 
+                # LÝ DO 2: HOÁN ĐỔI TỶ TRỌNG CHO LEADER MỚI BỨT PHÁ (LEADER REBALANCE)
+                elif held[c].get('rebalance_for_leader', False) and held[c]['hold_days'] >= MIN_HOLD_DAYS and profit_margin < 0.10:
+                    pending_sells.append((c, 'SELL (Hoán đổi 50% tỷ trọng cho Leader)'))
+                    held[c]['rebalance_for_leader'] = False
+
                 # GIẢI PHÁP 3: THOÁT VỊ THẾ BẤT ĐỐI XỨNG (ASYMMETRIC EXIT RULES)
                 elif enable_asymmetric_atr_exit:
                     # 1. Cắt lỗ cứng -8% (dứt khoát bảo vệ vốn)
@@ -755,12 +797,14 @@ def run_ai_quant_system(
         # =============================================================
         # (B) QUÉT TÍN HIỆU MUA CHO PHIÊN MAI (PRE-MA100 + HYSTERESIS BUFFER + COOLDOWN + SECTOR CAP)
         # =============================================================
-        if idx < market_ma50 or market_atr_pct > 0.020:
+        # ĐỒNG BỘ ĐIỀU KIỆN MUA VÀ BÁN VĨ MÔ:
+        # Nếu VN-Index dưới MA100: Khóa mua mới tuyệt đối (0% vốn cổ phiếu, 100% tiền mặt nhàn rỗi hưởng lãi Bank)
+        if idx < market_ma100:
+            max_exposure = 0.0
+        elif idx < market_ma50 or market_atr_pct > 0.020:
             max_exposure = 0.4
         elif idx < market_ma200:
             max_exposure = 0.5
-        elif idx < market_ma100:
-            max_exposure = 0.7
         else:
             max_exposure = 1.0
 
@@ -769,23 +813,31 @@ def run_ai_quant_system(
         # 1. VÙNG ĐỆM HYSTERESIS: VN-Index phải vượt MA100 tối thiểu +1.5%
         is_macro_buffer_ok = (idx >= market_ma100 * 1.015)
 
-        # 2. XU HƯỚNG NGẮN/TRUNG HẠN ĐỒNG THUẬN: MA20 > MA50
-        is_ma_trend_ok = (pd.notna(market_ma20) and pd.notna(market_ma50) and market_ma20 > market_ma50)
+        # 2. XU HƯỚNG TRUNG HẠN ĐỒNG THUẬN: MA50 phải dốc lên hoặc đi ngang (loại bỏ sóng hồi bulltrap trong thị trường Bear 2022)
+        prev5_ma50 = backtest['MA50'].iloc[i-5] if i >= 5 else backtest['MA50'].iloc[0]
+        is_ma50_slope_rising = (market_ma50 >= prev5_ma50) if (pd.notna(market_ma50) and pd.notna(prev5_ma50)) else True
 
-        # 3. PRE-MA100 FILTER: VN-Index phải đóng cửa TRÊN MA20 (Khóa mua mới khi thị trường gãy xu hướng ngắn hạn)
+        # 3. ĐƯỜNG MA100 KHÔNG CẮM ĐẦU RƠI MẠNH (Downtrend thoái trào)
+        prev5_ma100 = backtest['MA100'].iloc[i-5] if i >= 5 else backtest['MA100'].iloc[0]
+        is_ma100_not_falling = (market_ma100 >= prev5_ma100 * 0.998) if (pd.notna(market_ma100) and pd.notna(prev5_ma100)) else True
+
+        # 4. XU HƯỚNG NGẮN/TRUNG HẠN ĐỒNG THUẬN: MA20 > MA50 VÀ MA50 dốc lên
+        is_ma_trend_ok = (pd.notna(market_ma20) and pd.notna(market_ma50) and market_ma20 > market_ma50 and is_ma50_slope_rising)
+
+        # 5. PRE-MA100 FILTER: VN-Index phải đóng cửa TRÊN MA20 (Khóa mua mới khi thị trường gãy xu hướng ngắn hạn)
         is_index_above_ma20 = (pd.notna(market_ma20) and idx >= market_ma20)
 
-        # 4. CHỐNG PHIÊN PHÂN PHỐI MẠNH: Khóa mua khi Index giảm > 1.5% hoặc giảm > 0.8% kèm Volume Shock
+        # 6. CHỐNG PHIÊN PHÂN PHỐI MẠNH: Khóa mua khi Index giảm > 1.5% hoặc giảm > 0.8% kèm Volume Shock
         idx_ret = (idx - prev_idx) / prev_idx if prev_idx > 0 else 0.0
         is_not_distribution = not ((idx_ret <= -0.015) or (idx_ret < -0.008 and vol_shock >= 1.25))
 
-        # 5. THỜI GIAN CHỜ COOLDOWN: Ít nhất 10 phiên sau lần bán tháo Macro gần nhất (tránh mua đuổi nhịp hồi giả)
+        # 7. THỜI GIAN CHỜ COOLDOWN: Ít nhất 10 phiên sau lần bán tháo Macro gần nhất (tránh mua đuổi nhịp hồi giả)
         is_cooldown_passed = (i - last_macro_exit_bar > 10)
 
-        # 6. ĐỘ BIẾN ĐỘNG HẠ NHIỆT (market_atr_pct <= 0.020)
+        # 8. ĐỘ BIẾN ĐỘNG HẠ NHIỆT (market_atr_pct <= 0.020)
         is_volatility_calm = (market_atr_pct <= 0.020)
 
-        # 7. ĐỘ RỘNG THỊ TRƯỜNG: >= 35% số mã VN30 nằm trên MA50
+        # 9. ĐỘ RỘNG THỊ TRƯỜNG: >= 35% số mã VN30 nằm trên MA50
         vn30_above_ma50_cnt = sum([
             1 for ticker in active_vn30
             if ticker in stocks_close.columns and ticker in stocks_ma50.columns
@@ -816,6 +868,7 @@ def run_ai_quant_system(
         can_enter_new_trades = (
             is_macro_buffer_ok
             and is_ma_trend_ok
+            and is_ma100_not_falling
             and is_index_above_ma20
             and (is_ma20_slope_rising if enable_ma20_slope_filter else True)
             and is_not_distribution
@@ -852,13 +905,13 @@ def run_ai_quant_system(
                     v_ratio = curr_vol / prev_v_ma
 
                     # GIẢI PHÁP 3: BỘ LỌC CHỐNG MUA ĐUỔI VÙNG QUÁ MUA (ANTI-CHASE FILTER)
-                    # Chặn các lệnh breakout muộn khi cổ phiếu đã tăng nóng cách xa nền MA50 > 20% hoặc RSI(14) > 75
-                    # Tránh cú rơi -13.68% như VHM ngày 14/10/2025
+                    # Chặn các lệnh breakout muộn khi cổ phiếu đã tăng nóng cách xa nền MA50 > 20% (như bẫy VHM 14/10/2025)
+                    # Nâng trần RSI lên 82 (không chặn chân sóng breakout mạnh từ nền chặt RSI 75-80 như PLX đầu 2026)
                     if enable_anti_chase_filter:
                         is_chasing = False
                         if pd.notna(ma50_c) and ma50_c > 0 and (curr_price > ma50_c * 1.20):
                             is_chasing = True
-                        if pd.notna(rsi_c) and (rsi_c > 75.0):
+                        if pd.notna(rsi_c) and (rsi_c > 82.0):
                             is_chasing = True
                         if is_chasing:
                             continue
@@ -905,12 +958,24 @@ def run_ai_quant_system(
                     eco_in_selected = sum(1 for b in selected_buys if b.get('ecosystem') == eco)
                     
                     if (sec_in_held + sec_in_selected) < MAX_PER_SECTOR and (eco_in_held + eco_in_selected) < MAX_PER_ECOSYSTEM:
-                        is_split = (sec_in_held + sec_in_selected >= 1) or (eco_in_held + eco_in_selected >= 1)
-                        cand['is_split_size'] = is_split
-                        if is_split:
-                            for prev_b in selected_buys:
-                                if prev_b.get('sector') == sec or prev_b.get('ecosystem') == eco:
-                                    prev_b['is_split_size'] = True
+                        # CƠ CHẾ HOÁN ĐỔI CHO LEADER: Nếu mã mới có AI Score cao hơn mã đang nắm giữ cùng nhóm
+                        held_siblings = [
+                            h for h in held 
+                            if (SECTOR_MAP.get(h, 'OTHER') == sec or ECOSYSTEM_MAP.get(h, h) == eco) 
+                            and h not in [s[0] for s in pending_sells]
+                        ]
+                        max_sibling_score = max([held[h].get('score', 0.55) for h in held_siblings], default=0.0)
+                        is_leader_upgrade = len(held_siblings) > 0 and (cand['score'] > max_sibling_score)
+                        
+                        if is_leader_upgrade:
+                            cand['is_split_size'] = False
+                        else:
+                            is_split = (sec_in_held + sec_in_selected >= 1) or (eco_in_held + eco_in_selected >= 1)
+                            cand['is_split_size'] = is_split
+                            if is_split:
+                                for prev_b in selected_buys:
+                                    if prev_b.get('sector') == sec or prev_b.get('ecosystem') == eco:
+                                        prev_b['is_split_size'] = True
                         selected_buys.append(cand)
                     # Nếu ngành hoặc hệ sinh thái đã đủ trần, nhường slot cho ngành/hệ sinh thái khác
                 
@@ -1167,9 +1232,10 @@ def main():
     print(f"   • Solution 2: Rolling Percentile Dynamic AI (Top 20% / 120 bars): {'BẬT' if ENABLE_DYNAMIC_PERCENTILE_AI else 'TẮT (Cố định 0.60)'}")
     print(f"   • Solution 3: Asymmetric Exit Rules (2 nến MA20 + 2.5x ATR Trailing): {'BẬT' if ENABLE_ASYMMETRIC_ATR_EXIT else 'TẮT'}")
     print(f"   • Solution 4: Index MA20 Slope & 1.3x Breakout Volume: {'BẬT' if ENABLE_MA20_SLOPE_FILTER else 'TẮT'}")
-    print(f"   • Solution 5: Split-Size Allocation (Tối đa {MAX_PER_SECTOR} mã/ngành, {MAX_PER_ECOSYSTEM} mã/HST | Chia đôi 10% NAV nếu cùng nhóm)")
+    print(f"   • Solution 5: Split-Size & Leader Rebalance (Tối đa {MAX_PER_SECTOR} mã/ngành, {MAX_PER_ECOSYSTEM} mã/HST | Hoán đổi 20% NAV cho Leader)")
     print(f"   • Solution 6: Sắp xếp ưu tiên lệnh mua: Động lượng (AI Score -> Breakout% -> Ret20)")
-    print(f"   • Solution 7: Anti-Chase Filter (Chặn mua đuổi > MA50*1.20 hoặc RSI>75): {'BẬT' if ENABLE_ANTI_CHASE_FILTER else 'TẮT'}")
+    print(f"   • Solution 7: Anti-Chase Filter (Chặn mua đuổi > MA50*1.20 hoặc RSI>82): {'BẬT' if ENABLE_ANTI_CHASE_FILTER else 'TẮT'}")
+    print(f"   • Solution 8: Macro Synchronization (Đồng bộ Mua/Bán Vĩ mô: Index > MA100 & MA50 dốc lên): BẬT")
     print("="*70 + "\n")
 
     # ==========================================
