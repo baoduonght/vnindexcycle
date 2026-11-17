@@ -1,9 +1,10 @@
 """
 =============================================================================
-SIÊU TỪ ĐIỂN POINT-IN-TIME: LỊCH SỬ THAY ĐỔI RỔ VN30 (2014 - NAY)
+SIÊU TỪ ĐIỂN POINT-IN-TIME: LỊCH SỬ THAY ĐỔI RỔ VN30 (2012 - NAY)
 Khắc phục 100% Thiên kiến sống sót (Survivorship Bias)
-Phản ánh chính xác quyết định của HOSE tại từng kỳ đảo danh mục (tháng 1 & tháng 7)
-Bao gồm đầy đủ các cổ phiếu khủng hoảng, hủy niêm yết: HAG, OGC, ITA, FLC, ROS, NVL, PDR...
+Phản ánh chính xác quyết định của HOSE từ ngày đầu khai trương (06/02/2012)
+và từng kỳ đảo danh mục định kỳ (tháng 1 & tháng 7) cùng các đợt thay thế đột xuất.
+Bao gồm đầy đủ các cổ phiếu khủng hoảng, hủy niêm yết: HAG, OGC, ITA, FLC, ROS, NVL, PDR, PVF, QCG...
 
 AUTO-FETCH: File này tự động thử fetch danh mục hiện tại từ API khi import.
 Nếu fetch thất bại hoặc không có internet, dữ liệu tĩnh được dùng làm fallback.
@@ -22,6 +23,71 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 VN30_TIMELINE = [
+    # -------------------------------------------------------------
+    # 0a. KỲ 1/2012 (Áp dụng từ 06/02/2012 đến 22/07/2012)
+    # HOSE chính thức ra mắt chỉ số VN30 vào ngày 06/02/2012 với 30 cổ phiếu sáng lập
+    # -------------------------------------------------------------
+    (
+        "2012-01-01", "2012-07-22",
+        [
+            "BVH", "CII", "CTG", "DIG", "DPM", "EIB", "FPT", "GMD", "HAG", "HPG",
+            "HVG", "IJC", "ITA", "KDC", "KDH", "MSN", "OGC", "PNJ", "PVD", "PVF",
+            "QCG", "REE", "SBT", "SJS", "SSI", "STB", "VCB", "VIC", "VNM", "VSH"
+        ]
+    ),
+
+    # -------------------------------------------------------------
+    # 0b. KỲ 2/2012 (Áp dụng từ 23/07/2012 đến 20/01/2013)
+    # HOSE thêm HSG, DRC, NTL, MBB; loại SJS, HVG, KDH, QCG
+    # -------------------------------------------------------------
+    (
+        "2012-07-23", "2013-01-20",
+        [
+            "BVH", "CII", "CTG", "DIG", "DPM", "DRC", "EIB", "FPT", "GMD", "HAG",
+            "HPG", "HSG", "IJC", "ITA", "KDC", "MBB", "MSN", "NTL", "OGC", "PNJ",
+            "PVD", "PVF", "REE", "SBT", "SSI", "STB", "VCB", "VIC", "VNM", "VSH"
+        ]
+    ),
+
+    # -------------------------------------------------------------
+    # 0c. KỲ 1/2013 (Áp dụng từ 21/01/2013 đến 21/07/2013)
+    # HOSE thêm CSM, PGD; loại ITA, NTL
+    # -------------------------------------------------------------
+    (
+        "2013-01-21", "2013-07-21",
+        [
+            "BVH", "CII", "CSM", "CTG", "DIG", "DPM", "DRC", "EIB", "FPT", "GMD",
+            "HAG", "HPG", "HSG", "IJC", "KDC", "MBB", "MSN", "OGC", "PGD", "PNJ",
+            "PVD", "PVF", "REE", "SBT", "SSI", "STB", "VCB", "VIC", "VNM", "VSH"
+        ]
+    ),
+
+    # -------------------------------------------------------------
+    # 0d. KỲ 2/2013 (Áp dụng từ 22/07/2013 đến 23/09/2013)
+    # HOSE thêm PPC, PET; loại PNJ, DIG
+    # -------------------------------------------------------------
+    (
+        "2013-07-22", "2013-09-23",
+        [
+            "BVH", "CII", "CSM", "CTG", "DPM", "DRC", "EIB", "FPT", "GMD", "HAG",
+            "HPG", "HSG", "IJC", "KDC", "MBB", "MSN", "OGC", "PET", "PGD", "PPC",
+            "PVD", "PVF", "REE", "SBT", "SSI", "STB", "VCB", "VIC", "VNM", "VSH"
+        ]
+    ),
+
+    # -------------------------------------------------------------
+    # 0e. THAY THẾ ĐỘT XUẤT 2013 (Áp dụng từ 24/09/2013 đến 31/12/2013)
+    # PVF hủy niêm yết do sáp nhập thành lập PVcomBank -> PVT thay thế khẩn cấp
+    # -------------------------------------------------------------
+    (
+        "2013-09-24", "2013-12-31",
+        [
+            "BVH", "CII", "CSM", "CTG", "DPM", "DRC", "EIB", "FPT", "GMD", "HAG",
+            "HPG", "HSG", "IJC", "KDC", "MBB", "MSN", "OGC", "PET", "PGD", "PPC",
+            "PVD", "PVT", "REE", "SBT", "SSI", "STB", "VCB", "VIC", "VNM", "VSH"
+        ]
+    ),
+
     # -------------------------------------------------------------
     # 1. KỲ 1/2014 (Áp dụng từ 01/01/2014 đến 20/07/2014)
     # HOSE thêm ITA, loại SBT
