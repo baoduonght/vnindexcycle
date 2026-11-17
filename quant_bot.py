@@ -74,6 +74,13 @@ SECTOR_MAP = {
 BACKTEST_START_DATE = os.environ.get('BACKTEST_START_DATE', '2022-01-01')
 
 # ==========================================
+# CỜ TÍNH NĂNG (FEATURE FLAGS - 4 CORE SOLUTIONS)
+# ==========================================
+ENABLE_DYNAMIC_PERCENTILE_AI = os.environ.get('ENABLE_DYNAMIC_PERCENTILE_AI', 'True').lower() in ('true', '1', 'yes')
+ENABLE_ASYMMETRIC_ATR_EXIT = os.environ.get('ENABLE_ASYMMETRIC_ATR_EXIT', 'True').lower() in ('true', '1', 'yes')
+ENABLE_MA20_SLOPE_FILTER = os.environ.get('ENABLE_MA20_SLOPE_FILTER', 'True').lower() in ('true', '1', 'yes')
+
+# ==========================================
 # CÁC HÀM TÍNH TOÁN CHỈ BÁO KỸ THUẬT
 # ==========================================
 def calc_adx(high, low, close, n=14):
@@ -282,14 +289,24 @@ def run_ai_quant_system(
     stocks_vol_ma20,
     stocks_ma20,
     stocks_ma50,
+    stocks_atr,
     ai_dict,
     loaded_tickers,
     backtest_start_date=None,
-    initial_capital=100_000_000.0
+    initial_capital=100_000_000.0,
+    enable_dynamic_percentile_ai=ENABLE_DYNAMIC_PERCENTILE_AI,
+    enable_asymmetric_atr_exit=ENABLE_ASYMMETRIC_ATR_EXIT,
+    enable_ma20_slope_filter=ENABLE_MA20_SLOPE_FILTER
 ):
     if backtest_start_date is None:
         backtest_start_date = BACKTEST_START_DATE
     backtest = df_clean[df_clean['Date'] >= backtest_start_date].copy().reset_index(drop=True)
+
+    # Bảng tra cứu AI Score để tính Rolling Percentile động (Zero Lookahead Bias)
+    stocks_ai_scores = pd.DataFrame(index=backtest['Date'])
+    for ticker_col in loaded_tickers:
+        ticker_scores = ai_dict.get(ticker_col, {})
+        stocks_ai_scores[ticker_col] = [ticker_scores.get(d.strftime('%Y-%m-%d'), np.nan) for d in backtest['Date']]
     
     MAX_SLOTS = 5                      # Tối đa 5 vị thế (20% NAV / slot)
     MAX_PER_SECTOR = 2                 # Khóa trần ngành: Tối đa 2 mã / ngành (Chống sập dây chuyền)
@@ -435,7 +452,8 @@ def run_ai_quant_system(
                         'highest': open_p,
                         'last_price': open_p,
                         'buy_date': date_str,
-                        'hold_days': 0
+                        'hold_days': 0,
+                        'consecutive_below_ma20': 0
                     }
                     buys_today += 1
                     
@@ -470,6 +488,13 @@ def run_ai_quant_system(
                 held[c]['highest'] = max(held[c].get('highest', curr_h), curr_h)
             if pd.notna(curr_p) and curr_p > 0:
                 held[c]['last_price'] = curr_p
+
+            # Theo dõi số phiên liên tiếp đóng cửa dưới MA20 (phục vụ Asymmetric Exit)
+            ma20_c = stocks_ma20.at[date, c] if c in stocks_ma20.columns else np.nan
+            if pd.notna(curr_p) and pd.notna(ma20_c) and curr_p < ma20_c:
+                held[c]['consecutive_below_ma20'] = held[c].get('consecutive_below_ma20', 0) + 1
+            else:
+                held[c]['consecutive_below_ma20'] = 0
 
         # Cập nhật NAV cuối phiên chuẩn xác theo Close[t]
         stock_val_close = get_current_stock_valuation(date)
@@ -558,17 +583,18 @@ def run_ai_quant_system(
                 buy_price = held[c]['buy_price']
                 profit_margin = (curr_price - buy_price) / buy_price
 
-                # BẢO VỆ VỊ THẾ CÓ LÃI ĐỆM >= +3%:
-                # Tuyệt đối KHÔNG bán hoảng loạn theo Macro! Để MA20 cá nhân hoặc Trailing Stop tự xử lý!
-                if profit_margin >= 0.03:
+                # BẢO VỆ VỊ THẾ CÓ LÃI ĐỆM:
+                # Nếu bật Asymmetric Exit: vị thế lãi >= +5% KHÔNG bán hoảng loạn theo Macro!
+                # Nếu không bật: giữ ngưỡng cũ (+3%)
+                cushion_threshold = 0.05 if enable_asymmetric_atr_exit else 0.03
+                if profit_margin >= cushion_threshold:
                     continue
 
-                # Chỉ cắt các vị thế đang lỗ, hòa hoặc lãi mỏng (< +3%)
+                # Chỉ cắt các vị thế đang lỗ, hòa hoặc lãi mỏng
                 pending_sells.append((c, 'SELL (Cắt Macro gãy MA100)'))
 
         else:
             # THỊ TRƯỜNG BÌNH THƯỜNG (HOẶC CHƯA XÁC NHẬN SẬP DỨT KHOÁT):
-            # Quản trị rủi ro thích ứng & Siết chặt Trailing Stop khi Index suy yếu dưới MA20
             index_below_ma20 = (pd.notna(market_ma20) and idx < market_ma20)
 
             for c in list(held.keys()):
@@ -583,42 +609,86 @@ def run_ai_quant_system(
                 peak_margin = (held[c]['highest'] - buy_price) / buy_price
                 ma20_c = stocks_ma20.at[date, c] if c in stocks_ma20.columns else np.nan
                 ma50_c = stocks_ma50.at[date, c] if c in stocks_ma50.columns else np.nan
+                consec_below = held[c].get('consecutive_below_ma20', 0)
+
+                atr_c = stocks_atr.at[date, c] if (stocks_atr is not None and c in stocks_atr.columns) else np.nan
+                atr_pct = (atr_c / curr_price) if (pd.notna(atr_c) and curr_price > 0) else 0.03
 
                 # LÝ DO 1: Rời rổ VN30
                 if c not in active_vn30:
                     pending_sells.append((c, 'SELL (Rời rổ VN30)'))
-                # LÝ DO 2: Cắt lỗ cứng -10%
-                elif profit_margin <= HARD_STOPLOSS:
-                    pending_sells.append((c, 'SELL (Cắt lỗ cứng -10%)'))
-                # LÝ DO 3: Quản trị Leader / Siêu cổ phiếu (Lãi đỉnh >= 20%)
-                elif peak_margin >= SUPER_WINNER_PEAK:
-                    # Khi Index suy yếu (dưới MA20), siết Trailing Stop từ 10% về 6% để khóa siêu lợi nhuận
-                    drop_allowed = 0.06 if index_below_ma20 else SUPER_WINNER_DROP
-                    if curr_price < (held[c]['highest'] * (1.0 - drop_allowed)):
-                        pending_sells.append((c, 'SELL (Trailing Stop chốt siêu cổ)'))
-                    elif pd.notna(ma50_c) and curr_price < ma50_c:
-                        pending_sells.append((c, 'SELL (Gãy MA50 chốt lời sóng lớn)'))
-                    elif index_below_ma20 and pd.notna(ma20_c) and curr_price < ma20_c and profit_margin >= 0.08:
-                        pending_sells.append((c, 'SELL (Thị trường dưới MA20 chốt siêu cổ)'))
-                    elif profit_margin <= 0.08:
-                        pending_sells.append((c, 'SELL (Khóa lãi sàn bảo vệ +8%)'))
-                # LÝ DO 4: Chặn lãi theo đỉnh vị thế (Lãi đỉnh 10% - 20%)
-                elif peak_margin >= PROFIT_PROTECTION_PEAK:
-                    # Khi Index suy yếu (dưới MA20), siết Trailing Stop từ 8% về 5%
-                    drop_allowed = 0.05 if index_below_ma20 else PROFIT_PROTECTION_DROP
-                    if curr_price < (held[c]['highest'] * (1.0 - drop_allowed)):
-                        pending_sells.append((c, 'SELL (Trailing Stop chốt lời)'))
-                    elif pd.notna(ma20_c) and curr_price < ma20_c and (profit_margin >= 0.03 if index_below_ma20 else 0.05):
-                        pending_sells.append((c, 'SELL (Thủng MA20 bảo toàn lãi)'))
-                    elif profit_margin <= PROFIT_PROTECTION_FLOOR:
-                        pending_sells.append((c, 'SELL (Khóa bảo vệ vốn +2%)'))
-                # LÝ DO 5: Vị thế bình thường (lãi đỉnh < 10%)
+
+                # GIẢI PHÁP 3: THOÁT VỊ THẾ BẤT ĐỐI XỨNG (ASYMMETRIC EXIT RULES)
+                elif enable_asymmetric_atr_exit:
+                    # 1. Cắt lỗ cứng -8% (dứt khoát bảo vệ vốn)
+                    if profit_margin <= -0.08:
+                        pending_sells.append((c, 'SELL (Cắt lỗ cứng -8%)'))
+
+                    # 2. VỊ THẾ CÓ LÃI ĐỆM TỐT (>= +5%):
+                    # KHÔNG bán ngay ở phiên đầu tiên vi phạm MA20 (tránh rũ bỏ ATC giả).
+                    # Yêu cầu 2 phiên liên tiếp đóng cửa dưới MA20 mới xác nhận bán.
+                    elif profit_margin >= 0.05:
+                        # Siêu cổ phiếu (Lãi đỉnh >= 20%)
+                        if peak_margin >= SUPER_WINNER_PEAK:
+                            super_drop = max(SUPER_WINNER_DROP, 2.5 * atr_pct)
+                            if curr_price < (held[c]['highest'] * (1.0 - super_drop)):
+                                pending_sells.append((c, 'SELL (Trailing Stop chốt siêu cổ)'))
+                            elif consec_below >= 2:
+                                pending_sells.append((c, 'SELL (Xác nhận 2 phiên thủng MA20 chốt siêu cổ)'))
+                            elif pd.notna(ma50_c) and curr_price < ma50_c:
+                                pending_sells.append((c, 'SELL (Gãy MA50 chốt lời sóng lớn)'))
+                            elif profit_margin <= 0.05:
+                                pending_sells.append((c, 'SELL (Khóa lãi sàn bảo vệ +5%)'))
+                        # Vị thế lãi khá (Lãi đỉnh 10% - 20%)
+                        elif peak_margin >= PROFIT_PROTECTION_PEAK:
+                            standard_drop = max(PROFIT_PROTECTION_DROP, 2.5 * atr_pct)
+                            if curr_price < (held[c]['highest'] * (1.0 - standard_drop)):
+                                pending_sells.append((c, 'SELL (Trailing Stop ATR chốt lời)'))
+                            elif consec_below >= 2:
+                                pending_sells.append((c, 'SELL (Xác nhận 2 phiên thủng MA20 bảo toàn lãi)'))
+                            elif profit_margin <= PROFIT_PROTECTION_FLOOR:
+                                pending_sells.append((c, 'SELL (Khóa bảo vệ vốn +2%)'))
+                        # Vị thế lãi 5% - 10% (Chưa kích hoạt Trailing Stop, để cổ phiếu có không gian tăng trưởng)
+                        else:
+                            if consec_below >= 2:
+                                pending_sells.append((c, 'SELL (Xác nhận 2 phiên thủng MA20 bảo toàn lãi)'))
+
+                    # 3. VỊ THẾ LÃI MỎNG HOẶC LỖ (< +5%): Cắt nhanh bảo vệ vốn
+                    else:
+                        if index_below_ma20 and pd.notna(ma20_c) and curr_price < ma20_c:
+                            pending_sells.append((c, 'SELL (Thị trường dưới MA20 cắt vị thế yếu)'))
+                        elif pd.notna(ma20_c) and curr_price < ma20_c and profit_margin <= 0:
+                            pending_sells.append((c, 'SELL (Thủng MA20 cắt lỗ nhanh)'))
+                        elif pd.notna(ma20_c) and curr_price < ma20_c and consec_below >= 2:
+                            pending_sells.append((c, 'SELL (2 phiên dưới MA20 cắt vị thế mỏng)'))
+
+                # NẾU TẮT ASYMMETRIC EXIT: DÙNG LOGIC GỐC
                 else:
-                    # Khi Index dưới MA20 và cổ phiếu thủng MA20 cá nhân -> thoát sớm bảo vệ vốn, không ôm lỗ
-                    if index_below_ma20 and pd.notna(ma20_c) and curr_price < ma20_c:
-                        pending_sells.append((c, 'SELL (Thị trường dưới MA20 cắt vị thế yếu)'))
-                    elif pd.notna(ma20_c) and curr_price < ma20_c and profit_margin > MA20_PROFIT_EXIT:
-                        pending_sells.append((c, 'SELL (Thủng MA20 bảo toàn lãi)'))
+                    if profit_margin <= HARD_STOPLOSS:
+                        pending_sells.append((c, 'SELL (Cắt lỗ cứng -10%)'))
+                    elif peak_margin >= SUPER_WINNER_PEAK:
+                        drop_allowed = 0.06 if index_below_ma20 else SUPER_WINNER_DROP
+                        if curr_price < (held[c]['highest'] * (1.0 - drop_allowed)):
+                            pending_sells.append((c, 'SELL (Trailing Stop chốt siêu cổ)'))
+                        elif pd.notna(ma50_c) and curr_price < ma50_c:
+                            pending_sells.append((c, 'SELL (Gãy MA50 chốt lời sóng lớn)'))
+                        elif index_below_ma20 and pd.notna(ma20_c) and curr_price < ma20_c and profit_margin >= 0.08:
+                            pending_sells.append((c, 'SELL (Thị trường dưới MA20 chốt siêu cổ)'))
+                        elif profit_margin <= 0.08:
+                            pending_sells.append((c, 'SELL (Khóa lãi sàn bảo vệ +8%)'))
+                    elif peak_margin >= PROFIT_PROTECTION_PEAK:
+                        drop_allowed = 0.05 if index_below_ma20 else PROFIT_PROTECTION_DROP
+                        if curr_price < (held[c]['highest'] * (1.0 - drop_allowed)):
+                            pending_sells.append((c, 'SELL (Trailing Stop chốt lời)'))
+                        elif pd.notna(ma20_c) and curr_price < ma20_c and (profit_margin >= 0.03 if index_below_ma20 else 0.05):
+                            pending_sells.append((c, 'SELL (Thủng MA20 bảo toàn lãi)'))
+                        elif profit_margin <= PROFIT_PROTECTION_FLOOR:
+                            pending_sells.append((c, 'SELL (Khóa bảo vệ vốn +2%)'))
+                    else:
+                        if index_below_ma20 and pd.notna(ma20_c) and curr_price < ma20_c:
+                            pending_sells.append((c, 'SELL (Thị trường dưới MA20 cắt vị thế yếu)'))
+                        elif pd.notna(ma20_c) and curr_price < ma20_c and profit_margin > MA20_PROFIT_EXIT:
+                            pending_sells.append((c, 'SELL (Thủng MA20 bảo toàn lãi)'))
 
         # =============================================================
         # (B) QUÉT TÍN HIỆU MUA CHO PHIÊN MAI (PRE-MA100 + HYSTERESIS BUFFER + COOLDOWN + SECTOR CAP)
@@ -663,10 +733,29 @@ def run_ai_quant_system(
         market_breadth = (vn30_above_ma50_cnt / len(active_vn30)) if len(active_vn30) > 0 else 0.5
         is_breadth_healthy = (market_breadth >= 0.35)
 
+        # GIẢI PHÁP 2: TÍNH NGƯỠNG AI SCORE DỰA TRÊN TOP 20% (PERCENTILE 80) TRONG 120 PHIÊN GẦN NHẤT
+        if enable_dynamic_percentile_ai:
+            win_start = max(0, i - 120)
+            win_matrix = stocks_ai_scores.iloc[win_start:i].values
+            valid_scores = win_matrix[~np.isnan(win_matrix)]
+            if len(valid_scores) >= 50:
+                p80 = np.percentile(valid_scores, 80)
+                current_ai_threshold = float(np.clip(p80, 0.55, 0.65))
+            else:
+                current_ai_threshold = 0.58
+        else:
+            current_ai_threshold = AI_THRESHOLD
+
+        # GIẢI PHÁP 4: BỘ LỌC ĐỘ DỐC MA20 CỦA INDEX & NGƯỠNG VOLUME BREAKOUT 1.3x
+        prev5_ma20 = backtest['MA20'].iloc[i-5] if i >= 5 else backtest['MA20'].iloc[0]
+        is_ma20_slope_rising = (market_ma20 > prev5_ma20) if (pd.notna(market_ma20) and pd.notna(prev5_ma20)) else True
+        vol_breakout_target = 1.3 if enable_ma20_slope_filter else VOL_BREAKOUT_RATIO
+
         can_enter_new_trades = (
             is_macro_buffer_ok
             and is_ma_trend_ok
             and is_index_above_ma20
+            and (is_ma20_slope_rising if enable_ma20_slope_filter else True)
             and is_not_distribution
             and is_cooldown_passed
             and is_volatility_calm
@@ -699,7 +788,7 @@ def run_ai_quant_system(
                     v_ratio = curr_vol / prev_v_ma
 
                     # Tín hiệu Momentum Breakout chuẩn mực
-                    if curr_price > prev_h20 and v_ratio >= VOL_BREAKOUT_RATIO and score >= AI_THRESHOLD:
+                    if curr_price > prev_h20 and v_ratio >= vol_breakout_target and score >= current_ai_threshold:
                         buy_candidates.append({
                             'ticker': c, 'score': score, 'signal': 'Breakout',
                             'sector': SECTOR_MAP.get(c, 'OTHER')
@@ -822,6 +911,7 @@ def main():
     stocks_vol_ma20 = pd.DataFrame(index=stocks_close.index)
     stocks_rsi = pd.DataFrame(index=stocks_close.index)
     stocks_macd = pd.DataFrame(index=stocks_close.index)
+    stocks_atr = pd.DataFrame(index=stocks_close.index)
 
     for c in loaded_tickers:
         s_c = stocks_close[c].dropna()
@@ -831,6 +921,15 @@ def main():
             stocks_high_20[c] = s_c.rolling(20).max().shift(1)
             stocks_rsi[c] = calc_rsi(s_c)
             stocks_macd[c] = calc_macd_hist(s_c)
+
+        h_col = f'{c}_H'
+        l_col = f'{c}_L'
+        if h_col in stocks_high.columns and l_col in stocks_low.columns and c in stocks_close.columns:
+            s_h = stocks_high[h_col].dropna()
+            s_l = stocks_low[l_col].dropna()
+            common_idx = s_h.index.intersection(s_l.index).intersection(s_c.index)
+            if len(common_idx) >= 14:
+                stocks_atr[c] = calc_atr(s_h.loc[common_idx], s_l.loc[common_idx], s_c.loc[common_idx], 14)
 
         if f'{c}_V' in stocks_volume.columns:
             s_v = stocks_volume[f'{c}_V'].dropna()
@@ -958,6 +1057,14 @@ def main():
 
 
 
+    print("\n" + "="*70)
+    print("⚙️ CẤU HÌNH HỆ THỐNG GIAO DỊCH ĐỊNH LƯỢNG (AI QUANT CONFIG):")
+    print(f"   • Solution 1: Time-Decayed Retrain Model: BẬT")
+    print(f"   • Solution 2: Rolling Percentile Dynamic AI (Top 20% / 120 bars): {'BẬT' if ENABLE_DYNAMIC_PERCENTILE_AI else 'TẮT (Cố định 0.60)'}")
+    print(f"   • Solution 3: Asymmetric Exit Rules (2 nến MA20 + 2.5x ATR Trailing): {'BẬT' if ENABLE_ASYMMETRIC_ATR_EXIT else 'TẮT'}")
+    print(f"   • Solution 4: Index MA20 Slope & 1.3x Breakout Volume: {'BẬT' if ENABLE_MA20_SLOPE_FILTER else 'TẮT'}")
+    print("="*70 + "\n")
+
     # ==========================================
     # CHẠY CHIẾN LƯỢC & XUẤT BÁO CÁO TOÀN DIỆN
     # ==========================================
@@ -972,9 +1079,13 @@ def main():
         stocks_vol_ma20=stocks_vol_ma20,
         stocks_ma20=stocks_ma20,
         stocks_ma50=stocks_ma50,
+        stocks_atr=stocks_atr,
         ai_dict=ai_dict,
         loaded_tickers=loaded_tickers,
-        backtest_start_date=BACKTEST_START_DATE
+        backtest_start_date=BACKTEST_START_DATE,
+        enable_dynamic_percentile_ai=ENABLE_DYNAMIC_PERCENTILE_AI,
+        enable_asymmetric_atr_exit=ENABLE_ASYMMETRIC_ATR_EXIT,
+        enable_ma20_slope_filter=ENABLE_MA20_SLOPE_FILTER
     )
 
     # Ghi nhận file trading_log.csv
