@@ -113,8 +113,9 @@ BACKTEST_START_DATE = os.environ.get('BACKTEST_START_DATE', '2022-01-01')
 ENABLE_DYNAMIC_PERCENTILE_AI = os.environ.get('ENABLE_DYNAMIC_PERCENTILE_AI', 'True').lower() in ('true', '1', 'yes')
 ENABLE_ASYMMETRIC_ATR_EXIT = os.environ.get('ENABLE_ASYMMETRIC_ATR_EXIT', 'True').lower() in ('true', '1', 'yes')
 ENABLE_MA20_SLOPE_FILTER = os.environ.get('ENABLE_MA20_SLOPE_FILTER', 'True').lower() in ('true', '1', 'yes')
-MAX_PER_SECTOR = int(os.environ.get('MAX_PER_SECTOR', '1'))        # Mặc định tối đa 1 mã/ngành (hoặc 2 nếu cấu hình)
-MAX_PER_ECOSYSTEM = int(os.environ.get('MAX_PER_ECOSYSTEM', '1'))  # Khóa trần hệ sinh thái: Tối đa 1 mã/hệ sinh thái (Chống sập kép VHM + VRE)
+ENABLE_ANTI_CHASE_FILTER = os.environ.get('ENABLE_ANTI_CHASE_FILTER', 'True').lower() in ('true', '1', 'yes')
+MAX_PER_SECTOR = int(os.environ.get('MAX_PER_SECTOR', '2'))        # Nới trần 2 mã/ngành, áp dụng Split-Size (10% NAV/lệnh khi cùng ngành)
+MAX_PER_ECOSYSTEM = int(os.environ.get('MAX_PER_ECOSYSTEM', '2'))  # Nới trần 2 mã/hệ sinh thái, áp dụng Split-Size (10% NAV/lệnh khi cùng hệ sinh thái)
 
 # ==========================================
 # CÁC HÀM TÍNH TOÁN CHỈ BÁO KỸ THUẬT
@@ -326,6 +327,8 @@ def run_ai_quant_system(
     stocks_ma20,
     stocks_ma50,
     stocks_atr,
+    stocks_rsi,
+    stocks_ret20,
     ai_dict,
     loaded_tickers,
     backtest_start_date=None,
@@ -334,7 +337,8 @@ def run_ai_quant_system(
     max_per_ecosystem=None,
     enable_dynamic_percentile_ai=ENABLE_DYNAMIC_PERCENTILE_AI,
     enable_asymmetric_atr_exit=ENABLE_ASYMMETRIC_ATR_EXIT,
-    enable_ma20_slope_filter=ENABLE_MA20_SLOPE_FILTER
+    enable_ma20_slope_filter=ENABLE_MA20_SLOPE_FILTER,
+    enable_anti_chase_filter=ENABLE_ANTI_CHASE_FILTER
 ):
     if backtest_start_date is None:
         backtest_start_date = BACKTEST_START_DATE
@@ -350,9 +354,9 @@ def run_ai_quant_system(
         ticker_scores = ai_dict.get(ticker_col, {})
         stocks_ai_scores[ticker_col] = [ticker_scores.get(d.strftime('%Y-%m-%d'), np.nan) for d in backtest['Date']]
     
-    MAX_SLOTS = 5                         # Tối đa 5 vị thế (20% NAV / slot)
-    MAX_PER_SECTOR = max_per_sector       # Khóa trần ngành: Mặc định tối đa 1 mã / ngành
-    MAX_PER_ECOSYSTEM = max_per_ecosystem # Khóa trần hệ sinh thái: Tối đa 1 mã / hệ sinh thái (Chống sập kép VHM + VRE)
+    MAX_SLOTS = 5                         # Tối đa 5 vị thế (20% NAV / slot tiêu chuẩn)
+    MAX_PER_SECTOR = max_per_sector       # Khóa trần ngành: Nới lên 2 mã, nhưng chia đôi tỷ trọng (Split-Size 10% NAV)
+    MAX_PER_ECOSYSTEM = max_per_ecosystem # Khóa trần hệ sinh thái: Nới lên 2 mã, nhưng chia đôi tỷ trọng (Split-Size 10% NAV)
     BUY_FRICTION = 0.0065              # 0.5% trượt giá + 0.15% phí mua
     SELL_FRICTION = 0.0075             # 0.5% trượt giá + 0.15% phí bán + 0.10% thuế
     ANNUAL_BANK_RATE = 0.04            # 4.0% / năm lãi gửi tiền mặt
@@ -484,7 +488,19 @@ def run_ai_quant_system(
                 cost_per_share_vnd = price_vnd * (1.0 + BUY_FRICTION)
                 cost_per_lot_vnd = cost_per_share_vnd * 100.0
                 
-                alloc = min(target_slot_size, cash)
+                # GIẢI PHÁP 1: SPLIT-SIZE ALLOCATION (1/2 VỐN KHI CÙNG NGÀNH HOẶC HỆ SINH THÁI)
+                # Nếu cùng ngành hoặc cùng hệ sinh thái đã có 1 mã (trong held hoặc cùng mua hôm nay), lệnh này nhận 10% NAV thay vì 20% NAV
+                sibling_in_pending = sum(
+                    1 for b in pending_buys
+                    if b['ticker'] != c and (
+                        SECTOR_MAP.get(b['ticker'], 'OTHER') == cand_sec or
+                        ECOSYSTEM_MAP.get(b['ticker'], b['ticker']) == cand_eco
+                    )
+                )
+                is_split_pos = (current_sec_count > 0) or (current_eco_count > 0) or (sibling_in_pending > 0) or cand.get('is_split_size', False)
+                slot_multiplier = 0.5 if is_split_pos else 1.0
+
+                alloc = min(target_slot_size * slot_multiplier, cash)
                 lots = np.floor(alloc / cost_per_lot_vnd)
                 shares = lots * 100.0  # Luôn là bội số chính xác của 100 cổ phiếu HOSE
                 
@@ -498,7 +514,8 @@ def run_ai_quant_system(
                         'last_price': open_p,
                         'buy_date': date_str,
                         'hold_days': 0,
-                        'consecutive_below_ma20': 0
+                        'consecutive_below_ma20': 0,
+                        'is_split_size': is_split_pos
                     }
                     buys_today += 1
                     
@@ -820,6 +837,8 @@ def run_ai_quant_system(
                     curr_vol = stocks_volume.at[date, f'{c}_V'] if f'{c}_V' in stocks_volume.columns else np.nan
                     prev_h20 = stocks_high_20.at[date, c] if c in stocks_high_20.columns else np.nan
                     prev_v_ma = stocks_vol_ma20.at[date, f'{c}_V'] if f'{c}_V' in stocks_vol_ma20.columns else np.nan
+                    ma50_c = stocks_ma50.at[date, c] if c in stocks_ma50.columns else np.nan
+                    rsi_c = stocks_rsi.at[date, c] if (stocks_rsi is not None and c in stocks_rsi.columns) else np.nan
 
                     if pd.isna(curr_price) or pd.isna(curr_vol) or pd.isna(prev_h20) or pd.isna(prev_v_ma):
                         continue
@@ -832,19 +851,45 @@ def run_ai_quant_system(
 
                     v_ratio = curr_vol / prev_v_ma
 
+                    # GIẢI PHÁP 3: BỘ LỌC CHỐNG MUA ĐUỔI VÙNG QUÁ MUA (ANTI-CHASE FILTER)
+                    # Chặn các lệnh breakout muộn khi cổ phiếu đã tăng nóng cách xa nền MA50 > 20% hoặc RSI(14) > 75
+                    # Tránh cú rơi -13.68% như VHM ngày 14/10/2025
+                    if enable_anti_chase_filter:
+                        is_chasing = False
+                        if pd.notna(ma50_c) and ma50_c > 0 and (curr_price > ma50_c * 1.20):
+                            is_chasing = True
+                        if pd.notna(rsi_c) and (rsi_c > 75.0):
+                            is_chasing = True
+                        if is_chasing:
+                            continue
+
                     # Tín hiệu Momentum Breakout chuẩn mực
                     if curr_price > prev_h20 and v_ratio >= vol_breakout_target and score >= current_ai_threshold:
+                        breakout_pct = ((curr_price / prev_h20) - 1.0) if (pd.notna(prev_h20) and prev_h20 > 0) else 0.0
+                        ret_20 = stocks_ret20.at[date, c] if (stocks_ret20 is not None and c in stocks_ret20.columns and pd.notna(stocks_ret20.at[date, c])) else 0.0
+
                         buy_candidates.append({
-                            'ticker': c, 'score': score, 'signal': 'Breakout',
+                            'ticker': c,
+                            'score': score,
+                            'signal': 'Breakout',
                             'sector': SECTOR_MAP.get(c, 'OTHER'),
-                            'ecosystem': ECOSYSTEM_MAP.get(c, c)
+                            'ecosystem': ECOSYSTEM_MAP.get(c, c),
+                            'breakout_pct': breakout_pct,
+                            'ret_20': ret_20
                         })
 
             if buy_candidates:
-                # Sắp xếp ưu tiên AI Score cao nhất
-                buy_candidates = sorted(buy_candidates, key=lambda x: x['score'], reverse=True)
+                # GIẢI PHÁP 2: SẮP XẾP ƯU TIÊN THEO ĐỘNG LƯỢNG GIÁ THAY VÌ BẢNG CHỮ CÁI
+                # 1. Điểm AI Score cao nhất
+                # 2. Tỷ lệ bứt phá đỉnh 20 phiên (% Breakout) mạnh nhất
+                # 3. Sức mạnh giá tương đối (RS / Tỷ suất sinh lời 20 phiên gần nhất) cao nhất
+                buy_candidates = sorted(
+                    buy_candidates,
+                    key=lambda x: (round(x['score'], 3), round(x['breakout_pct'], 4), round(x['ret_20'], 4)),
+                    reverse=True
+                )
                 
-                # KHÓA TRẦN NGÀNH & HỆ SINH THÁI (SECTOR CAP & ECOSYSTEM CAP)
+                # KHÓA TRẦN NGÀNH & HỆ SINH THÁI (KÈM CƠ CHẾ SPLIT-SIZE ALLOCATION)
                 selected_buys = []
                 for cand in buy_candidates:
                     if len(selected_buys) >= MAX_BUYS_PER_DAY:
@@ -860,6 +905,12 @@ def run_ai_quant_system(
                     eco_in_selected = sum(1 for b in selected_buys if b.get('ecosystem') == eco)
                     
                     if (sec_in_held + sec_in_selected) < MAX_PER_SECTOR and (eco_in_held + eco_in_selected) < MAX_PER_ECOSYSTEM:
+                        is_split = (sec_in_held + sec_in_selected >= 1) or (eco_in_held + eco_in_selected >= 1)
+                        cand['is_split_size'] = is_split
+                        if is_split:
+                            for prev_b in selected_buys:
+                                if prev_b.get('sector') == sec or prev_b.get('ecosystem') == eco:
+                                    prev_b['is_split_size'] = True
                         selected_buys.append(cand)
                     # Nếu ngành hoặc hệ sinh thái đã đủ trần, nhường slot cho ngành/hệ sinh thái khác
                 
@@ -963,6 +1014,7 @@ def main():
     stocks_rsi = pd.DataFrame(index=stocks_close.index)
     stocks_macd = pd.DataFrame(index=stocks_close.index)
     stocks_atr = pd.DataFrame(index=stocks_close.index)
+    stocks_ret20 = pd.DataFrame(index=stocks_close.index)
 
     for c in loaded_tickers:
         s_c = stocks_close[c].dropna()
@@ -972,6 +1024,7 @@ def main():
             stocks_high_20[c] = s_c.rolling(20).max().shift(1)
             stocks_rsi[c] = calc_rsi(s_c)
             stocks_macd[c] = calc_macd_hist(s_c)
+            stocks_ret20[c] = s_c.pct_change(20)
 
         h_col = f'{c}_H'
         l_col = f'{c}_L'
@@ -1114,7 +1167,9 @@ def main():
     print(f"   • Solution 2: Rolling Percentile Dynamic AI (Top 20% / 120 bars): {'BẬT' if ENABLE_DYNAMIC_PERCENTILE_AI else 'TẮT (Cố định 0.60)'}")
     print(f"   • Solution 3: Asymmetric Exit Rules (2 nến MA20 + 2.5x ATR Trailing): {'BẬT' if ENABLE_ASYMMETRIC_ATR_EXIT else 'TẮT'}")
     print(f"   • Solution 4: Index MA20 Slope & 1.3x Breakout Volume: {'BẬT' if ENABLE_MA20_SLOPE_FILTER else 'TẮT'}")
-    print(f"   • Ràng buộc Ngành & Hệ sinh thái: Tối đa {MAX_PER_SECTOR} mã/ngành | Tối đa {MAX_PER_ECOSYSTEM} mã/hệ sinh thái (Chống sập kép VHM + VRE)")
+    print(f"   • Solution 5: Split-Size Allocation (Tối đa {MAX_PER_SECTOR} mã/ngành, {MAX_PER_ECOSYSTEM} mã/HST | Chia đôi 10% NAV nếu cùng nhóm)")
+    print(f"   • Solution 6: Sắp xếp ưu tiên lệnh mua: Động lượng (AI Score -> Breakout% -> Ret20)")
+    print(f"   • Solution 7: Anti-Chase Filter (Chặn mua đuổi > MA50*1.20 hoặc RSI>75): {'BẬT' if ENABLE_ANTI_CHASE_FILTER else 'TẮT'}")
     print("="*70 + "\n")
 
     # ==========================================
@@ -1132,6 +1187,8 @@ def main():
         stocks_ma20=stocks_ma20,
         stocks_ma50=stocks_ma50,
         stocks_atr=stocks_atr,
+        stocks_rsi=stocks_rsi,
+        stocks_ret20=stocks_ret20,
         ai_dict=ai_dict,
         loaded_tickers=loaded_tickers,
         backtest_start_date=BACKTEST_START_DATE,
@@ -1139,7 +1196,8 @@ def main():
         max_per_ecosystem=MAX_PER_ECOSYSTEM,
         enable_dynamic_percentile_ai=ENABLE_DYNAMIC_PERCENTILE_AI,
         enable_asymmetric_atr_exit=ENABLE_ASYMMETRIC_ATR_EXIT,
-        enable_ma20_slope_filter=ENABLE_MA20_SLOPE_FILTER
+        enable_ma20_slope_filter=ENABLE_MA20_SLOPE_FILTER,
+        enable_anti_chase_filter=ENABLE_ANTI_CHASE_FILTER
     )
 
     # Ghi nhận file trading_log.csv
@@ -1253,7 +1311,8 @@ def main():
         msg += f"⚡ <b>TÍN HIỆU ĐẶT LỆNH ATO PHIÊN TIẾP THEO:</b>\n"
         for b in next_buys:
             b_sec = SECTOR_MAP.get(b['ticker'], 'OTHER')
-            msg += f"   • 🟢 Mua ATO: <b>{b['ticker']}</b> [{b_sec}] (AI Score: <b>{b['score']*100:.1f}%</b>)\n"
+            size_tag = " [10% NAV - Split-Size]" if b.get('is_split_size', False) else " [20% NAV]"
+            msg += f"   • 🟢 Mua ATO: <b>{b['ticker']}</b> [{b_sec}]{size_tag} (AI Score: <b>{b['score']*100:.1f}%</b>)\n"
         for s_tick, s_reason in next_sells:
             msg += f"   • 🔴 Bán ATO: <b>{s_tick}</b> ({s_reason})\n"
         msg += "\n"
@@ -1267,9 +1326,10 @@ def main():
             icon = "🟢" if unrealized_pnl >= 0 else "🔴"
             peak_pnl = ((pos['highest'] / pos['buy_price']) - 1.0) * 100.0
             leader_badge = " 👑 [Leader]" if peak_pnl >= 20.0 else ""
+            split_tag = " [1/2 Slot]" if pos.get('is_split_size', False) else ""
             qty_str = f"{int(pos['qty']):,} cp"
             sec_name = SECTOR_MAP.get(ticker, 'OTHER')
-            msg += f"{icon} <b>{ticker}</b> [{sec_name}] ({qty_str}): Giá {curr_p:,.2f} | Lãi tạm: <b>{unrealized_pnl:+.1f}%</b> (Đỉnh: +{peak_pnl:.1f}%){leader_badge} | T+{pos['hold_days']}\n"
+            msg += f"{icon} <b>{ticker}</b> [{sec_name}]{split_tag} ({qty_str}): Giá {curr_p:,.2f} | Lãi tạm: <b>{unrealized_pnl:+.1f}%</b> (Đỉnh: +{peak_pnl:.1f}%){leader_badge} | T+{pos['hold_days']}\n"
         msg += "\n"
     else:
         msg += "<i>100% Tiền mặt (Bảo toàn vốn tối đa, nhận lãi Bank 4%/năm).</i>\n\n"
