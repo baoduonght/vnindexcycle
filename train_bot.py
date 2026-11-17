@@ -68,7 +68,8 @@ def fetch_ticker_data(symbol, n_bars=4000):
     *** KHÔNG làm phẳng nến (Open=High=Low=Close) — ATR, ADX, MFI tính trên OHLCV thật ***
     """
     now_ts = int(datetime.datetime.now().timestamp())
-    start_ts = int((datetime.datetime.now() - datetime.timedelta(days=12*365)).timestamp())
+    # Lấy dữ liệu từ đầu năm 2012 để có đầy đủ 200-500 phiên nến trước 2014, giúp MA200/MA100/ATR sẵn sàng ngay từ ngày 01/01/2014
+    start_ts = int(datetime.datetime(2012, 1, 1).timestamp())
 
     is_index = symbol.upper() in ['VNINDEX', 'VN30', 'VN100', 'VNXALL', 'HNX', 'HNX30', 'UPCOM']
     entrade_endpoint = 'index' if is_index else 'stock'
@@ -159,14 +160,14 @@ def fetch_ticker_data(symbol, n_bars=4000):
 # 1. TẢI VN-INDEX & LẬP BỘ LỌC THỊ TRƯỜNG (OHLCV THẬT)
 # ==========================================
 print("1. Đang tải Market Proxy (VNINDEX)...")
-vnindex_raw = fetch_ticker_data('VNINDEX', n_bars=4000)
+vnindex_raw = fetch_ticker_data('VNINDEX', n_bars=4500)
 if vnindex_raw is None or vnindex_raw.empty:
     sys.exit("❌ LỖI: Không thể tải dữ liệu VNINDEX.")
 
 vnindex_df = vnindex_raw.rename(columns={'Close': 'VNINDEX'}).drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
 vnindex_df['MA50'] = vnindex_df['VNINDEX'].rolling(50, min_periods=20).mean()
-vnindex_df['MA100'] = vnindex_df['VNINDEX'].rolling(100, min_periods=40).mean()
-vnindex_df['MA200'] = vnindex_df['VNINDEX'].rolling(200, min_periods=80).mean()
+vnindex_df['MA100'] = vnindex_df['VNINDEX'].rolling(100, min_periods=30).mean()
+vnindex_df['MA200'] = vnindex_df['VNINDEX'].rolling(200, min_periods=40).mean()
 vnindex_df['ADX'] = calc_adx(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14)
 vnindex_df['ATR_PCT'] = calc_atr(vnindex_df['High'], vnindex_df['Low'], vnindex_df['VNINDEX'], 14) / vnindex_df['VNINDEX']
 # Bổ sung biến độ dao động 20 phiên của VN-Index cho mô hình AI
@@ -247,8 +248,8 @@ macro_df = macro_df.sort_values('Date').reset_index(drop=True)
 macro_cols = ['DXY', 'US10Y', 'USD_VND']
 for col in macro_cols:
     macro_df[col] = pd.to_numeric(macro_df[col], errors='coerce')
-    roll_m = macro_df[col].rolling(120, min_periods=20).mean()
-    roll_s = macro_df[col].rolling(120, min_periods=20).std()
+    roll_m = macro_df[col].rolling(120, min_periods=5).mean()
+    roll_s = macro_df[col].rolling(120, min_periods=5).std()
     macro_df[f'Z_{col}'] = (macro_df[col] - roll_m) / roll_s
 z_cols = [f'Z_{c}' for c in macro_cols]
 
