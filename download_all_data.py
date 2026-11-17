@@ -1,0 +1,246 @@
+"""
+=============================================================================
+SIÊU CÔNG CỤ TẢI TOÀN BỘ DỮ LIỆU CHỨNG KHOÁN VIỆT NAM (2012 - NAY)
+Tích hợp trực tiếp Vnstock Open API (vnstock-oapi v0.1.2) + DNSE + VNDirect + TCBS
+Hỗ trợ lấy toàn bộ nến OHLCV chuẩn xác của VNINDEX, VN30 và 66+ mã VN30 lịch sử
+=============================================================================
+"""
+
+import os
+import sys
+import time
+import datetime
+import requests
+import pandas as pd
+import numpy as np
+
+# Nạp biến môi trường từ .env nếu có
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+# Thử import vnstock_oapi (Vnstock Open API Gen 6)
+VNSTOCK_OAPI_AVAILABLE = False
+try:
+    import vnstock_oapi as oapi
+    VNSTOCK_OAPI_AVAILABLE = True
+except ImportError:
+    VNSTOCK_OAPI_AVAILABLE = False
+
+# Thử import vnstock thế hệ mới (Gen 6) hoặc cũ (v3)
+VNSTOCK_AVAILABLE = False
+try:
+    from vnstock import Market
+    VNSTOCK_AVAILABLE = True
+except ImportError:
+    try:
+        from vnstock import stock_historical_data
+        VNSTOCK_AVAILABLE = True
+    except ImportError:
+        VNSTOCK_AVAILABLE = False
+
+# Thử import rổ VN30 lịch sử từ vn30_universe
+try:
+    from vn30_universe import ALL_HISTORICAL_VN30_TICKERS
+except ImportError:
+    ALL_HISTORICAL_VN30_TICKERS = [
+        'ACB', 'BCM', 'BID', 'BVH', 'CII', 'CSM', 'CTD', 'CTG', 'DCM', 'DGC', 
+        'DIG', 'DPM', 'DRC', 'DXG', 'EIB', 'FLC', 'FPT', 'GAS', 'GMD', 'GVR', 
+        'HAG', 'HCM', 'HDB', 'HHS', 'HNG', 'HPG', 'HSG', 'HVG', 'HVN', 'IJC', 
+        'ITA', 'KBC', 'KDC', 'KDH', 'LPB', 'MBB', 'MSB', 'MSN', 'MWG', 'NKG', 
+        'NT2', 'NVL', 'OCB', 'OGC', 'PDR', 'PET', 'PGD', 'PLX', 'PNJ', 'POW', 
+        'PPC', 'PVD', 'PVT', 'REE', 'ROS', 'SAB', 'SBT', 'SHB', 'SJS', 'SSB', 
+        'SSI', 'STB', 'TCB', 'TPB', 'VCB', 'VCI', 'VHM', 'VIB', 'VIC', 'VJC', 
+        'VND', 'VNM', 'VPB', 'VRE', 'VSH'
+    ]
+
+DATA_DIR = "data"
+os.makedirs(DATA_DIR, exist_ok=True)
+
+START_DATE_STR = "2012-01-01"
+START_TS = int(datetime.datetime(2012, 1, 1).timestamp())
+NOW_TS = int(datetime.datetime.now().timestamp())
+NOW_DATE_STR = datetime.datetime.now().strftime("%Y-%m-%d")
+
+def fetch_ticker_multi_source(symbol):
+    """
+    Tải nến OHLCV thật từ hệ thống màng lưới đa API:
+    1. vnstock-oapi (Nếu đã cài đặt và cấu hình khoá DNSE/SSI/TCBS)
+    2. DNSE Entrade API Trực tiếp (Siêu tốc độ, không cần key)
+    3. VNDirect DChart API
+    4. TCBS Public API
+    5. Vnstock Market API
+    """
+    is_index = symbol.upper() in ['VNINDEX', 'VN30', 'VN100', 'VNXALL', 'HNX', 'HNX30', 'UPCOM']
+    entrade_endpoint = 'index' if is_index else 'stock'
+
+    # --- NGUỒN 1: DNSE ENTRADE API TRỰC TIẾP (Siêu tốc độ, 100% nến thật, KHÔNG CẦN KHOÁ) ---
+    try:
+        url = f"https://services.entrade.com.vn/chart-api/v2/ohlcs/{entrade_endpoint}?from={START_TS}&to={NOW_TS}&symbol={symbol}&resolution=1D"
+        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}, timeout=8)
+        if res.status_code == 200:
+            data = res.json()
+            if 't' in data and len(data['t']) > 50:
+                df = pd.DataFrame({
+                    'Date': pd.to_datetime(data['t'], unit='s').tz_localize(None).normalize(),
+                    'Open': data['o'],
+                    'High': data['h'],
+                    'Low': data['l'],
+                    'Close': data['c'],
+                    'Volume': data.get('v', [0] * len(data['t']))
+                })
+                df = df.drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
+                return df, "DNSE Entrade (Không cần key)"
+    except Exception:
+        pass
+
+    # --- NGUỒN 2: VNDIRECT DCHART API (Dự phòng 1) ---
+    try:
+        url = f"https://dchart-api.vndirect.com.vn/dchart/history?resolution=D&symbol={symbol}&from={START_TS}&to={NOW_TS}"
+        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}, timeout=8)
+        if res.status_code == 200:
+            data = res.json()
+            if data.get('s') == 'ok' and len(data.get('t', [])) > 50:
+                df = pd.DataFrame({
+                    'Date': pd.to_datetime(data['t'], unit='s').tz_localize(None).normalize(),
+                    'Open': data['o'],
+                    'High': data['h'],
+                    'Low': data['l'],
+                    'Close': data['c'],
+                    'Volume': data.get('v', [0] * len(data['t']))
+                })
+                df = df.drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
+                return df, "VNDirect"
+    except Exception:
+        pass
+
+    # --- NGUỒN 3: TCBS PUBLIC API (Dự phòng 2) ---
+    try:
+        api_type = 'index' if is_index else 'stock'
+        url = f"https://apipubaws.tcbs.com.vn/stock-insight/v1/stock/bars-long-term?ticker={symbol}&type={api_type}&resolution=D&from={START_TS}&to={NOW_TS}"
+        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}, timeout=8)
+        if res.status_code == 200:
+            data = res.json().get('data', [])
+            if len(data) > 50:
+                df = pd.DataFrame(data)
+                df.rename(columns={'tradingDate': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
+                df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None).dt.normalize()
+                df = df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
+                return df, "TCBS"
+    except Exception:
+        pass
+
+    # --- NGUỒN 4: VNSTOCK-OAPI (Dự phòng nếu có khoá trong .env) ---
+    if VNSTOCK_OAPI_AVAILABLE:
+        for src_name in ['dnse', 'ssi', 'tcbs']:
+            try:
+                src = oapi.source(src_name)
+                envelopes = src.ohlc(symbol, start=START_DATE_STR, end=NOW_DATE_STR, interval="1D")
+                if envelopes and len(envelopes) > 0:
+                    records = []
+                    for env in envelopes:
+                        body = getattr(env, 'body', env)
+                        if isinstance(body, list):
+                            records.extend(body)
+                        elif isinstance(body, dict):
+                            data_items = body.get('data') or body.get('bars') or body.get('t') or [body]
+                            if isinstance(data_items, list):
+                                records.extend(data_items)
+                    
+                    if records and len(records) > 50:
+                        df_o = pd.DataFrame(records)
+                        col_remap = {
+                            'tradingDate': 'Date', 'time': 'Date', 'date': 'Date', 't': 'Date',
+                            'open': 'Open', 'o': 'Open', 'high': 'High', 'h': 'High',
+                            'low': 'Low', 'l': 'Low', 'close': 'Close', 'c': 'Close',
+                            'volume': 'Volume', 'v': 'Volume'
+                        }
+                        for k, v in col_remap.items():
+                            if k in df_o.columns and v not in df_o.columns:
+                                df_o.rename(columns={k: v}, inplace=True)
+                        
+                        if 'Date' in df_o.columns and 'Close' in df_o.columns:
+                            df_o['Date'] = pd.to_datetime(df_o['Date']).dt.tz_localize(None).dt.normalize()
+                            df_o = df_o[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
+                            return df_o, f"vnstock-oapi ({src_name.upper()})"
+            except Exception:
+                pass
+
+    # --- NGUỒN 5: VNSTOCK (Gen 6 Market) ---
+    if VNSTOCK_AVAILABLE:
+        try:
+            mkt = Market()
+            df = mkt.equity(symbol).ohlcv(start=START_DATE_STR, end=NOW_DATE_STR)
+            if df is not None and len(df) > 50:
+                df.rename(columns={'time': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
+                df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None).dt.normalize()
+                df = df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
+                return df, "Vnstock (Market)"
+        except Exception:
+            pass
+
+    return None, None
+
+def main():
+    print("=" * 75)
+    print("🚀 BỘ TẢI DỮ LIỆU ĐỊNH LƯỢNG CHỨNG KHOÁN VIỆT NAM (2012 - NAY)")
+    print(f"📅 Khung thời gian: Từ {START_DATE_STR} đến {NOW_DATE_STR}")
+    print(f"📂 Thư mục lưu trữ: ./{DATA_DIR}/")
+    print(f"🔑 vnstock-oapi: {'✅ Đã kết nối' if VNSTOCK_OAPI_AVAILABLE else 'ℹ️ Chưa cài (Tự động dùng DNSE Direct, VNDirect, TCBS)'}")
+    print(f"📈 vnstock Gen 6: {'✅ Sẵn sàng' if VNSTOCK_AVAILABLE else 'ℹ️ Dùng Multi-API Trực tiếp'}")
+    print("=" * 75 + "\n")
+
+    target_symbols = ['VNINDEX', 'VN30'] + sorted(list(set(ALL_HISTORICAL_VN30_TICKERS)))
+    total_targets = len(target_symbols)
+
+    success_count = 0
+    failed_symbols = []
+    all_master_rows = []
+
+    start_time = time.time()
+
+    for idx, sym in enumerate(target_symbols, 1):
+        print(f"[{idx:02d}/{total_targets:02d}] Đang tải {sym:<8} ... ", end="", flush=True)
+        
+        df, source = fetch_ticker_multi_source(sym)
+        if df is not None and not df.empty:
+            file_path = os.path.join(DATA_DIR, f"{sym}.csv")
+            df.to_csv(file_path, index=False, float_format='%.2f')
+
+            df_master = df.copy()
+            df_master['Ticker'] = sym
+            all_master_rows.append(df_master[['Date', 'Ticker', 'Open', 'High', 'Low', 'Close', 'Volume']])
+
+            first_date = df['Date'].iloc[0].strftime('%Y-%m-%d')
+            last_date = df['Date'].iloc[-1].strftime('%Y-%m-%d')
+            n_bars = len(df)
+            print(f"✅ {n_bars:>5} phiên ({first_date} -> {last_date}) [{source}]")
+            success_count += 1
+        else:
+            print("❌ Thất bại (Không có dữ liệu hoặc mã đã hủy niêm yết từ lâu)")
+            failed_symbols.append(sym)
+
+        time.sleep(0.08)
+
+    print("\n" + "=" * 75)
+    print("📊 ĐANG TẠO FILE TỔNG HỢP TOÀN BỘ THỊ TRƯỜNG (MASTER CSV)...")
+    if all_master_rows:
+        master_df = pd.concat(all_master_rows, ignore_index=True)
+        master_df = master_df.sort_values(by=['Date', 'Ticker']).reset_index(drop=True)
+        master_file = "vn_database_all_tickers_2012_2026.csv"
+        master_df.to_csv(master_file, index=False, float_format='%.2f')
+        print(f"✅ Đã xuất File Master: {master_file} ({len(master_df):,} dòng dữ liệu)")
+
+    elapsed = time.time() - start_time
+    print("=" * 75)
+    print(f"🎉 HOÀN THÀNH TRONG {elapsed:.1f} GIÂY!")
+    print(f"   • Tải thành công: {success_count}/{total_targets} mã")
+    if failed_symbols:
+        print(f"   • Mã không tải được: {', '.join(failed_symbols)}")
+    print(f"   • Thư mục chứa file CSV từng mã: {os.path.abspath(DATA_DIR)}")
+    print("=" * 75)
+
+if __name__ == "__main__":
+    main()
