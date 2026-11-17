@@ -429,8 +429,19 @@ def run_ai_quant_system(
                     if pd.isna(open_p) or open_p <= 0:
                         continue  # Tạm ngừng giao dịch -> Giữ lại lệnh bán cho phiên tiếp theo
                     
-                    is_partial_leader_rebalance = ('Hoán đổi 50% tỷ trọng' in reason) and (held[c]['qty'] >= 200)
-                    sell_qty = int(np.floor((held[c]['qty'] * 0.5) / 100.0) * 100.0) if is_partial_leader_rebalance else held[c]['qty']
+                    # RÀNG BUỘC LÔ CHẴN 100 CỔ PHIẾU HOSE KHI BÁN HẠ 50% TỶ TRỌNG
+                    if 'Hoán đổi 50% tỷ trọng' in reason:
+                        shares_held = int(held[c]['qty'])
+                        sell_qty = (shares_held // 2 // 100) * 100
+                        rem_qty = shares_held - sell_qty
+                        if sell_qty < 100 or rem_qty < 100:
+                            # Không đủ để chia đôi thành 2 lô chẵn 100: Hủy cờ rebalance, giữ nguyên vị thế
+                            held[c]['rebalance_for_leader'] = False
+                            continue
+                        is_partial_leader_rebalance = True
+                    else:
+                        is_partial_leader_rebalance = False
+                        sell_qty = int(held[c]['qty'])
                     
                     sell_price_vnd = open_p * 1000.0
                     buy_price_vnd = held[c]['buy_price'] * 1000.0
@@ -535,12 +546,21 @@ def run_ai_quant_system(
                     is_split_pos = (len(held_siblings) > 0) or (sibling_in_pending > 0) or cand.get('is_split_size', False)
                     slot_multiplier = 0.5 if is_split_pos else 1.0
 
-                alloc = min(target_slot_size * slot_multiplier, cash)
-                lots = np.floor(alloc / cost_per_lot_vnd)
+                target_alloc = target_slot_size * slot_multiplier
+                # KIỂM TRA SỨC MUA TIỀN MẶT DỰ PHÒNG THỰC TẾ (CASH PURCHASING POWER):
+                # 1. Tiền mặt phải đủ mua tối thiểu 1 lô 100 cổ phiếu
+                # 2. Tiền mặt phải đủ trang trải ít nhất 50% vị thế chuẩn (chống mua manh mún khi tiền cũ chưa về)
+                if cash < cost_per_lot_vnd or cash < (target_alloc * 0.50):
+                    continue
+
+                max_lots_target = np.floor(target_alloc / cost_per_lot_vnd)
+                max_lots_cash = np.floor(cash / cost_per_lot_vnd)
+                lots = min(max_lots_target, max_lots_cash)
                 shares = lots * 100.0  # Luôn là bội số chính xác của 100 cổ phiếu HOSE
+                total_spent = shares * cost_per_share_vnd
                 
-                if shares >= 100:
-                    total_spent = shares * cost_per_share_vnd
+                # Chặn tuyệt đối nếu không đủ tiền mặt thanh toán thực tế
+                if shares >= 100 and cash >= total_spent:
                     cash -= total_spent
                     held[c] = {
                         'qty': shares,
@@ -719,7 +739,10 @@ def run_ai_quant_system(
 
                 # LÝ DO 2: HOÁN ĐỔI TỶ TRỌNG CHO LEADER MỚI BỨT PHÁ (LEADER REBALANCE)
                 elif held[c].get('rebalance_for_leader', False) and held[c]['hold_days'] >= MIN_HOLD_DAYS and profit_margin < 0.10:
-                    pending_sells.append((c, 'SELL (Hoán đổi 50% tỷ trọng cho Leader)'))
+                    shares_held = int(held[c]['qty'])
+                    can_split_lot = ((shares_held // 2 // 100) * 100 >= 100) and (shares_held - ((shares_held // 2 // 100) * 100) >= 100)
+                    if can_split_lot:
+                        pending_sells.append((c, 'SELL (Hoán đổi 50% tỷ trọng cho Leader)'))
                     held[c]['rebalance_for_leader'] = False
 
                 # GIẢI PHÁP 3: THOÁT VỊ THẾ BẤT ĐỐI XỨNG (ASYMMETRIC EXIT RULES)
