@@ -309,17 +309,42 @@ models_saved = {}
 
 print(f"   📊 Tổng số mẫu dữ liệu trích xuất hợp lệ: {len(train_data):,}")
 
-for year in OOS_YEARS:
-    # Cửa sổ huấn luyện cuốn chiếu 5 năm gần nhất: [year - 5, year)
-    start_train_date = f"{year - 5}-01-01"
+# 1. HUẤN LUYỆN NÃO BỘ CƠ SỞ: Học toàn diện 10 năm chu kỳ vàng (2012 -> 2022)
+print("\n" + "="*65)
+print("🧠 HUẤN LUYỆN NÃO BỘ CƠ SỞ CHU KỲ VÀNG: 2012 -> 2022")
+print("="*65)
+base_train_mask = (train_data['Date'] >= "2012-01-01") & (train_data['Date'] < "2022-01-01")
+X_base = train_data.loc[base_train_mask, ml_features]
+y_base = train_data.loc[base_train_mask, 'Target']
+scale_base = len(y_base[y_base == 0]) / len(y_base[y_base == 1]) if len(y_base[y_base == 1]) > 0 else 1.0
+
+base_model = xgb.XGBClassifier(
+    n_estimators=180,
+    max_depth=5,
+    learning_rate=0.04,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    scale_pos_weight=scale_base,
+    random_state=42,
+    eval_metric='logloss',
+    missing=np.nan
+)
+print(f"   ⚙️ Đang huấn luyện trên toàn bộ {base_train_mask.sum():,} mẫu (2012 -> 2021)...")
+base_model.fit(X_base, y_base)
+
+# Lưu làm model cho năm 2022 và mô hình cơ sở
+base_model.save_model("xgboost_model_2022.json")
+base_model.save_model("xgboost_ultimate.json")
+models_saved[2022] = base_model
+print("   ✅ Đã hoàn tất và lưu: xgboost_model_2022.json & xgboost_ultimate.json")
+
+# 2. HUẤN LUYỆN TIẾP CÁC NĂM OUT-OF-SAMPLE: 2023, 2024, 2025, 2026 (EXPANDING TỪ 2012)
+for year in [2023, 2024, 2025, 2026]:
+    start_train_date = "2012-01-01"
     end_train_date = f"{year}-01-01"
     
     train_mask = (train_data['Date'] >= start_train_date) & (train_data['Date'] < end_train_date)
     test_mask = (train_data['Date'] >= end_train_date) & (train_data['Date'] < f"{year + 1}-01-01")
-    
-    # Fallback nếu dữ liệu trước 2017 chưa đủ 5 năm: mở rộng từ đầu dữ liệu đến end_train_date
-    if train_mask.sum() < 200:
-        train_mask = train_data['Date'] < end_train_date
 
     X_train = train_data.loc[train_mask, ml_features]
     y_train = train_data.loc[train_mask, 'Target']
@@ -327,9 +352,9 @@ for year in OOS_YEARS:
     scale_weight = len(y_train[y_train == 0]) / len(y_train[y_train == 1]) if len(y_train[y_train == 1]) > 0 else 1.0
 
     model = xgb.XGBClassifier(
-        n_estimators=150,
+        n_estimators=180,
         max_depth=5,
-        learning_rate=0.05,
+        learning_rate=0.04,
         subsample=0.8,
         colsample_bytree=0.8,
         scale_pos_weight=scale_weight,
@@ -338,7 +363,7 @@ for year in OOS_YEARS:
         missing=np.nan
     )
 
-    print(f"\n   ⚙️ Huấn luyện Rolling Model cho năm {year} (Khung thời gian {start_train_date} -> {end_train_date}, {train_mask.sum():,} mẫu)...")
+    print(f"\n   ⚙️ Huấn luyện Expanding Model cho năm {year} (Học từ {start_train_date} -> {end_train_date}, {train_mask.sum():,} mẫu)...")
     model.fit(X_train, y_train)
 
     # Đánh giá Out-of-Sample trên năm tương ứng
@@ -358,7 +383,7 @@ for year in OOS_YEARS:
     model.save_model(model_filename)
     models_saved[year] = model
 
-# Mô hình mới nhất (2026 - học từ 2021 đến 2025) lưu làm mô hình mặc định
+# Mô hình cập nhật mới nhất cho 2026
 LATEST_MODEL_FILE = "xgboost_ultimate.json"
 if 2026 in models_saved:
     models_saved[2026].save_model(LATEST_MODEL_FILE)
