@@ -32,7 +32,8 @@ jobs:
       - name: ⚙️ Cài đặt thư viện tài chính & AI
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy yfinance requests xgboost scikit-learn plotly
+          pip install pandas numpy yfinance requests xgboost scikit-learn plotly python-dotenv
+          pip install --extra-index-url https://vnstocks.com/api/packages "vnstock-oapi>=0.1.0,<1" || echo "Không cài được vnstock-oapi, dùng fallback direct API"
           pip install git+https://github.com/rongardF/tvdatafeed.git
 
       # ==========================================
@@ -40,6 +41,10 @@ jobs:
       # ==========================================
       - name: 🧠 Mở Lò Luyện Đan (train_bot.py)
         if: github.event.schedule == '0 2 * * 6' || github.event_name == 'workflow_dispatch'
+        env:
+          DNSE_API_KEY: ${{ secrets.DNSE_API_KEY }}
+          DNSE_API_SECRET: ${{ secrets.DNSE_API_SECRET }}
+          VNSTOCK_OAPI_SESSION_BACKEND: file
         run: python train_bot.py
 
       - name: 💾 Lưu Não Bộ Mới Lên Github (.json)
@@ -59,6 +64,9 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DNSE_API_KEY: ${{ secrets.DNSE_API_KEY }}
+          DNSE_API_SECRET: ${{ secrets.DNSE_API_SECRET }}
+          VNSTOCK_OAPI_SESSION_BACKEND: file
         run: python quant_bot.py
 
       - name: 📊 Cập nhật Sổ Kế Toán trading_log.csv & daily_nav.csv lên Github (cho Power BI)
