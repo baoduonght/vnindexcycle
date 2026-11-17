@@ -50,8 +50,8 @@ except ImportError:
         'DIG', 'DPM', 'DRC', 'DXG', 'EIB', 'FLC', 'FPT', 'GAS', 'GMD', 'GVR', 
         'HAG', 'HCM', 'HDB', 'HHS', 'HNG', 'HPG', 'HSG', 'HVG', 'HVN', 'IJC', 
         'ITA', 'KBC', 'KDC', 'KDH', 'LPB', 'MBB', 'MSB', 'MSN', 'MWG', 'NKG', 
-        'NT2', 'NVL', 'OCB', 'OGC', 'PDR', 'PET', 'PGD', 'PLX', 'PNJ', 'POW', 
-        'PPC', 'PVD', 'PVT', 'REE', 'ROS', 'SAB', 'SBT', 'SHB', 'SJS', 'SSB', 
+        'NT2', 'NTL', 'NVL', 'OCB', 'OGC', 'PDR', 'PET', 'PGD', 'PLX', 'PNJ', 'POW', 
+        'PPC', 'PVD', 'PVF', 'PVT', 'QCG', 'REE', 'ROS', 'SAB', 'SBT', 'SHB', 'SJS', 'SSB', 
         'SSI', 'STB', 'TCB', 'TPB', 'VCB', 'VCI', 'VHM', 'VIB', 'VIC', 'VJC', 
         'VND', 'VNM', 'VPB', 'VRE', 'VSH'
     ]
