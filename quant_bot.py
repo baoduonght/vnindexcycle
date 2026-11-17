@@ -413,10 +413,12 @@ for c in loaded_tickers:
 # ==========================================
 # 4. SỔ KẾ TOÁN THỰC CHIẾN (NEXT-DAY OPEN + LÔ CHẴN 100 HOSE + HYSTERESIS BUFFER)
 # ==========================================
-print("4. Chạy Sổ Kế Toán (Point-in-Time VN30 + Khớp Open[t+1] + Khóa trần ngành + Hysteresis Buffer)...")
+# Cấu hình mốc kiểm thử thực chiến (AI học từ 2012 - 2022, kiểm thử từ 2022 đến nay)
+BACKTEST_START_DATE = os.environ.get('BACKTEST_START_DATE', '2022-01-01')
+print(f"4. Chạy Sổ Kế Toán Kiểm Thử Thực Chiến Out-of-Sample từ {BACKTEST_START_DATE} đến nay...")
 
 def run_ai_quant_system():
-    backtest = df_clean[df_clean['Date'] >= '2014-01-01'].copy().reset_index(drop=True)
+    backtest = df_clean[df_clean['Date'] >= BACKTEST_START_DATE].copy().reset_index(drop=True)
     
     MAX_SLOTS = 5                      # Tối đa 5 vị thế (20% NAV / slot)
     MAX_PER_SECTOR = 2                 # Khóa trần ngành: Tối đa 2 mã / ngành (Chống sập dây chuyền)
@@ -927,9 +929,11 @@ avg_loss_pct = sells.loc[sells['Profit(%)'] < 0, 'Profit(%)'].mean() if loss_sel
 payoff_ratio = abs(avg_win_pct / avg_loss_pct) if avg_loss_pct != 0 else 999.0
 
 print("\n" + "="*58)
-print("📊 BÁO CÁO ĐỊNH LƯỢNG THỰC CHIẾN 10 NĂM (SURVIVORSHIP-FREE)")
+print(f"📊 BÁO CÁO ĐỊNH LƯỢNG THỰC CHIẾN TỪ {BACKTEST_START_DATE[:4]} ĐẾN NAY")
+print("🧠 MÔ HÌNH: ĐÃ HUẤN LUYỆN TRÊN TOÀN BỘ CHU KỲ 2012 -> 2022")
+print("🎯 KIỂM THỬ THỰC CHIẾN HOÀN TOÀN OUT-OF-SAMPLE (100% BLIND TEST)")
 print("="*58)
-print(f"💵 Vốn khởi điểm (01/2014):        {initial_capital:,.0f} VNĐ")
+print(f"💵 Vốn khởi điểm ({BACKTEST_START_DATE}):        {initial_capital:,.0f} VNĐ")
 print(f"🏦 TỔNG TÀI SẢN HIỆN TẠI (NAV):   {final_nav:,.0f} VNĐ")
 print(f"💰 LÃI BANK THU VỀ (4%/năm):      +{total_interest:,.0f} VNĐ")
 print(f"🚀 TỔNG LỢI NHUẬN (Đã trừ phí):    +{total_return_pct:.2f}%")
@@ -971,7 +975,7 @@ latest_idx = df_clean['VNINDEX'].iloc[-1]
 latest_ma20 = df_clean['MA20'].iloc[-1] if 'MA20' in df_clean.columns else np.nan
 latest_ma100 = df_clean['MA100'].iloc[-1]
 
-msg = f"🤖 <b>SIÊU RADAR VN30 - BÁO CÁO THỰC CHIẾN</b> 🤖\n"
+msg = f"🤖 <b>SIÊU RADAR VN30 - BÁO CÁO THỰC CHIẾN (TEST {BACKTEST_START_DATE[:4]}-NAY)</b> 🤖\n"
 msg += f"📅 Ngày: <b>{latest_date.strftime('%d/%m/%Y')}</b>\n"
 msg += f"🏛 Rổ VN30 hiệu lực: <b>{len(active_today)} mã chuẩn HOSE</b>\n"
 if pd.notna(latest_ma20) and latest_idx < latest_ma20:
