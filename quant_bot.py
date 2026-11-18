@@ -582,34 +582,19 @@ def run_ai_quant_system(
                 cost_per_share_vnd = price_vnd * (1.0 + BUY_FRICTION)
                 cost_per_lot_vnd = cost_per_share_vnd * 100.0
                 
-                # GIẢI PHÁP 1 & CƠ CHẾ HOÁN ĐỔI TỶ TRỌNG CHO LEADER (LEADER REBALANCE):
-                # Ngưỡng chênh lệch AI tối thiểu +0.03 điểm để ngăn bẫy cắt lẻ vị thế khi chênh lệch nhỏ 0.005 - 0.01
-                LEADER_MIN_AI_MARGIN = 0.03
-                held_siblings = [
-                    h for h in held
-                    if (SECTOR_MAP.get(h, 'OTHER') == cand_sec or ECOSYSTEM_MAP.get(h, h) == cand_eco)
-                    and h != c
-                ]
-                
-                full_size_siblings = [h for h in held_siblings if not held[h].get('is_split_size', False)]
-                max_held_sibling_score = max([held[h].get('score', 0.55) for h in full_size_siblings], default=0.0)
-                is_leader_upgrade = (len(full_size_siblings) > 0) and (cand.get('score', 0.0) >= max_held_sibling_score + LEADER_MIN_AI_MARGIN)
-
-                sibling_in_pending = sum(
-                    1 for b in pending_buys
-                    if b['ticker'] != c and (
-                        SECTOR_MAP.get(b['ticker'], 'OTHER') == cand_sec or
-                        ECOSYSTEM_MAP.get(b['ticker'], b['ticker']) == cand_eco
-                    )
-                )
+                # ĐỒNG BỘ CƠ CHẾ HOÁN ĐỔI CHO LEADER TRUYỀN THẲNG TỪ BƯỚC ATC:
+                # Không tính lại trên 'held' tại Open để tránh mã thứ 2 vừa mua cùng buổi sáng kích hoạt rebalance lên mã thứ 1
+                is_leader_upgrade = cand.get('is_leader_upgrade', False)
+                rebalance_targets = cand.get('rebalance_targets', [])
+                is_split_pos = cand.get('is_split_size', False)
 
                 if is_leader_upgrade:
                     slot_multiplier = 1.0
                     is_split_pos = False
-                    for h in full_size_siblings:
-                        held[h]['rebalance_for_leader'] = True
+                    for h in rebalance_targets:
+                        if h in held and not held[h].get('is_split_size', False) and h != c:
+                            held[h]['rebalance_for_leader'] = True
                 else:
-                    is_split_pos = (len(held_siblings) > 0) or (sibling_in_pending > 0) or cand.get('is_split_size', False)
                     slot_multiplier = 0.5 if is_split_pos else 1.0
 
                 target_alloc = target_slot_size * slot_multiplier
@@ -967,7 +952,7 @@ def run_ai_quant_system(
         is_ma20_slope_rising = (market_ma20 > prev5_ma20) if (pd.notna(market_ma20) and pd.notna(prev5_ma20)) else True
         vol_breakout_target = 1.3 if enable_ma20_slope_filter else VOL_BREAKOUT_RATIO
 
-        can_enter_new_trades = (
+        is_full_trend_ok = (
             is_macro_buffer_ok
             and is_ma_trend_ok
             and is_ma100_not_falling
@@ -978,11 +963,39 @@ def run_ai_quant_system(
             and is_volatility_calm
             and is_breadth_healthy
             and (market_adx > ADX_MIN)
-            and (allowed_stock_cap > 0)
+        )
+
+        # CHẾ ĐỘ THĂM DÒ (PROBING REGIME) TRONG VÙNG TÍCH LŨY / ĐI NGANG PHÂN HÓA (2024 & 2026):
+        # Khi chỉ số đi ngang (kể cả ADX <= 18 hoặc MA20 chưa cắt MA50):
+        # Mở thăm dò tối đa 40% NAV (tối đa 2 slot) nếu:
+        # VN-Index > MA100 (An toàn vĩ mô) và Độ rộng thị trường VN30 >= 40% (dòng tiền phân hóa tích cực)
+        is_probing_ok = (
+            (idx > market_ma100)
+            and (market_breadth >= 0.40)
+            and is_cooldown_passed
+            and is_not_distribution
+            and is_volatility_calm
+            and is_ma100_not_falling
         )
 
         projected_held_count = len(held) - len(pending_sells)
-        available_slots = MAX_SLOTS - projected_held_count
+
+        if is_full_trend_ok:
+            can_enter_new_trades = (allowed_stock_cap > 0)
+            available_slots = MAX_SLOTS - projected_held_count
+            trade_signal_label = 'Breakout'
+        elif is_probing_ok:
+            # Khống chế chặt chẽ: Tối đa 40% NAV và tối đa 2 slot
+            max_probing_exposure = 0.40
+            current_max_exposure = min(current_max_exposure, max_probing_exposure)
+            allowed_stock_cap = max(0.0, (current_nav * current_max_exposure) - stock_val_close)
+            can_enter_new_trades = (allowed_stock_cap > 0) and (projected_held_count < 2)
+            available_slots = max(0, min(MAX_SLOTS - projected_held_count, 2 - projected_held_count))
+            trade_signal_label = 'Probing Breakout'
+        else:
+            can_enter_new_trades = False
+            available_slots = 0
+            trade_signal_label = 'None'
 
         if available_slots > 0 and can_enter_new_trades:
             buy_candidates = []
@@ -1026,7 +1039,7 @@ def run_ai_quant_system(
                         buy_candidates.append({
                             'ticker': c,
                             'score': score,
-                            'signal': 'Breakout',
+                            'signal': trade_signal_label,
                             'sector': SECTOR_MAP.get(c, 'OTHER'),
                             'ecosystem': ECOSYSTEM_MAP.get(c, c),
                             'breakout_pct': breakout_pct,
@@ -1047,7 +1060,7 @@ def run_ai_quant_system(
                 # KHÓA TRẦN NGÀNH & HỆ SINH THÁI (KÈM CƠ CHẾ SPLIT-SIZE ALLOCATION)
                 selected_buys = []
                 for cand in buy_candidates:
-                    if len(selected_buys) >= MAX_BUYS_PER_DAY:
+                    if len(selected_buys) >= MAX_BUYS_PER_DAY or len(selected_buys) >= available_slots:
                         break
                     
                     sec = cand['sector']
@@ -1069,7 +1082,13 @@ def run_ai_quant_system(
                         ]
                         full_size_siblings = [h for h in held_siblings if not held[h].get('is_split_size', False)]
                         max_sibling_score = max([held[h].get('score', 0.55) for h in full_size_siblings], default=0.0)
-                        is_leader_upgrade = (len(full_size_siblings) > 0) and (cand['score'] >= max_sibling_score + LEADER_MIN_AI_MARGIN)
+                        
+                        # Không rebalance nếu cùng nhóm đã có mã trong selected_buys hôm nay
+                        has_sibling_in_selected = any(b.get('sector') == sec or b.get('ecosystem') == eco for b in selected_buys)
+                        is_leader_upgrade = (len(full_size_siblings) > 0) and (not has_sibling_in_selected) and (cand['score'] >= max_sibling_score + LEADER_MIN_AI_MARGIN)
+                        
+                        cand['is_leader_upgrade'] = is_leader_upgrade
+                        cand['rebalance_targets'] = list(full_size_siblings) if is_leader_upgrade else []
                         
                         if is_leader_upgrade:
                             cand['is_split_size'] = False
@@ -1244,7 +1263,7 @@ def main():
     print("3. Đang tải Não bộ AI tĩnh & Đồng bộ Vĩ mô + Độ rộng...")
     try:
         macro_df = pd.read_csv('markets_database10years.csv')
-        macro_df = macro_df[['Date', 'DXY', 'US10Y', 'USD_VND']].copy()
+        macro_df = macro_df[['Date', 'DXY', 'US10Y', 'USD_VND', 'FED_LIQUIDITY']].copy()
         macro_df['Date'] = pd.to_datetime(macro_df['Date']).dt.strftime('%Y-%m-%d')
         macro_df = macro_df.drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
     except Exception as e:
@@ -1257,12 +1276,17 @@ def main():
     macro_df['USD_VND'] = macro_df['USD_VND'].apply(lambda x: np.nan if (pd.notna(x) and (x < 15000.0 or x > 35000.0)) else x)
     macro_df['USD_VND'] = macro_df['USD_VND'].ffill()
 
+    # LÀM SẠCH VÀ CHỐNG LOOK-AHEAD CHO FED_LIQUIDITY:
+    # Forward-fill dữ liệu công bố hàng tuần và shift(1) chống nhìn trước tương lai
+    macro_df['FED_LIQUIDITY'] = pd.to_numeric(macro_df.get('FED_LIQUIDITY', np.nan), errors='coerce').ffill()
+
     # ĐỒNG BỘ THỜI ĐIỂM CÔNG BỐ (PUBLICATION LAG):
-    # Thị trường VN đóng cửa lúc 15:00 (phát tín hiệu 15:30). Dữ liệu đóng cửa Mỹ (DXY, US10Y)
+    # Thị trường VN đóng cửa lúc 15:00 (phát tín hiệu 15:30). Dữ liệu đóng cửa Mỹ (DXY, US10Y, FED)
     # và tỷ giá ngoại hối quốc tế (Yahoo VND=X) kết thúc sau đó. Bắt buộc shift(1) để chống nhìn trước tương lai!
     macro_df['DXY'] = pd.to_numeric(macro_df['DXY'], errors='coerce').shift(1)
     macro_df['US10Y'] = pd.to_numeric(macro_df['US10Y'], errors='coerce').shift(1)
     macro_df['USD_VND'] = macro_df['USD_VND'].shift(1)
+    macro_df['FED_LIQUIDITY'] = macro_df['FED_LIQUIDITY'].shift(1)
 
     market_context = vnindex_df[['Date', 'VN_MFI', 'VNINDEX', 'MA200', 'VN_ATR_PCT']].copy()
     market_context['VN_Dist_MA200'] = market_context['VNINDEX'] / market_context['MA200']
@@ -1273,7 +1297,7 @@ def main():
     macro_df = macro_df.merge(market_context[['Date', 'VN_MFI', 'VN_Dist_MA200', 'VN_ATR_PCT', 'VN_Breadth_MA50']], on='Date', how='inner')
     macro_df = macro_df.sort_values('Date').reset_index(drop=True)
 
-    macro_cols = ['DXY', 'US10Y', 'USD_VND']
+    macro_cols = ['DXY', 'US10Y', 'USD_VND', 'FED_LIQUIDITY']
     for col in macro_cols:
         macro_df[col] = pd.to_numeric(macro_df[col], errors='coerce')
         roll_m = macro_df[col].rolling(120, min_periods=5).mean()
@@ -1346,6 +1370,21 @@ def main():
             return default_model
         sys.exit(f"🛑 LỖI BẢO MẬT WALK-FORWARD: Không tìm thấy mô hình hợp lệ cho năm {target_year}! Cấm tuyệt đối dùng model tương lai.")
 
+    def predict_with_model(model_obj, data_subset):
+        """Hàm dự báo linh hoạt tương thích cả model cũ và model mới có Z_FED_LIQUIDITY"""
+        if hasattr(model_obj, 'feature_names_in_') and model_obj.feature_names_in_ is not None:
+            f_names = list(model_obj.feature_names_in_)
+        elif hasattr(model_obj, 'get_booster') and model_obj.get_booster().feature_names:
+            f_names = list(model_obj.get_booster().feature_names)
+        else:
+            f_names = list(ml_features)
+        
+        sub_df = data_subset[[c for c in f_names if c in data_subset.columns]].copy()
+        for col in f_names:
+            if col not in sub_df.columns:
+                sub_df[col] = np.nan
+        return model_obj.predict_proba(sub_df[f_names])[:, 1]
+
     # Chấm điểm AI Score thích ứng Walk-Forward OOS
     ml_master['AI_Score'] = np.nan
 
@@ -1353,7 +1392,7 @@ def main():
     pre_2022_mask = ml_master['Date'] < '2022-01-01'
     if pre_2022_mask.sum() > 0:
         base_m = get_model_for_year(2022)
-        ml_master.loc[pre_2022_mask, 'AI_Score'] = base_m.predict_proba(ml_master.loc[pre_2022_mask, ml_features])[:, 1]
+        ml_master.loc[pre_2022_mask, 'AI_Score'] = predict_with_model(base_m, ml_master.loc[pre_2022_mask])
 
     # 2. Các năm Out-of-Sample 2022 -> 2026: Dùng đúng mô hình học trước năm đó!
     for y in [2022, 2023, 2024, 2025, 2026]:
@@ -1364,7 +1403,7 @@ def main():
 
         if y_mask.sum() > 0:
             m_y = get_model_for_year(y)
-            ml_master.loc[y_mask, 'AI_Score'] = m_y.predict_proba(ml_master.loc[y_mask, ml_features])[:, 1]
+            ml_master.loc[y_mask, 'AI_Score'] = predict_with_model(m_y, ml_master.loc[y_mask])
 
     # Tạo tra cứu AI Score dạng dict (Key: ticker -> {date_str: score})
     ai_dict = {}
@@ -1383,7 +1422,7 @@ def main():
     print(f"   • Solution 5: Split-Size & Leader Rebalance (Tối đa {MAX_PER_SECTOR} mã/ngành, {MAX_PER_ECOSYSTEM} mã/HST | Hoán đổi 20% NAV cho Leader)")
     print(f"   • Solution 6: Sắp xếp ưu tiên lệnh mua: Động lượng (AI Score -> Breakout% -> Ret20)")
     print(f"   • Solution 7: Anti-Chase Filter (Chặn mua đuổi > MA50*1.20 hoặc RSI>82): {'BẬT' if ENABLE_ANTI_CHASE_FILTER else 'TẮT'}")
-    print(f"   • Solution 8: Macro Synchronization (Đồng bộ Mua/Bán Vĩ mô: Index > MA100 & MA50 dốc lên): BẬT")
+    print(f"   • Solution 8: Macro Synchronization & Probing Mode (Đồng bộ Mua/Bán Vĩ mô: Index > MA100 & Thăm dò 40% NAV khi tích lũy): BẬT")
     print("="*70 + "\n")
 
     # ==========================================
@@ -1487,7 +1526,7 @@ def main():
     vnindex_start = df_clean.loc[df_clean['Date'] >= BACKTEST_START_DATE, 'VNINDEX'].iloc[0]
     vnindex_end = df_clean['VNINDEX'].iloc[-1]
     vnindex_return_pct = ((vnindex_end / vnindex_start) - 1.0) * 100.0
-    pure_cash_return_pct = (((1.0 + 0.04/250) ** len(df_nav_hist)) - 1.0) * 100.0
+    pure_cash_return_pct = (((1.0 + 0.04/252) ** len(df_nav_hist)) - 1.0) * 100.0
 
     print("\n" + "="*58)
     print(f"📊 BÁO CÁO ĐỊNH LƯỢNG THỰC CHIẾN TỪ {BACKTEST_START_DATE[:4]} ĐẾN NAY")
@@ -1595,8 +1634,9 @@ def main():
         msg += f"⚡ <b>TÍN HIỆU ĐẶT LỆNH ATO PHIÊN TIẾP THEO:</b>\n"
         for b in next_buys:
             b_sec = SECTOR_MAP.get(b['ticker'], 'OTHER')
+            probing_tag = " 🔭 [Thăm dò Tích lũy]" if "Probing" in b.get('signal', '') else ""
             size_tag = " [10% NAV - Split-Size]" if b.get('is_split_size', False) else " [20% NAV]"
-            msg += f"   • 🟢 Mua ATO: <b>{b['ticker']}</b> [{b_sec}]{size_tag} (AI Score: <b>{b['score']*100:.1f}%</b>)\n"
+            msg += f"   • 🟢 Mua ATO: <b>{b['ticker']}</b> [{b_sec}]{size_tag}{probing_tag} (AI Score: <b>{b['score']*100:.1f}%</b>)\n"
         for s_tick, s_reason in next_sells:
             msg += f"   • 🔴 Bán ATO: <b>{s_tick}</b> ({s_reason})\n"
         msg += "\n"
