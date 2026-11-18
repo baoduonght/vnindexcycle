@@ -123,7 +123,6 @@ ENABLE_MA20_SLOPE_FILTER = os.environ.get('ENABLE_MA20_SLOPE_FILTER', 'True').lo
 ENABLE_ANTI_CHASE_FILTER = os.environ.get('ENABLE_ANTI_CHASE_FILTER', 'True').lower() in ('true', '1', 'yes')
 MAX_PER_SECTOR = int(os.environ.get('MAX_PER_SECTOR', '2'))        # Nới trần 2 mã/ngành, áp dụng Split-Size (10% NAV/lệnh khi cùng ngành)
 MAX_PER_ECOSYSTEM = int(os.environ.get('MAX_PER_ECOSYSTEM', '2'))  # Nới trần 2 mã/hệ sinh thái, áp dụng Split-Size (10% NAV/lệnh khi cùng hệ sinh thái)
-HARD_STOPLOSS = float(os.environ.get('HARD_STOPLOSS', '-0.075'))    # Cắt lỗ cứng độc lập -7.5% (Chặn đứng mọi khoản lỗ đuôi trái)
 
 # ==========================================
 # CÁC HÀM TÍNH TOÁN CHỈ BÁO KỸ THUẬT
@@ -348,8 +347,7 @@ def run_ai_quant_system(
     enable_dynamic_percentile_ai=ENABLE_DYNAMIC_PERCENTILE_AI,
     enable_asymmetric_atr_exit=ENABLE_ASYMMETRIC_ATR_EXIT,
     enable_ma20_slope_filter=ENABLE_MA20_SLOPE_FILTER,
-    enable_anti_chase_filter=ENABLE_ANTI_CHASE_FILTER,
-    hard_stoploss=HARD_STOPLOSS
+    enable_anti_chase_filter=ENABLE_ANTI_CHASE_FILTER
 ):
     if backtest_start_date is None:
         backtest_start_date = BACKTEST_START_DATE
@@ -375,7 +373,7 @@ def run_ai_quant_system(
     MIN_HOLD_DAYS = 3                  # Chu kỳ T+2.5 (mua Open ngày t, bán sớm nhất Open ngày t+3)
     
     AI_THRESHOLD = 0.60                # Ngưỡng AI Score chọn lọc cao cấp (Lọc bỏ bẫy Breakout phân khúc 0.55-0.59)
-    VOL_BREAKOUT_RATIO = 1.3           # Volume đột biến >= 1.3x MA20 (Lọc bỏ các cú breakout yếu)
+    VOL_BREAKOUT_RATIO = 1.2           # Volume đột biến >= 1.2x MA20
     ADX_MIN = 18                       # Bắt xu hướng thị trường ADX > 18
     MAX_BUYS_PER_DAY = 2               # Tối đa 2 lệnh mua / ngày (Giải ngân phân lớp)
     TRAILING_STOP_TRIGGER = 0.15       # Trailing stop tiêu chuẩn khi lãi đỉnh >= 15%
@@ -386,7 +384,7 @@ def run_ai_quant_system(
     PROFIT_PROTECTION_DROP = 0.08      # Rớt 8% từ đỉnh thì chốt toàn bộ vị thế
     PROFIT_PROTECTION_FLOOR = 0.02     # Sàn bảo vệ vốn/lãi tối thiểu +2%
     MA20_PROFIT_EXIT = 0.10            # Thủng MA20 chốt lãi khi đã có đệm > 10%
-    HARD_STOPLOSS = hard_stoploss      # Cắt lỗ cứng độc lập (Chặn đứng mọi khoản lỗ đuôi trái)
+    HARD_STOPLOSS = -0.10              # Cắt lỗ cứng -10%
     PORTFOLIO_MDD_LIMIT = -0.18        # Portfolio Stop: Tổng NAV giảm 18% từ đỉnh chu kỳ -> bán hết
     
     INITIAL_CAPITAL = initial_capital  # Vốn khởi điểm (mặc định 100 triệu VNĐ)
@@ -567,14 +565,12 @@ def run_ai_quant_system(
                 if c in held:
                     continue
                 
-                # Kiểm tra trần ngành (Riêng Bank tối đa 1 mã) và hệ sinh thái thực tế tại thời điểm khớp
+                # Kiểm tra trần ngành và hệ sinh thái thực tế tại thời điểm khớp
                 cand_sec = SECTOR_MAP.get(c, 'OTHER')
                 cand_eco = ECOSYSTEM_MAP.get(c, c)
-                sec_cap_limit = 1 if cand_sec == 'BANK' else MAX_PER_SECTOR
-                eco_cap_limit = MAX_PER_ECOSYSTEM
                 current_sec_count = sum(1 for h in held if SECTOR_MAP.get(h, 'OTHER') == cand_sec)
                 current_eco_count = sum(1 for h in held if ECOSYSTEM_MAP.get(h, h) == cand_eco)
-                if current_sec_count >= sec_cap_limit or current_eco_count >= eco_cap_limit:
+                if current_sec_count >= MAX_PER_SECTOR or current_eco_count >= MAX_PER_ECOSYSTEM:
                     continue
 
                 # BẮT BUỘC: Khớp tại Open[t]. TUYỆT ĐỐI KHÔNG fallback về Close[t] cùng ngày
@@ -586,19 +582,34 @@ def run_ai_quant_system(
                 cost_per_share_vnd = price_vnd * (1.0 + BUY_FRICTION)
                 cost_per_lot_vnd = cost_per_share_vnd * 100.0
                 
-                # ĐỒNG BỘ CƠ CHẾ HOÁN ĐỔI CHO LEADER TRUYỀN THẲNG TỪ BƯỚC ATC:
-                # Không tính lại trên 'held' tại Open để tránh mã thứ 2 vừa mua cùng buổi sáng kích hoạt rebalance lên mã thứ 1
-                is_leader_upgrade = cand.get('is_leader_upgrade', False)
-                rebalance_targets = cand.get('rebalance_targets', [])
-                is_split_pos = cand.get('is_split_size', False)
+                # GIẢI PHÁP 1 & CƠ CHẾ HOÁN ĐỔI TỶ TRỌNG CHO LEADER (LEADER REBALANCE):
+                # Ngưỡng chênh lệch AI tối thiểu +0.03 điểm để ngăn bẫy cắt lẻ vị thế khi chênh lệch nhỏ 0.005 - 0.01
+                LEADER_MIN_AI_MARGIN = 0.03
+                held_siblings = [
+                    h for h in held
+                    if (SECTOR_MAP.get(h, 'OTHER') == cand_sec or ECOSYSTEM_MAP.get(h, h) == cand_eco)
+                    and h != c
+                ]
+                
+                full_size_siblings = [h for h in held_siblings if not held[h].get('is_split_size', False)]
+                max_held_sibling_score = max([held[h].get('score', 0.55) for h in full_size_siblings], default=0.0)
+                is_leader_upgrade = (len(full_size_siblings) > 0) and (cand.get('score', 0.0) >= max_held_sibling_score + LEADER_MIN_AI_MARGIN)
+
+                sibling_in_pending = sum(
+                    1 for b in pending_buys
+                    if b['ticker'] != c and (
+                        SECTOR_MAP.get(b['ticker'], 'OTHER') == cand_sec or
+                        ECOSYSTEM_MAP.get(b['ticker'], b['ticker']) == cand_eco
+                    )
+                )
 
                 if is_leader_upgrade:
                     slot_multiplier = 1.0
                     is_split_pos = False
-                    for h in rebalance_targets:
-                        if h in held and not held[h].get('is_split_size', False) and h != c:
-                            held[h]['rebalance_for_leader'] = True
+                    for h in full_size_siblings:
+                        held[h]['rebalance_for_leader'] = True
                 else:
+                    is_split_pos = (len(held_siblings) > 0) or (sibling_in_pending > 0) or cand.get('is_split_size', False)
                     slot_multiplier = 0.5 if is_split_pos else 1.0
 
                 target_alloc = target_slot_size * slot_multiplier
@@ -747,18 +758,6 @@ def run_ai_quant_system(
         # (A) QUÉT TÍN HIỆU BÁN ĐỂ KHỚP TẠI OPEN PHIÊN MAI
         already_pending_sells = {item[0] for item in pending_sells}
 
-        # BỘ NGẮT MẠCH CẮT LỖ CỨNG ĐỘC LẬP (-7.5%):
-        # Ưu tiên cao nhất cho mọi vị thế đã đủ T+2.5, chặn đứng triệt để các khoản lỗ đuôi trái (fat-tail losses)
-        for c in list(held.keys()):
-            if held[c]['hold_days'] >= MIN_HOLD_DAYS and c not in already_pending_sells:
-                c_p = stocks_close.at[date, c] if c in stocks_close.columns else np.nan
-                if pd.notna(c_p) and c_p > 0:
-                    b_p = held[c]['buy_price']
-                    p_margin = (c_p - b_p) / b_p
-                    if p_margin <= HARD_STOPLOSS:
-                        pending_sells.append((c, f'SELL (Cắt lỗ cứng {HARD_STOPLOSS*100:.1f}%)'))
-                        already_pending_sells.add(c)
-
         if portfolio_dd <= -0.18 and len(held) > 0:
             # CẦU DAO PORTFOLIO STOP: Tổng NAV sụt 18% từ đỉnh chu kỳ -> Bán toàn bộ
             for c in list(held.keys()):
@@ -825,9 +824,9 @@ def run_ai_quant_system(
 
                 # GIẢI PHÁP 3: THOÁT VỊ THẾ BẤT ĐỐI XỨNG (ASYMMETRIC EXIT RULES)
                 elif enable_asymmetric_atr_exit:
-                    # 1. Cắt lỗ cứng độc lập (dứt khoát bảo vệ vốn)
-                    if profit_margin <= HARD_STOPLOSS:
-                        pending_sells.append((c, f'SELL (Cắt lỗ cứng {HARD_STOPLOSS*100:.1f}%)'))
+                    # 1. Cắt lỗ cứng -8% (dứt khoát bảo vệ vốn)
+                    if profit_margin <= -0.08:
+                        pending_sells.append((c, 'SELL (Cắt lỗ cứng -8%)'))
 
                     # 2. SIÊU CỔ PHIẾU (LÃI ĐỈNH >= 20%):
                     # Duy trì trạng thái bảo vệ theo đỉnh; không bao giờ bị rơi rụng nhánh khi lãi giảm
@@ -871,7 +870,7 @@ def run_ai_quant_system(
                 # NẾU TẮT ASYMMETRIC EXIT: DÙNG LOGIC GỐC
                 else:
                     if profit_margin <= HARD_STOPLOSS:
-                        pending_sells.append((c, f'SELL (Cắt lỗ cứng {HARD_STOPLOSS*100:.1f}%)'))
+                        pending_sells.append((c, 'SELL (Cắt lỗ cứng -10%)'))
                     elif peak_margin >= SUPER_WINNER_PEAK:
                         drop_allowed = 0.06 if index_below_ma20 else SUPER_WINNER_DROP
                         if curr_price < (held[c]['highest'] * (1.0 - drop_allowed)):
@@ -968,7 +967,7 @@ def run_ai_quant_system(
         is_ma20_slope_rising = (market_ma20 > prev5_ma20) if (pd.notna(market_ma20) and pd.notna(prev5_ma20)) else True
         vol_breakout_target = 1.3 if enable_ma20_slope_filter else VOL_BREAKOUT_RATIO
 
-        is_full_trend_ok = (
+        can_enter_new_trades = (
             is_macro_buffer_ok
             and is_ma_trend_ok
             and is_ma100_not_falling
@@ -979,25 +978,14 @@ def run_ai_quant_system(
             and is_volatility_calm
             and is_breadth_healthy
             and (market_adx > ADX_MIN)
+            and (allowed_stock_cap > 0)
         )
 
         projected_held_count = len(held) - len(pending_sells)
-
-        if is_full_trend_ok:
-            can_enter_new_trades = (allowed_stock_cap > 0)
-            available_slots = MAX_SLOTS - projected_held_count
-            trade_signal_label = 'Breakout'
-        else:
-            can_enter_new_trades = False
-            available_slots = 0
-            trade_signal_label = 'None'
+        available_slots = MAX_SLOTS - projected_held_count
 
         if available_slots > 0 and can_enter_new_trades:
             buy_candidates = []
-            vn_ret20 = (idx - backtest['VNINDEX'].iloc[i-20]) / backtest['VNINDEX'].iloc[i-20] if i >= 20 else 0.0
-            prev5_date = backtest['Date'].iloc[i-5] if i >= 5 else backtest['Date'].iloc[0]
-            vol_target = max(1.30, vol_breakout_target)
-
             for c in active_vn30:
                 if c not in held and c in loaded_tickers and c in stocks_close.columns:
                     curr_price = stocks_close.at[date, c]
@@ -1030,28 +1018,15 @@ def run_ai_quant_system(
                         if is_chasing:
                             continue
 
-                    # BỘ LỌC CHẤT LƯỢNG CỔ PHIẾU KHI BREAKOUT:
-                    # 1. Đường MA20 của cổ phiếu dốc lên (đảm bảo cấu trúc giá xu hướng tăng ngắn hạn)
-                    curr_ma20 = stocks_ma20.at[date, c] if c in stocks_ma20.columns else np.nan
-                    prev5_ma20_c = stocks_ma20.at[prev5_date, c] if c in stocks_ma20.columns else np.nan
-                    is_stock_ma20_rising = (curr_ma20 > prev5_ma20_c) if (pd.notna(curr_ma20) and pd.notna(prev5_ma20_c)) else True
-
-                    # 2. Sức mạnh giá tương đối (Relative Strength): không yếu hơn VN-Index quá 2%
-                    ret_20 = stocks_ret20.at[date, c] if (stocks_ret20 is not None and c in stocks_ret20.columns and pd.notna(stocks_ret20.at[date, c])) else 0.0
-                    is_outperforming_vnindex = (ret_20 >= vn_ret20 - 0.02)
-
-                    # Tín hiệu Momentum Breakout chuẩn mực (Đầy đủ tiêu chuẩn Trend, Volume bứt phá >= 1.3x, AI Score & RS)
-                    if (curr_price > prev_h20 
-                        and v_ratio >= vol_target 
-                        and score >= current_ai_threshold 
-                        and is_stock_ma20_rising 
-                        and is_outperforming_vnindex):
+                    # Tín hiệu Momentum Breakout chuẩn mực
+                    if curr_price > prev_h20 and v_ratio >= vol_breakout_target and score >= current_ai_threshold:
                         breakout_pct = ((curr_price / prev_h20) - 1.0) if (pd.notna(prev_h20) and prev_h20 > 0) else 0.0
+                        ret_20 = stocks_ret20.at[date, c] if (stocks_ret20 is not None and c in stocks_ret20.columns and pd.notna(stocks_ret20.at[date, c])) else 0.0
 
                         buy_candidates.append({
                             'ticker': c,
                             'score': score,
-                            'signal': trade_signal_label,
+                            'signal': 'Breakout',
                             'sector': SECTOR_MAP.get(c, 'OTHER'),
                             'ecosystem': ECOSYSTEM_MAP.get(c, c),
                             'breakout_pct': breakout_pct,
@@ -1072,7 +1047,7 @@ def run_ai_quant_system(
                 # KHÓA TRẦN NGÀNH & HỆ SINH THÁI (KÈM CƠ CHẾ SPLIT-SIZE ALLOCATION)
                 selected_buys = []
                 for cand in buy_candidates:
-                    if len(selected_buys) >= MAX_BUYS_PER_DAY or len(selected_buys) >= available_slots:
+                    if len(selected_buys) >= MAX_BUYS_PER_DAY:
                         break
                     
                     sec = cand['sector']
@@ -1084,8 +1059,7 @@ def run_ai_quant_system(
                     eco_in_held = sum(1 for h in held if ECOSYSTEM_MAP.get(h, h) == eco and h not in [s[0] for s in pending_sells])
                     eco_in_selected = sum(1 for b in selected_buys if b.get('ecosystem') == eco)
                     
-                    sec_cap_limit = 1 if sec == 'BANK' else MAX_PER_SECTOR
-                    if (sec_in_held + sec_in_selected) < sec_cap_limit and (eco_in_held + eco_in_selected) < MAX_PER_ECOSYSTEM:
+                    if (sec_in_held + sec_in_selected) < MAX_PER_SECTOR and (eco_in_held + eco_in_selected) < MAX_PER_ECOSYSTEM:
                         # CƠ CHẾ HOÁN ĐỔI CHO LEADER: Nếu mã mới có AI Score vượt trội mã đang nắm giữ cùng nhóm (ngưỡng tối thiểu +0.03)
                         LEADER_MIN_AI_MARGIN = 0.03
                         held_siblings = [
@@ -1095,13 +1069,7 @@ def run_ai_quant_system(
                         ]
                         full_size_siblings = [h for h in held_siblings if not held[h].get('is_split_size', False)]
                         max_sibling_score = max([held[h].get('score', 0.55) for h in full_size_siblings], default=0.0)
-                        
-                        # Không rebalance nếu cùng nhóm đã có mã trong selected_buys hôm nay
-                        has_sibling_in_selected = any(b.get('sector') == sec or b.get('ecosystem') == eco for b in selected_buys)
-                        is_leader_upgrade = (len(full_size_siblings) > 0) and (not has_sibling_in_selected) and (cand['score'] >= max_sibling_score + LEADER_MIN_AI_MARGIN)
-                        
-                        cand['is_leader_upgrade'] = is_leader_upgrade
-                        cand['rebalance_targets'] = list(full_size_siblings) if is_leader_upgrade else []
+                        is_leader_upgrade = (len(full_size_siblings) > 0) and (cand['score'] >= max_sibling_score + LEADER_MIN_AI_MARGIN)
                         
                         if is_leader_upgrade:
                             cand['is_split_size'] = False
@@ -1378,21 +1346,6 @@ def main():
             return default_model
         sys.exit(f"🛑 LỖI BẢO MẬT WALK-FORWARD: Không tìm thấy mô hình hợp lệ cho năm {target_year}! Cấm tuyệt đối dùng model tương lai.")
 
-    def predict_with_model(model_obj, data_subset):
-        """Hàm dự báo linh hoạt: đọc feature_names từ model để tương thích mọi phiên bản"""
-        if hasattr(model_obj, 'feature_names_in_') and model_obj.feature_names_in_ is not None:
-            f_names = list(model_obj.feature_names_in_)
-        elif hasattr(model_obj, 'get_booster') and model_obj.get_booster().feature_names:
-            f_names = list(model_obj.get_booster().feature_names)
-        else:
-            f_names = list(ml_features)
-        
-        sub_df = data_subset[[c for c in f_names if c in data_subset.columns]].copy()
-        for col in f_names:
-            if col not in sub_df.columns:
-                sub_df[col] = np.nan
-        return model_obj.predict_proba(sub_df[f_names])[:, 1]
-
     # Chấm điểm AI Score thích ứng Walk-Forward OOS
     ml_master['AI_Score'] = np.nan
 
@@ -1400,7 +1353,7 @@ def main():
     pre_2022_mask = ml_master['Date'] < '2022-01-01'
     if pre_2022_mask.sum() > 0:
         base_m = get_model_for_year(2022)
-        ml_master.loc[pre_2022_mask, 'AI_Score'] = predict_with_model(base_m, ml_master.loc[pre_2022_mask])
+        ml_master.loc[pre_2022_mask, 'AI_Score'] = base_m.predict_proba(ml_master.loc[pre_2022_mask, ml_features])[:, 1]
 
     # 2. Các năm Out-of-Sample 2022 -> 2026: Dùng đúng mô hình học trước năm đó!
     for y in [2022, 2023, 2024, 2025, 2026]:
@@ -1411,7 +1364,7 @@ def main():
 
         if y_mask.sum() > 0:
             m_y = get_model_for_year(y)
-            ml_master.loc[y_mask, 'AI_Score'] = predict_with_model(m_y, ml_master.loc[y_mask])
+            ml_master.loc[y_mask, 'AI_Score'] = m_y.predict_proba(ml_master.loc[y_mask, ml_features])[:, 1]
 
     # Tạo tra cứu AI Score dạng dict (Key: ticker -> {date_str: score})
     ai_dict = {}
@@ -1427,10 +1380,10 @@ def main():
     print(f"   • Solution 2: Rolling Percentile Dynamic AI (Top 20% / 120 bars): {'BẬT' if ENABLE_DYNAMIC_PERCENTILE_AI else 'TẮT (Cố định 0.60)'}")
     print(f"   • Solution 3: Asymmetric Exit Rules (2 nến MA20 + 2.5x ATR Trailing): {'BẬT' if ENABLE_ASYMMETRIC_ATR_EXIT else 'TẮT'}")
     print(f"   • Solution 4: Index MA20 Slope & 1.3x Breakout Volume: {'BẬT' if ENABLE_MA20_SLOPE_FILTER else 'TẮT'}")
-    print(f"   • Solution 5: Split-Size & Leader Rebalance (Tối đa {MAX_PER_SECTOR} mã/ngành [Bank: 1], {MAX_PER_ECOSYSTEM} mã/HST | Hoán đổi 20% NAV cho Leader)")
+    print(f"   • Solution 5: Split-Size & Leader Rebalance (Tối đa {MAX_PER_SECTOR} mã/ngành, {MAX_PER_ECOSYSTEM} mã/HST | Hoán đổi 20% NAV cho Leader)")
     print(f"   • Solution 6: Sắp xếp ưu tiên lệnh mua: Động lượng (AI Score -> Breakout% -> Ret20)")
     print(f"   • Solution 7: Anti-Chase Filter (Chặn mua đuổi > MA50*1.20 hoặc RSI>82): {'BẬT' if ENABLE_ANTI_CHASE_FILTER else 'TẮT'}")
-    print(f"   • Solution 8: Macro Synchronization & Hard Stop-Loss (Index > MA100 & MA50 dốc lên | Hard Stop: {HARD_STOPLOSS*100:.1f}%): BẬT")
+    print(f"   • Solution 8: Macro Synchronization (Đồng bộ Mua/Bán Vĩ mô: Index > MA100 & MA50 dốc lên): BẬT")
     print("="*70 + "\n")
 
     # ==========================================
@@ -1458,8 +1411,7 @@ def main():
         enable_dynamic_percentile_ai=ENABLE_DYNAMIC_PERCENTILE_AI,
         enable_asymmetric_atr_exit=ENABLE_ASYMMETRIC_ATR_EXIT,
         enable_ma20_slope_filter=ENABLE_MA20_SLOPE_FILTER,
-        enable_anti_chase_filter=ENABLE_ANTI_CHASE_FILTER,
-        hard_stoploss=HARD_STOPLOSS
+        enable_anti_chase_filter=ENABLE_ANTI_CHASE_FILTER
     )
 
     # Ghi nhận file trading_log.csv
@@ -1535,7 +1487,7 @@ def main():
     vnindex_start = df_clean.loc[df_clean['Date'] >= BACKTEST_START_DATE, 'VNINDEX'].iloc[0]
     vnindex_end = df_clean['VNINDEX'].iloc[-1]
     vnindex_return_pct = ((vnindex_end / vnindex_start) - 1.0) * 100.0
-    pure_cash_return_pct = (((1.0 + 0.04/252) ** len(df_nav_hist)) - 1.0) * 100.0
+    pure_cash_return_pct = (((1.0 + 0.04/250) ** len(df_nav_hist)) - 1.0) * 100.0
 
     print("\n" + "="*58)
     print(f"📊 BÁO CÁO ĐỊNH LƯỢNG THỰC CHIẾN TỪ {BACKTEST_START_DATE[:4]} ĐẾN NAY")
