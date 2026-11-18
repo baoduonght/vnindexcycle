@@ -148,6 +148,9 @@ except Exception:
 try:
     # Kéo mượt mà từ 2014-01-01
     fred_df = web.DataReader(['WALCL', 'WTREGEN', 'RRPONTSYD'], 'fred', start_date, end_date)
+    # WALCL và WTREGEN là dữ liệu tuần (weekly), RRPONTSYD là hàng ngày (daily)
+    # Bắt buộc ffill() các cột tuần trước khi tính toán để tránh NaN lan truyền vào FED_LIQUIDITY (83.5% rỗng)
+    fred_df = fred_df.ffill()
     fred_df['FED_LIQUIDITY'] = fred_df['WALCL'] - fred_df['WTREGEN'] - fred_df['RRPONTSYD']
     fred_df = fred_df[['FED_LIQUIDITY']]
     fred_df = clean_index(fred_df)
