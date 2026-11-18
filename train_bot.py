@@ -289,7 +289,7 @@ def main():
     print("3. Khởi tạo màng lưới tính toán & Đồng bộ Vĩ mô + Độ rộng...")
     try:
         macro_df = pd.read_csv('markets_database10years.csv')
-        macro_df = macro_df[['Date', 'DXY', 'US10Y', 'USD_VND']].copy()
+        macro_df = macro_df[['Date', 'DXY', 'US10Y', 'USD_VND', 'FED_LIQUIDITY']].copy()
         macro_df['Date'] = pd.to_datetime(macro_df['Date']).dt.strftime('%Y-%m-%d')
         macro_df = macro_df.drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
     except Exception as e:
@@ -302,12 +302,17 @@ def main():
     macro_df['USD_VND'] = macro_df['USD_VND'].apply(lambda x: np.nan if (pd.notna(x) and (x < 15000.0 or x > 35000.0)) else x)
     macro_df['USD_VND'] = macro_df['USD_VND'].ffill()
 
+    # LÀM SẠCH VÀ CHỐNG LOOK-AHEAD CHO FED_LIQUIDITY:
+    # Forward-fill dữ liệu công bố hàng tuần và shift(1) chống nhìn trước tương lai
+    macro_df['FED_LIQUIDITY'] = pd.to_numeric(macro_df.get('FED_LIQUIDITY', np.nan), errors='coerce').ffill()
+
     # ĐỒNG BỘ THỜI ĐIỂM CÔNG BỐ (PUBLICATION LAG):
-    # Thị trường VN đóng cửa lúc 15:00 (phát tín hiệu 15:30). Dữ liệu đóng cửa Mỹ (DXY, US10Y)
+    # Thị trường VN đóng cửa lúc 15:00 (phát tín hiệu 15:30). Dữ liệu đóng cửa Mỹ (DXY, US10Y, FED)
     # và tỷ giá ngoại hối quốc tế (Yahoo VND=X) kết thúc sau đó. Bắt buộc shift(1) để chống nhìn trước tương lai!
     macro_df['DXY'] = pd.to_numeric(macro_df['DXY'], errors='coerce').shift(1)
     macro_df['US10Y'] = pd.to_numeric(macro_df['US10Y'], errors='coerce').shift(1)
     macro_df['USD_VND'] = macro_df['USD_VND'].shift(1)
+    macro_df['FED_LIQUIDITY'] = macro_df['FED_LIQUIDITY'].shift(1)
 
     market_context = vnindex_df[['Date', 'VN_MFI', 'VNINDEX', 'MA200', 'VN_ATR_PCT']].copy()
     market_context['VN_Dist_MA200'] = market_context['VNINDEX'] / market_context['MA200']
@@ -318,7 +323,7 @@ def main():
     macro_df = macro_df.merge(market_context[['Date', 'VN_MFI', 'VN_Dist_MA200', 'VN_ATR_PCT', 'VN_Breadth_MA50']], on='Date', how='inner')
     macro_df = macro_df.sort_values('Date').reset_index(drop=True)
 
-    macro_cols = ['DXY', 'US10Y', 'USD_VND']
+    macro_cols = ['DXY', 'US10Y', 'USD_VND', 'FED_LIQUIDITY']
     for col in macro_cols:
         macro_df[col] = pd.to_numeric(macro_df[col], errors='coerce')
         roll_m = macro_df[col].rolling(120, min_periods=5).mean()
