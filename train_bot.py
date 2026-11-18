@@ -296,16 +296,18 @@ def main():
         sys.exit(f"🛑 LỖI ĐỌC FILE VĨ MÔ: {e}")
 
     # LÀM SẠCH TỶ GIÁ USD/VND (Xử lý đơn vị nghìn 21.055, 21.0 và dị biệt 3210, 3211)
+    # TUYỆT ĐỐI KHÔNG dùng interpolate() hay bfill() (chống rò rỉ dữ liệu tương lai / Look-ahead Bias)
     macro_df['USD_VND'] = pd.to_numeric(macro_df['USD_VND'], errors='coerce')
     macro_df['USD_VND'] = macro_df['USD_VND'].apply(lambda x: x * 1000.0 if (pd.notna(x) and 10.0 <= x <= 40.0) else x)
     macro_df['USD_VND'] = macro_df['USD_VND'].apply(lambda x: np.nan if (pd.notna(x) and (x < 15000.0 or x > 35000.0)) else x)
-    macro_df['USD_VND'] = macro_df['USD_VND'].interpolate(method='linear').ffill().bfill()
+    macro_df['USD_VND'] = macro_df['USD_VND'].ffill()
 
     # ĐỒNG BỘ THỜI ĐIỂM CÔNG BỐ (PUBLICATION LAG):
     # Thị trường VN đóng cửa lúc 15:00 (phát tín hiệu 15:30). Dữ liệu đóng cửa Mỹ (DXY, US10Y)
-    # kết thúc sau đó (rạng sáng hôm sau giờ VN). Bắt buộc shift(1) để chống nhìn trước tương lai!
+    # và tỷ giá ngoại hối quốc tế (Yahoo VND=X) kết thúc sau đó. Bắt buộc shift(1) để chống nhìn trước tương lai!
     macro_df['DXY'] = pd.to_numeric(macro_df['DXY'], errors='coerce').shift(1)
     macro_df['US10Y'] = pd.to_numeric(macro_df['US10Y'], errors='coerce').shift(1)
+    macro_df['USD_VND'] = macro_df['USD_VND'].shift(1)
 
     market_context = vnindex_df[['Date', 'VN_MFI', 'VNINDEX', 'MA200', 'VN_ATR_PCT']].copy()
     market_context['VN_Dist_MA200'] = market_context['VNINDEX'] / market_context['MA200']
