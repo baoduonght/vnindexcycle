@@ -401,19 +401,28 @@ def run_ai_quant_system(
     pending_buys = []   # list of {'ticker': c, 'score': score, 'signal': 'Breakout'}
     current_max_exposure = 1.0  # Hạn mức tỷ trọng cổ phiếu tối đa (cập nhật từ ATC phiên trước)
 
-    def get_stock_valuation_at_open(bar_idx):
+    next_trade_id = 1
+    completed_trades = []
+
+    def get_stock_valuation_at_open(curr_date, bar_i):
         """
         Định giá danh mục cổ phiếu tại thời điểm đầu phiên (Open[t]).
-        BẮT BUỘC: Chỉ sử dụng Giá tham chiếu HOSE (Close[t-1] - phiên liền trước) hoặc giá mua/giá đã biết.
-        TUYỆT ĐỐI KHÔNG dùng Close[t] cùng ngày nhằm triệt tiêu hoàn toàn Look-ahead Bias.
+        BẮT BUỘC: Tra cứu theo ngày Date thực tế (Close[t-1] - Giá tham chiếu HOSE phiên t).
+        TUYỆT ĐỐI KHÔNG dùng chỉ số bar_i của backtest để iloc trên stocks_close (tránh lệch 10 năm về 2012).
         """
         total = 0.0
+        if bar_i > 0:
+            prev_d = backtest['Date'].iloc[bar_i - 1]
+        else:
+            clean_matches = df_clean.index[df_clean['Date'] == curr_date]
+            prev_d = df_clean['Date'].iloc[clean_matches[0] - 1] if len(clean_matches) > 0 and clean_matches[0] > 0 else None
+
         for k, pos in held.items():
             ref_p = None
-            if bar_idx > 0 and k in stocks_close.columns:
-                prev_c = stocks_close.iloc[bar_idx - 1][k]
-                if pd.notna(prev_c) and prev_c > 0:
-                    ref_p = prev_c
+            if prev_d is not None and k in stocks_close.columns and prev_d in stocks_close.index:
+                val = stocks_close.at[prev_d, k]
+                if pd.notna(val) and val > 0:
+                    ref_p = val
             if ref_p is None:
                 ref_p = pos.get('last_price', pos['buy_price'])
             total += pos['qty'] * (ref_p * 1000.0)
@@ -456,8 +465,8 @@ def run_ai_quant_system(
                         continue  # Tạm ngừng giao dịch hoặc thiếu Open -> Giữ lại lệnh bán cho phiên tiếp theo
                     
                     # RÀNG BUỘC LÔ CHẴN 100 CỔ PHIẾU HOSE KHI BÁN HẠ 50% TỶ TRỌNG
+                    shares_held = int(held[c]['qty'])
                     if 'Hoán đổi 50% tỷ trọng' in reason:
-                        shares_held = int(held[c]['qty'])
                         sell_qty = (shares_held // 2 // 100) * 100
                         rem_qty = shares_held - sell_qty
                         if sell_qty < 100 or rem_qty < 100:
@@ -467,7 +476,8 @@ def run_ai_quant_system(
                         is_partial_leader_rebalance = True
                     else:
                         is_partial_leader_rebalance = False
-                        sell_qty = int(held[c]['qty'])
+                        sell_qty = shares_held
+                        rem_qty = 0
                     
                     sell_price_vnd = open_p * 1000.0
                     buy_price_vnd = held[c]['buy_price'] * 1000.0
@@ -478,6 +488,7 @@ def run_ai_quant_system(
                     pnl_vnd = net_val - buy_cost
                     pnl_pct = ((sell_price_vnd * (1.0 - SELL_FRICTION)) / (buy_price_vnd * (1.0 + BUY_FRICTION)) - 1.0) * 100.0
                     hold_days = held[c]['hold_days']
+                    trade_id = held[c].get('trade_id', 'T000')
                     
                     cash += net_val
                     
@@ -485,20 +496,43 @@ def run_ai_quant_system(
                         held[c]['qty'] -= sell_qty
                         held[c]['is_split_size'] = True
                         held[c]['rebalance_for_leader'] = False
+                        held[c]['accumulated_pnl'] = held[c].get('accumulated_pnl', 0.0) + pnl_vnd
+                        action_name = 'SELL_PARTIAL (Hoán đổi 50% tỷ trọng cho Leader)'
                     else:
+                        action_name = f"SELL_FULL ({reason})"
+                        total_pos_pnl_vnd = held[c].get('accumulated_pnl', 0.0) + pnl_vnd
+                        init_shares = held[c].get('initial_qty', sell_qty)
+                        buy_cost_total = init_shares * (held[c]['buy_price'] * 1000.0) * (1.0 + BUY_FRICTION)
+                        pos_profit_pct = (total_pos_pnl_vnd / buy_cost_total) * 100.0 if buy_cost_total > 0 else 0.0
+                        completed_trades.append({
+                            'Trade_ID': trade_id,
+                            'Ticker': c,
+                            'Buy_Date': held[c]['buy_date'],
+                            'Exit_Date': date_str,
+                            'Buy_Price': held[c]['buy_price'],
+                            'Exit_Price': round(float(open_p), 2),
+                            'Initial_Qty': int(init_shares),
+                            'Total_PnL_VND': int(round(total_pos_pnl_vnd)),
+                            'Profit(%)': round(float(pos_profit_pct), 2),
+                            'Hold_Days': int(hold_days),
+                            'Reason': reason
+                        })
                         del held[c]
                         
                     sells_executed.append((c, reason))
                     
-                    rem_stock_val = get_stock_valuation_at_open(i)
+                    rem_stock_val = get_stock_valuation_at_open(date, i)
                     trade_nav = cash + rem_stock_val
                     cum_ret_pct = ((trade_nav / INITIAL_CAPITAL) - 1.0) * 100.0
                     
                     trade_log.append({
                         'Date': date_str,
-                        'Action': reason,
+                        'Trade_ID': trade_id,
+                        'Action': action_name,
                         'Ticker': c,
                         'Price': round(float(open_p), 2),
+                        'Shares': int(sell_qty),
+                        'Rem_Shares': int(rem_qty),
                         'Trade_Value': int(round(net_val)),
                         'PnL_VND': int(round(pnl_vnd)),
                         'Profit(%)': round(float(pnl_pct), 2),
@@ -512,8 +546,8 @@ def run_ai_quant_system(
 
         # (B) KHỚP LỆNH MUA CHỜ TẠI OPEN[t] THEO LÔ CHẴN 100 CỔ PHIẾU HOSE
         if pending_buys:
-            # ĐỊNH GIÁ ĐẦU PHIÊN CHUẨN XÁC: Chỉ dùng Close[t-1] (Giá tham chiếu HOSE), triệt tiêu Look-ahead Bias
-            stock_val_open = get_stock_valuation_at_open(i)
+            # ĐỊNH GIÁ ĐẦU PHIÊN CHUẨN XÁC: Tra cứu theo ngày Date thực tế (Close[t-1]), triệt tiêu Look-ahead Bias
+            stock_val_open = get_stock_valuation_at_open(date, i)
             current_nav_open = cash + stock_val_open
             target_slot_size = current_nav_open / MAX_SLOTS
             
@@ -549,14 +583,17 @@ def run_ai_quant_system(
                 cost_per_lot_vnd = cost_per_share_vnd * 100.0
                 
                 # GIẢI PHÁP 1 & CƠ CHẾ HOÁN ĐỔI TỶ TRỌNG CHO LEADER (LEADER REBALANCE):
+                # Ngưỡng chênh lệch AI tối thiểu +0.03 điểm để ngăn bẫy cắt lẻ vị thế khi chênh lệch nhỏ 0.005 - 0.01
+                LEADER_MIN_AI_MARGIN = 0.03
                 held_siblings = [
                     h for h in held
                     if (SECTOR_MAP.get(h, 'OTHER') == cand_sec or ECOSYSTEM_MAP.get(h, h) == cand_eco)
                     and h != c
                 ]
                 
-                max_held_sibling_score = max([held[h].get('score', 0.55) for h in held_siblings], default=0.0)
-                is_leader_upgrade = len(held_siblings) > 0 and (cand.get('score', 0.0) > max_held_sibling_score)
+                full_size_siblings = [h for h in held_siblings if not held[h].get('is_split_size', False)]
+                max_held_sibling_score = max([held[h].get('score', 0.55) for h in full_size_siblings], default=0.0)
+                is_leader_upgrade = (len(full_size_siblings) > 0) and (cand.get('score', 0.0) >= max_held_sibling_score + LEADER_MIN_AI_MARGIN)
 
                 sibling_in_pending = sum(
                     1 for b in pending_buys
@@ -569,7 +606,7 @@ def run_ai_quant_system(
                 if is_leader_upgrade:
                     slot_multiplier = 1.0
                     is_split_pos = False
-                    for h in held_siblings:
+                    for h in full_size_siblings:
                         held[h]['rebalance_for_leader'] = True
                 else:
                     is_split_pos = (len(held_siblings) > 0) or (sibling_in_pending > 0) or cand.get('is_split_size', False)
@@ -595,8 +632,12 @@ def run_ai_quant_system(
                     cash -= total_spent
                     rem_exposure_budget -= total_spent
                     stock_val_open += total_spent
+                    trade_id = f"T{next_trade_id:03d}"
+                    next_trade_id += 1
                     held[c] = {
+                        'trade_id': trade_id,
                         'qty': shares,
+                        'initial_qty': shares,
                         'buy_price': open_p,
                         'highest': open_p,
                         'last_price': open_p,
@@ -605,7 +646,8 @@ def run_ai_quant_system(
                         'consecutive_below_ma20': 0,
                         'is_split_size': is_split_pos,
                         'score': cand.get('score', 0.55),
-                        'rebalance_for_leader': False
+                        'rebalance_for_leader': False,
+                        'accumulated_pnl': 0.0
                     }
                     buys_today += 1
                     
@@ -614,9 +656,12 @@ def run_ai_quant_system(
                     
                     trade_log.append({
                         'Date': date_str,
+                        'Trade_ID': trade_id,
                         'Action': f"BUY ({cand['signal']})",
                         'Ticker': c,
                         'Price': round(float(open_p), 2),
+                        'Shares': int(shares),
+                        'Rem_Shares': int(shares),
                         'Trade_Value': int(round(total_spent)),
                         'PnL_VND': None,
                         'Profit(%)': None,
@@ -1015,14 +1060,16 @@ def run_ai_quant_system(
                     eco_in_selected = sum(1 for b in selected_buys if b.get('ecosystem') == eco)
                     
                     if (sec_in_held + sec_in_selected) < MAX_PER_SECTOR and (eco_in_held + eco_in_selected) < MAX_PER_ECOSYSTEM:
-                        # CƠ CHẾ HOÁN ĐỔI CHO LEADER: Nếu mã mới có AI Score cao hơn mã đang nắm giữ cùng nhóm
+                        # CƠ CHẾ HOÁN ĐỔI CHO LEADER: Nếu mã mới có AI Score vượt trội mã đang nắm giữ cùng nhóm (ngưỡng tối thiểu +0.03)
+                        LEADER_MIN_AI_MARGIN = 0.03
                         held_siblings = [
                             h for h in held 
                             if (SECTOR_MAP.get(h, 'OTHER') == sec or ECOSYSTEM_MAP.get(h, h) == eco) 
                             and h not in [s[0] for s in pending_sells]
                         ]
-                        max_sibling_score = max([held[h].get('score', 0.55) for h in held_siblings], default=0.0)
-                        is_leader_upgrade = len(held_siblings) > 0 and (cand['score'] > max_sibling_score)
+                        full_size_siblings = [h for h in held_siblings if not held[h].get('is_split_size', False)]
+                        max_sibling_score = max([held[h].get('score', 0.55) for h in full_size_siblings], default=0.0)
+                        is_leader_upgrade = (len(full_size_siblings) > 0) and (cand['score'] >= max_sibling_score + LEADER_MIN_AI_MARGIN)
                         
                         if is_leader_upgrade:
                             cand['is_split_size'] = False
@@ -1046,14 +1093,14 @@ def run_ai_quant_system(
     df_trades = pd.DataFrame(trade_log)
 
     desired_cols = [
-        'Date', 'Action', 'Ticker', 'Price', 'Trade_Value', 'PnL_VND',
+        'Date', 'Trade_ID', 'Action', 'Ticker', 'Price', 'Shares', 'Rem_Shares', 'Trade_Value', 'PnL_VND',
         'Profit(%)', 'Hold_Days', 'Total_NAV', 'Portfolio_Return(%)', 'AI_Score'
     ]
     final_cols = [col for col in desired_cols if col in df_trades.columns]
     df_trades = df_trades[final_cols] if not df_trades.empty else pd.DataFrame(columns=desired_cols)
 
     # Ép kiểu Int64 nullable để xuất file sạch 100%
-    for int_col in ['Trade_Value', 'PnL_VND', 'Hold_Days', 'Total_NAV']:
+    for int_col in ['Shares', 'Rem_Shares', 'Trade_Value', 'PnL_VND', 'Hold_Days', 'Total_NAV']:
         if int_col in df_trades.columns:
             df_trades[int_col] = pd.to_numeric(df_trades[int_col], errors='coerce').round(0).astype('Int64')
 
@@ -1061,7 +1108,7 @@ def run_ai_quant_system(
         if nav_int in df_nav.columns:
             df_nav[nav_int] = pd.to_numeric(df_nav[nav_int], errors='coerce').round(0).astype('Int64')
 
-    return df_trades, df_nav, final_nav, total_bank_interest, held, pending_buys, pending_sells
+    return df_trades, df_nav, final_nav, total_bank_interest, held, pending_buys, pending_sells, completed_trades
 
 # ==========================================
 # PIPELINE THỰC THI CHÍNH (CHỈ CHẠY KHI GỌI TRỰC TIẾP, AN TOÀN KHI IMPORT)
@@ -1143,13 +1190,22 @@ def main():
         if len(s_c) >= 20:
             stocks_ma20[c] = s_c.rolling(20).mean()
             stocks_ma50[c] = s_c.rolling(50, min_periods=20).mean()
-            stocks_high_20[c] = s_c.rolling(20).max().shift(1)
             stocks_rsi[c] = calc_rsi(s_c)
             stocks_macd[c] = calc_macd_hist(s_c)
             stocks_ret20[c] = s_c.pct_change(20)
 
         h_col = f'{c}_H'
         l_col = f'{c}_L'
+        # ĐỈNH KHÁNG CỰ 20 PHIÊN: Bắt buộc tính trên giá High (High-20 Breakout) để chống bẫy râu nến trên (Bull Trap)
+        if h_col in stocks_high.columns:
+            s_h = stocks_high[h_col].dropna()
+            if len(s_h) >= 20:
+                stocks_high_20[c] = s_h.rolling(20).max().shift(1)
+            elif len(s_c) >= 20:
+                stocks_high_20[c] = s_c.rolling(20).max().shift(1)
+        elif len(s_c) >= 20:
+            stocks_high_20[c] = s_c.rolling(20).max().shift(1)
+
         if h_col in stocks_high.columns and l_col in stocks_low.columns and c in stocks_close.columns:
             s_h = stocks_high[h_col].dropna()
             s_l = stocks_low[l_col].dropna()
@@ -1195,16 +1251,18 @@ def main():
         sys.exit(f"🛑 LỖI ĐỌC FILE VĨ MÔ: {e}")
 
     # LÀM SẠCH TỶ GIÁ USD/VND (Xử lý đơn vị nghìn 21.055, 21.0 và dị biệt 3210, 3211)
+    # TUYỆT ĐỐI KHÔNG dùng interpolate() hay bfill() (chống rò rỉ dữ liệu tương lai / Look-ahead Bias)
     macro_df['USD_VND'] = pd.to_numeric(macro_df['USD_VND'], errors='coerce')
     macro_df['USD_VND'] = macro_df['USD_VND'].apply(lambda x: x * 1000.0 if (pd.notna(x) and 10.0 <= x <= 40.0) else x)
     macro_df['USD_VND'] = macro_df['USD_VND'].apply(lambda x: np.nan if (pd.notna(x) and (x < 15000.0 or x > 35000.0)) else x)
-    macro_df['USD_VND'] = macro_df['USD_VND'].interpolate(method='linear').ffill().bfill()
+    macro_df['USD_VND'] = macro_df['USD_VND'].ffill()
 
     # ĐỒNG BỘ THỜI ĐIỂM CÔNG BỐ (PUBLICATION LAG):
     # Thị trường VN đóng cửa lúc 15:00 (phát tín hiệu 15:30). Dữ liệu đóng cửa Mỹ (DXY, US10Y)
-    # kết thúc sau đó (rạng sáng hôm sau giờ VN). Bắt buộc shift(1) để chống nhìn trước tương lai!
+    # và tỷ giá ngoại hối quốc tế (Yahoo VND=X) kết thúc sau đó. Bắt buộc shift(1) để chống nhìn trước tương lai!
     macro_df['DXY'] = pd.to_numeric(macro_df['DXY'], errors='coerce').shift(1)
     macro_df['US10Y'] = pd.to_numeric(macro_df['US10Y'], errors='coerce').shift(1)
+    macro_df['USD_VND'] = macro_df['USD_VND'].shift(1)
 
     market_context = vnindex_df[['Date', 'VN_MFI', 'VNINDEX', 'MA200', 'VN_ATR_PCT']].copy()
     market_context['VN_Dist_MA200'] = market_context['VNINDEX'] / market_context['MA200']
@@ -1331,7 +1389,7 @@ def main():
     # ==========================================
     # CHẠY CHIẾN LƯỢC & XUẤT BÁO CÁO TOÀN DIỆN
     # ==========================================
-    df_trade_log, df_nav_hist, final_nav, total_interest, current_held, next_buys, next_sells = run_ai_quant_system(
+    df_trade_log, df_nav_hist, final_nav, total_interest, current_held, next_buys, next_sells, completed_trades = run_ai_quant_system(
         df_clean=df_clean,
         stocks_open=stocks_open,
         stocks_close=stocks_close,
@@ -1363,6 +1421,12 @@ def main():
     # Ghi nhận file daily_nav.csv
     df_nav_hist.to_csv('daily_nav.csv', index=False, na_rep='', float_format='%.2f')
     print("✅ Đã ghi nhận biến động tài sản hàng ngày chuẩn vào file daily_nav.csv!")
+
+    # Ghi nhận file completed_trades.csv (Chu kỳ vị thế đóng trọn vẹn)
+    df_completed = pd.DataFrame(completed_trades)
+    if not df_completed.empty:
+        df_completed.to_csv('completed_trades.csv', index=False, na_rep='', float_format='%.2f')
+        print("✅ Đã ghi nhận chu kỳ vị thế hoàn tất vào file completed_trades.csv!")
 
     # ==========================================
     # TÍNH TOÁN METRICS ĐỊNH LƯỢNG RỦI RO & HIỆU SUẤT
@@ -1451,12 +1515,40 @@ def main():
     print(f"   (Thời kỳ chịu đựng lớn nhất: Từ đỉnh {pd.to_datetime(peak_date).strftime('%d/%m/%Y')} về đáy {pd.to_datetime(trough_date).strftime('%d/%m/%Y')})")
     print(f"⚡ Chỉ số Calmar (CAGR / MDD):     {calmar_ratio:.2f}")
     print(f"----------------------------------------------------------")
-    print(f"Tổng số lệnh đã chốt sổ:          {total_sells}")
-    print(f"🎯 Tỷ lệ thắng (Win Rate):         {win_rate:.2f}% (Thắng {win_sells}/{total_sells} trận)")
-    print(f"⚖️ Profit Factor (Tổng Lãi/Lỗ):    {profit_factor:.2f}")
-    print(f"🎲 Payoff Ratio (Lãi TB / Lỗ TB):  {payoff_ratio:.2f}x (Lãi TB: +{avg_win_pct:.2f}% | Lỗ TB: {avg_loss_pct:.2f}%)")
-    print(f"💰 Lệnh lãi đơn lẻ cao nhất:       +{best_trade:.2f}%")
-    print(f"🩸 Lệnh lỗ đơn lẻ sâu nhất:        {worst_trade:.2f}%")
+    if not df_completed.empty:
+        total_roundtrips = len(df_completed)
+        win_rt = len(df_completed[df_completed['Total_PnL_VND'] > 0])
+        loss_rt = total_roundtrips - win_rt
+        win_rate_rt = (win_rt / total_roundtrips * 100.0) if total_roundtrips > 0 else 0.0
+        avg_hold_days_rt = df_completed['Hold_Days'].mean() if total_roundtrips > 0 else 0.0
+        gross_profit_rt = df_completed.loc[df_completed['Total_PnL_VND'] > 0, 'Total_PnL_VND'].sum()
+        gross_loss_rt = abs(df_completed.loc[df_completed['Total_PnL_VND'] < 0, 'Total_PnL_VND'].sum())
+        profit_factor_rt = (gross_profit_rt / gross_loss_rt) if gross_loss_rt > 0 else 999.0
+        avg_win_pct_rt = df_completed.loc[df_completed['Profit(%)'] > 0, 'Profit(%)'].mean() if win_rt > 0 else 0.0
+        avg_loss_pct_rt = df_completed.loc[df_completed['Profit(%)'] < 0, 'Profit(%)'].mean() if loss_rt > 0 else 0.0
+        payoff_ratio_rt = abs(avg_win_pct_rt / avg_loss_pct_rt) if avg_loss_pct_rt != 0 else 999.0
+        best_trade_rt = df_completed['Profit(%)'].max() if total_roundtrips > 0 else 0.0
+        worst_trade_rt = df_completed['Profit(%)'].min() if total_roundtrips > 0 else 0.0
+    else:
+        total_roundtrips, win_rt, loss_rt, win_rate_rt, avg_hold_days_rt = 0, 0, 0, 0.0, 0.0
+        gross_profit_rt, gross_loss_rt, profit_factor_rt, avg_win_pct_rt, avg_loss_pct_rt, payoff_ratio_rt = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+        best_trade_rt, worst_trade_rt = 0.0, 0.0
+
+    print(f"🎯 THỐNG KÊ CHU KỲ VỊ THẾ HOÀN TẤT (ROUND-TRIP TRADES):")
+    print(f"   • Tổng số vị thế đã đóng trọn vẹn: {total_roundtrips} thương vụ")
+    print(f"   • Tỷ lệ thắng (Win Rate):         {win_rate_rt:.2f}% (Thắng {win_rt}/{total_roundtrips} vị thế)")
+    print(f"   • Profit Factor (Tổng Lãi/Lỗ):    {profit_factor_rt:.2f}")
+    print(f"   • Payoff Ratio (Lãi TB / Lỗ TB):  {payoff_ratio_rt:.2f}x (Lãi TB: +{avg_win_pct_rt:.2f}% | Lỗ TB: {avg_loss_pct_rt:.2f}%)")
+    print(f"   • Thời gian nắm giữ trung bình:   {avg_hold_days_rt:.1f} phiên")
+    print(f"   • Thương vụ lãi cao nhất:         +{best_trade_rt:.2f}%")
+    print(f"   • Thương vụ lỗ sâu nhất:          {worst_trade_rt:.2f}%")
+    print(f"----------------------------------------------------------")
+    print(f"📋 THỐNG KÊ LƯỢT KHỚP BÁN CHI TIẾT (SELL EXECUTIONS):")
+    print(f"   • Tổng số lệnh bán đã khớp:       {total_sells} lượt (gồm {max(0, total_sells - total_roundtrips)} lần hạ tỷ trọng Leader)")
+    print(f"   • Tỷ lệ lệnh bán có lãi:          {win_rate:.2f}% (Thắng {win_sells}/{total_sells} lệnh)")
+    print(f"   • Payoff Ratio lượt khớp bán:     {payoff_ratio:.2f}x (Lãi TB: +{avg_win_pct:.2f}% | Lỗ TB: {avg_loss_pct:.2f}%)")
+    print(f"   • Lệnh lãi đơn lẻ cao nhất:       +{best_trade:.2f}%")
+    print(f"   • Lệnh lỗ đơn lẻ sâu nhất:        {worst_trade:.2f}%")
     print("="*58 + "\n")
 
     # ==========================================
