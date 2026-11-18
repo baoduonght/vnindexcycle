@@ -501,7 +501,8 @@ def run_ai_quant_system(
                         held[c]['accumulated_pnl'] = held[c].get('accumulated_pnl', 0.0) + pnl_vnd
                         action_name = 'SELL_PARTIAL (Hoán đổi 50% tỷ trọng cho Leader)'
                     else:
-                        action_name = f"SELL_FULL ({reason})"
+                        clean_reason = reason.replace('SELL (', '').rstrip(')').replace('SELL ', '')
+                        action_name = f"SELL_FULL ({clean_reason})"
                         total_pos_pnl_vnd = held[c].get('accumulated_pnl', 0.0) + pnl_vnd
                         init_shares = held[c].get('initial_qty', sell_qty)
                         buy_cost_total = init_shares * (held[c]['buy_price'] * 1000.0) * (1.0 + BUY_FRICTION)
@@ -517,7 +518,7 @@ def run_ai_quant_system(
                             'Total_PnL_VND': int(round(total_pos_pnl_vnd)),
                             'Profit(%)': round(float(pos_profit_pct), 2),
                             'Hold_Days': int(hold_days),
-                            'Reason': reason
+                            'Reason': clean_reason
                         })
                         del held[c]
                         
@@ -595,9 +596,6 @@ def run_ai_quant_system(
                 if is_leader_upgrade:
                     slot_multiplier = 1.0
                     is_split_pos = False
-                    for h in rebalance_targets:
-                        if h in held and not held[h].get('is_split_size', False) and h != c:
-                            held[h]['rebalance_for_leader'] = True
                 else:
                     slot_multiplier = 0.5 if is_split_pos else 1.0
 
@@ -640,6 +638,12 @@ def run_ai_quant_system(
                     }
                     buys_today += 1
                     
+                    # Chỉ kích hoạt cờ hoán đổi tỷ trọng sau khi lệnh mua Leader ĐÃ KHỚP THÀNH CÔNG:
+                    if is_leader_upgrade and rebalance_targets:
+                        for h in rebalance_targets:
+                            if h in held and not held[h].get('is_split_size', False) and h != c:
+                                held[h]['rebalance_for_leader'] = True
+                    
                     trade_nav = cash + stock_val_open
                     cum_ret_pct = ((trade_nav / INITIAL_CAPITAL) - 1.0) * 100.0
                     
@@ -680,7 +684,26 @@ def run_ai_quant_system(
                 
                 if pd.notna(curr_l) and curr_l <= stop_threshold_price:
                     open_p = stocks_open.at[date, c] if (c in stocks_open.columns and pd.notna(stocks_open.at[date, c]) and stocks_open.at[date, c] > 0) else curr_l
-                    exec_price = min(open_p, stop_threshold_price) if (pd.notna(open_p) and open_p > 0) else stop_threshold_price
+                    
+                    # KIỂM TRA BIÊN ĐỘ GIÁ SÀN HOSE (-7%) VÀ TÌNH TRẠNG TRẮNG BÊN MUA:
+                    prev_d = backtest['Date'].iloc[i - 1] if i > 0 else date
+                    prev_c = stocks_close.at[prev_d, c] if (prev_d in stocks_close.index and c in stocks_close.columns and pd.notna(stocks_close.at[prev_d, c])) else buy_p
+                    floor_price = prev_c * 0.932  # Giá sàn HOSE (-7% + dung sai làm tròn bước giá)
+                    
+                    if pd.notna(open_p) and open_p <= floor_price:
+                        curr_h = stocks_high.at[date, f'{c}_H'] if f'{c}_H' in stocks_high.columns else (stocks_close.at[date, c] if c in stocks_close.columns else np.nan)
+                        if pd.notna(curr_h) and curr_h > floor_price:
+                            # Trong phiên có thanh khoản hấp thụ thoát sàn -> Khớp tại giá sàn
+                            exec_price = floor_price
+                        else:
+                            # Trắng bên mua cả ngày: Hoãn khớp sang phiên sau nếu chưa hoãn
+                            held[c]['floor_lock_count'] = held[c].get('floor_lock_count', 0) + 1
+                            if held[c]['floor_lock_count'] < 2:
+                                continue  # Hoãn khớp sang phiên kế tiếp có thanh khoản
+                            else:
+                                exec_price = floor_price * 0.98  # Sau 2 phiên kịch sàn: Phạt trượt giá 2% thanh lý cưỡng bức
+                    else:
+                        exec_price = min(open_p, stop_threshold_price) if (pd.notna(open_p) and open_p > 0) else stop_threshold_price
                     
                     sell_qty = int(held[c]['qty'])
                     sell_price_vnd = exec_price * 1000.0
@@ -718,14 +741,14 @@ def run_ai_quant_system(
                     del held[c]
                     intraday_stopped.append(c)
                     
-                    rem_stock_val = get_stock_valuation_at_open(date, i)
+                    rem_stock_val = get_stock_valuation_at_close(date)
                     trade_nav = cash + rem_stock_val
                     cum_ret_pct = ((trade_nav / INITIAL_CAPITAL) - 1.0) * 100.0
                     
                     trade_log.append({
                         'Date': date_str,
                         'Trade_ID': trade_id,
-                        'Action': f'SELL (Cắt lỗ cứng {HARD_STOPLOSS*100:.1f}%)',
+                        'Action': f"SELL_FULL (Cắt lỗ cứng {HARD_STOPLOSS*100:.1f}% trong phiên)",
                         'Ticker': c,
                         'Price': round(float(exec_price), 2),
                         'Shares': int(sell_qty),
@@ -1337,7 +1360,10 @@ def main():
     print("3. Đang tải Não bộ AI tĩnh & Đồng bộ Vĩ mô + Độ rộng...")
     try:
         macro_df = pd.read_csv('markets_database10years.csv')
-        macro_df = macro_df[['Date', 'DXY', 'US10Y', 'USD_VND']].copy()
+        avail_cols = ['Date', 'DXY', 'US10Y', 'USD_VND']
+        if 'FED_LIQUIDITY' in macro_df.columns:
+            avail_cols.append('FED_LIQUIDITY')
+        macro_df = macro_df[avail_cols].copy()
         macro_df['Date'] = pd.to_datetime(macro_df['Date']).dt.strftime('%Y-%m-%d')
         macro_df = macro_df.drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
     except Exception as e:
@@ -1349,6 +1375,9 @@ def main():
     macro_df['USD_VND'] = macro_df['USD_VND'].apply(lambda x: x * 1000.0 if (pd.notna(x) and 10.0 <= x <= 40.0) else x)
     macro_df['USD_VND'] = macro_df['USD_VND'].apply(lambda x: np.nan if (pd.notna(x) and (x < 15000.0 or x > 35000.0)) else x)
     macro_df['USD_VND'] = macro_df['USD_VND'].ffill()
+
+    if 'FED_LIQUIDITY' in macro_df.columns:
+        macro_df['FED_LIQUIDITY'] = pd.to_numeric(macro_df['FED_LIQUIDITY'], errors='coerce').ffill().shift(1)
 
     # ĐỒNG BỘ THỜI ĐIỂM CÔNG BỐ (PUBLICATION LAG):
     # Thị trường VN đóng cửa lúc 15:00 (phát tín hiệu 15:30). Dữ liệu đóng cửa Mỹ (DXY, US10Y)
@@ -1372,6 +1401,13 @@ def main():
         roll_m = macro_df[col].rolling(120, min_periods=5).mean()
         roll_s = macro_df[col].rolling(120, min_periods=5).std().replace(0, np.nan)
         macro_df[f'Z_{col}'] = (macro_df[col] - roll_m) / roll_s
+
+    # TÍNH DỰ PHÒNG Z_FED_LIQUIDITY (NẾU CÓ TRONG DATA ĐỂ TRÁNH NAN KHI GẶP MODEL YÊU CẦU FEATURE NÀY)
+    if 'FED_LIQUIDITY' in macro_df.columns:
+        roll_m = macro_df['FED_LIQUIDITY'].rolling(120, min_periods=5).mean()
+        roll_s = macro_df['FED_LIQUIDITY'].rolling(120, min_periods=5).std().replace(0, np.nan)
+        macro_df['Z_FED_LIQUIDITY'] = (macro_df['FED_LIQUIDITY'] - roll_m) / roll_s
+
     z_cols = [f'Z_{c}' for c in macro_cols]
 
     clean_dates_str = pd.to_datetime(stocks_close.index).strftime('%Y-%m-%d')
