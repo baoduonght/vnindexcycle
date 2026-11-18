@@ -119,8 +119,8 @@ BACKTEST_START_DATE = os.environ.get('BACKTEST_START_DATE', '2022-01-01')
 # ==========================================
 ENABLE_DYNAMIC_PERCENTILE_AI = os.environ.get('ENABLE_DYNAMIC_PERCENTILE_AI', 'True').lower() in ('true', '1', 'yes')
 ENABLE_ASYMMETRIC_ATR_EXIT = os.environ.get('ENABLE_ASYMMETRIC_ATR_EXIT', 'True').lower() in ('true', '1', 'yes')
-ENABLE_MA20_SLOPE_FILTER = os.environ.get('ENABLE_MA20_SLOPE_FILTER', 'True').lower() in ('true', '1', 'yes')
-ENABLE_ANTI_CHASE_FILTER = os.environ.get('ENABLE_ANTI_CHASE_FILTER', 'True').lower() in ('true', '1', 'yes')
+ENABLE_MA20_SLOPE_FILTER = os.environ.get('ENABLE_MA20_SLOPE_FILTER', 'False').lower() in ('true', '1', 'yes')
+ENABLE_ANTI_CHASE_FILTER = os.environ.get('ENABLE_ANTI_CHASE_FILTER', 'False').lower() in ('true', '1', 'yes')
 MAX_PER_SECTOR = int(os.environ.get('MAX_PER_SECTOR', '2'))        # Nới trần 2 mã/ngành, áp dụng Split-Size (10% NAV/lệnh khi cùng ngành)
 MAX_PER_ECOSYSTEM = int(os.environ.get('MAX_PER_ECOSYSTEM', '2'))  # Nới trần 2 mã/hệ sinh thái, áp dụng Split-Size (10% NAV/lệnh khi cùng hệ sinh thái)
 HARD_STOPLOSS_FLOOR = float(os.environ.get('HARD_STOPLOSS_FLOOR', '-0.085'))  # Biên dưới tuyệt đối cắt lỗ động (mã biến động mạnh tối đa -8.5%)
@@ -1059,8 +1059,8 @@ def run_ai_quant_system(
         prev5_ma100 = backtest['MA100'].iloc[i-5] if i >= 5 else backtest['MA100'].iloc[0]
         is_ma100_not_falling = (market_ma100 >= prev5_ma100 * 0.998) if (pd.notna(market_ma100) and pd.notna(prev5_ma100)) else True
 
-        # 4. XU HƯỚNG NGẮN/TRUNG HẠN ĐỒNG THUẬN: MA20 > MA50 VÀ MA50 dốc lên
-        is_ma_trend_ok = (pd.notna(market_ma20) and pd.notna(market_ma50) and market_ma20 > market_ma50 and is_ma50_slope_rising)
+        # 4. XU HƯỚNG NGẮN/TRUNG HẠN ĐỒNG THUẬN: MA20 > MA50 (và tùy chọn MA50 dốc lên nếu bật bộ lọc trễ)
+        is_ma_trend_ok = (pd.notna(market_ma20) and pd.notna(market_ma50) and market_ma20 > market_ma50 and (is_ma50_slope_rising if enable_ma20_slope_filter else True))
 
         # 5. PRE-MA100 FILTER: VN-Index phải đóng cửa TRÊN MA20 (Khóa mua mới khi thị trường gãy xu hướng ngắn hạn)
         is_index_above_ma20 = (pd.notna(market_ma20) and idx >= market_ma20)
@@ -1092,7 +1092,7 @@ def run_ai_quant_system(
             valid_scores = win_matrix[~np.isnan(win_matrix)]
             if len(valid_scores) >= 50:
                 p80 = np.percentile(valid_scores, 80)
-                current_ai_threshold = float(np.clip(p80, 0.55, 0.65))
+                current_ai_threshold = float(np.clip(p80, 0.55, 0.60))
             else:
                 current_ai_threshold = 0.58
         else:
@@ -1101,12 +1101,12 @@ def run_ai_quant_system(
         # GIẢI PHÁP 4: BỘ LỌC ĐỘ DỐC MA20 CỦA INDEX & NGƯỠNG VOLUME BREAKOUT 1.2x
         prev5_ma20 = backtest['MA20'].iloc[i-5] if i >= 5 else backtest['MA20'].iloc[0]
         is_ma20_slope_rising = (market_ma20 > prev5_ma20) if (pd.notna(market_ma20) and pd.notna(prev5_ma20)) else True
-        vol_breakout_target = 1.2 if enable_ma20_slope_filter else VOL_BREAKOUT_RATIO
+        vol_breakout_target = VOL_BREAKOUT_RATIO
 
         is_full_trend_ok = (
             is_macro_buffer_ok
             and is_ma_trend_ok
-            and is_ma100_not_falling
+            and (is_ma100_not_falling if enable_ma20_slope_filter else True)
             and is_index_above_ma20
             and (is_ma20_slope_rising if enable_ma20_slope_filter else True)
             and is_not_distribution
@@ -1152,13 +1152,11 @@ def run_ai_quant_system(
                     v_ratio = curr_vol / prev_v_ma
 
                     # GIẢI PHÁP 3: BỘ LỌC CHỐNG MUA ĐUỔI VÙNG QUÁ MUA (ANTI-CHASE FILTER)
-                    # Chặn các lệnh breakout muộn khi cổ phiếu đã tăng nóng cách xa nền MA50 > 20% (như bẫy VHM 14/10/2025)
-                    # Nâng trần RSI lên 82 (không chặn chân sóng breakout mạnh từ nền chặt RSI 75-80 như PLX đầu 2026)
+                    # Chống mua đuổi khi giá đã tăng nóng cách xa nền MA50 > 30% mà không có siêu dòng tiền bảo kê
+                    # Không chặn RSI trần (vì các siêu cổ chân sóng nổ trần như VIC, FPT thường có RSI 85-88)
                     if enable_anti_chase_filter:
                         is_chasing = False
-                        if pd.notna(ma50_c) and ma50_c > 0 and (curr_price > ma50_c * 1.20):
-                            is_chasing = True
-                        if pd.notna(rsi_c) and (rsi_c > 82.0):
+                        if pd.notna(ma50_c) and ma50_c > 0 and (curr_price > ma50_c * 1.30) and (v_ratio < 2.5):
                             is_chasing = True
                         if is_chasing:
                             continue
@@ -1348,15 +1346,13 @@ def main():
 
         h_col = f'{c}_H'
         l_col = f'{c}_L'
-        # ĐỈNH KHÁNG CỰ 20 PHIÊN: Bắt buộc tính trên giá High (High-20 Breakout) để chống bẫy râu nến trên (Bull Trap)
-        if h_col in stocks_high.columns:
+        # ĐỈNH KHÁNG CỰ 20 PHIÊN: Tính trên giá Close (Chuẩn Darvas Box / Turtle breakout như v5) để bắt trọn chân sóng nổ
+        if len(s_c) >= 20:
+            stocks_high_20[c] = s_c.rolling(20).max().shift(1)
+        elif h_col in stocks_high.columns:
             s_h = stocks_high[h_col].dropna()
             if len(s_h) >= 20:
                 stocks_high_20[c] = s_h.rolling(20).max().shift(1)
-            elif len(s_c) >= 20:
-                stocks_high_20[c] = s_c.rolling(20).max().shift(1)
-        elif len(s_c) >= 20:
-            stocks_high_20[c] = s_c.rolling(20).max().shift(1)
 
         if h_col in stocks_high.columns and l_col in stocks_low.columns and c in stocks_close.columns:
             s_h = stocks_high[h_col].dropna()
@@ -1559,11 +1555,11 @@ def main():
     print(f"   • Solution 1: Time-Decayed Retrain Model: BẬT")
     print(f"   • Solution 2: Rolling Percentile Dynamic AI (Top 20% / 120 bars): {'BẬT' if ENABLE_DYNAMIC_PERCENTILE_AI else 'TẮT (Cố định 0.60)'}")
     print(f"   • Solution 3: Asymmetric Exit Rules (2 nến MA20 + 2.5x ATR Trailing): {'BẬT' if ENABLE_ASYMMETRIC_ATR_EXIT else 'TẮT'}")
-    print(f"   • Solution 4: Index MA20 Slope & 1.2x Breakout Volume: {'BẬT' if ENABLE_MA20_SLOPE_FILTER else 'TẮT'}")
+    print(f"   • Solution 4: Index MA20 Slope & 1.2x Breakout Volume: {'BẬT' if ENABLE_MA20_SLOPE_FILTER else 'TẮT (Dùng chuẩn 1.2x Breakout không trễ)'}")
     print(f"   • Solution 5: Split-Size & Leader Rebalance (Tối đa {MAX_PER_SECTOR} mã/ngành, {MAX_PER_ECOSYSTEM} mã/HST | Hoán đổi 20% NAV cho Leader)")
     print(f"   • Solution 6: Sắp xếp ưu tiên lệnh mua: Động lượng (AI Score -> Breakout% -> Ret20)")
-    print(f"   • Solution 7: Anti-Chase Filter (Chặn mua đuổi > MA50*1.20 hoặc RSI>82): {'BẬT' if ENABLE_ANTI_CHASE_FILTER else 'TẮT'}")
-    print(f"   • Solution 8: Macro Synchronization & Intraday Hard Stop-Loss (Index > MA100 & MA50 dốc lên | Cắt lỗ động max({HARD_STOPLOSS_FLOOR*100:.1f}%, -{ATR_STOPLOSS_MULTIPLIER}x ATR)): BẬT")
+    print(f"   • Solution 7: Anti-Chase Filter (Chặn mua đuổi > MA50*1.30): {'BẬT' if ENABLE_ANTI_CHASE_FILTER else 'TẮT'}")
+    print(f"   • Solution 8: Macro Synchronization & Intraday Hard Stop-Loss (Index > MA100 | Cắt lỗ động max({HARD_STOPLOSS_FLOOR*100:.1f}%, -{ATR_STOPLOSS_MULTIPLIER}x ATR)): BẬT")
     print("="*70 + "\n")
 
     # ==========================================
