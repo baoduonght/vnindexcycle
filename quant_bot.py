@@ -868,7 +868,7 @@ def run_ai_quant_system(
         # (A) QUÉT TÍN HIỆU BÁN ĐỂ KHỚP TẠI OPEN PHIÊN MAI
         already_pending_sells = {item[0] for item in pending_sells}
 
-        # BỘ NGẮT MẠCH CẮT LỖ CỨNG ĐỘC LẬP (-7.5%):
+        # BỘ NGẮT MẠCH CẮT LỖ ĐỘNG THEO ATR TỪNG MÃ:
         # Ưu tiên cao nhất cho mọi vị thế đã đủ T+2.5, chặn đứng triệt để các khoản lỗ đuôi trái (fat-tail losses)
         for c in list(held.keys()):
             if held[c]['hold_days'] >= MIN_HOLD_DAYS and c not in already_pending_sells:
@@ -876,8 +876,9 @@ def run_ai_quant_system(
                 if pd.notna(c_p) and c_p > 0:
                     b_p = held[c]['buy_price']
                     p_margin = (c_p - b_p) / b_p
-                    if p_margin <= HARD_STOPLOSS:
-                        pending_sells.append((c, f'SELL (Cắt lỗ cứng {HARD_STOPLOSS*100:.1f}%)'))
+                    dyn_sl = calc_dynamic_stoploss(c, date)
+                    if p_margin <= dyn_sl:
+                        pending_sells.append((c, f'SELL (Cắt lỗ động ATR {dyn_sl*100:.1f}%)'))
                         already_pending_sells.add(c)
 
         if portfolio_dd <= -0.18 and len(held) > 0:
@@ -946,9 +947,10 @@ def run_ai_quant_system(
 
                 # GIẢI PHÁP 3: THOÁT VỊ THẾ BẤT ĐỐI XỨNG (ASYMMETRIC EXIT RULES)
                 elif enable_asymmetric_atr_exit:
-                    # 1. Cắt lỗ cứng độc lập (dứt khoát bảo vệ vốn)
-                    if profit_margin <= HARD_STOPLOSS:
-                        pending_sells.append((c, f'SELL (Cắt lỗ cứng {HARD_STOPLOSS*100:.1f}%)'))
+                    dyn_sl = calc_dynamic_stoploss(c, date)
+                    # 1. Cắt lỗ động theo ATR (dứt khoát bảo vệ vốn)
+                    if profit_margin <= dyn_sl:
+                        pending_sells.append((c, f'SELL (Cắt lỗ động ATR {dyn_sl*100:.1f}%)'))
 
                     # 2. SIÊU CỔ PHIẾU (LÃI ĐỈNH >= 20%):
                     # Duy trì trạng thái bảo vệ theo đỉnh; không bao giờ bị rơi rụng nhánh khi lãi giảm
@@ -991,8 +993,9 @@ def run_ai_quant_system(
 
                 # NẾU TẮT ASYMMETRIC EXIT: DÙNG LOGIC GỐC
                 else:
-                    if profit_margin <= HARD_STOPLOSS:
-                        pending_sells.append((c, f'SELL (Cắt lỗ cứng {HARD_STOPLOSS*100:.1f}%)'))
+                    dyn_sl = calc_dynamic_stoploss(c, date)
+                    if profit_margin <= dyn_sl:
+                        pending_sells.append((c, f'SELL (Cắt lỗ động ATR {dyn_sl*100:.1f}%)'))
                     elif peak_margin >= SUPER_WINNER_PEAK:
                         drop_allowed = 0.06 if index_below_ma20 else SUPER_WINNER_DROP
                         if curr_price < (held[c]['highest'] * (1.0 - drop_allowed)):
@@ -1549,7 +1552,7 @@ def main():
     print(f"   • Solution 5: Split-Size & Leader Rebalance (Tối đa {MAX_PER_SECTOR} mã/ngành, {MAX_PER_ECOSYSTEM} mã/HST | Hoán đổi 20% NAV cho Leader)")
     print(f"   • Solution 6: Sắp xếp ưu tiên lệnh mua: Động lượng (AI Score -> Breakout% -> Ret20)")
     print(f"   • Solution 7: Anti-Chase Filter (Chặn mua đuổi > MA50*1.20 hoặc RSI>82): {'BẬT' if ENABLE_ANTI_CHASE_FILTER else 'TẮT'}")
-    print(f"   • Solution 8: Macro Synchronization & Intraday Hard Stop-Loss (Index > MA100 & MA50 dốc lên | Hard Stop Low: {HARD_STOPLOSS*100:.1f}%): BẬT")
+    print(f"   • Solution 8: Macro Synchronization & Intraday Hard Stop-Loss (Index > MA100 & MA50 dốc lên | Cắt lỗ động max({HARD_STOPLOSS_FLOOR*100:.1f}%, -{ATR_STOPLOSS_MULTIPLIER}x ATR)): BẬT")
     print("="*70 + "\n")
 
     # ==========================================
@@ -1578,7 +1581,8 @@ def main():
         enable_asymmetric_atr_exit=ENABLE_ASYMMETRIC_ATR_EXIT,
         enable_ma20_slope_filter=ENABLE_MA20_SLOPE_FILTER,
         enable_anti_chase_filter=ENABLE_ANTI_CHASE_FILTER,
-        hard_stoploss=HARD_STOPLOSS
+        hard_stoploss_floor=HARD_STOPLOSS_FLOOR,
+        atr_stoploss_multiplier=ATR_STOPLOSS_MULTIPLIER
     )
 
     # Ghi nhận file trading_log.csv
