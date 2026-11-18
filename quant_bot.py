@@ -302,6 +302,8 @@ def fetch_ticker_data(symbol, n_bars=4500):
                 c_df = csv_df[['Date', 'VNINDEX', 'VN_VOLUME']].dropna(subset=['VNINDEX']).copy()
                 c_df['Date'] = pd.to_datetime(c_df['Date']).dt.tz_localize(None).dt.normalize()
                 c_df.rename(columns={'VNINDEX': 'Close', 'VN_VOLUME': 'Volume'}, inplace=True)
+                # BẮT BUỘC: Sắp xếp Date tăng dần trước mọi phép tính thời gian (tránh nhìn trước tương lai khi file gốc xếp giảm dần)
+                c_df = c_df.drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
                 
                 # Tái tạo biên độ dao động nến dựa trên độ biến động lịch sử để không làm phẳng nến
                 # Phẳng nến (High == Low == Close) sẽ làm sai lệch nghiêm trọng chỉ báo ATR và ADX
@@ -397,8 +399,31 @@ def run_ai_quant_system(
 
     pending_sells = []  # list of (ticker, reason)
     pending_buys = []   # list of {'ticker': c, 'score': score, 'signal': 'Breakout'}
+    current_max_exposure = 1.0  # Hạn mức tỷ trọng cổ phiếu tối đa (cập nhật từ ATC phiên trước)
 
-    def get_current_stock_valuation(d):
+    def get_stock_valuation_at_open(bar_idx):
+        """
+        Định giá danh mục cổ phiếu tại thời điểm đầu phiên (Open[t]).
+        BẮT BUỘC: Chỉ sử dụng Giá tham chiếu HOSE (Close[t-1] - phiên liền trước) hoặc giá mua/giá đã biết.
+        TUYỆT ĐỐI KHÔNG dùng Close[t] cùng ngày nhằm triệt tiêu hoàn toàn Look-ahead Bias.
+        """
+        total = 0.0
+        for k, pos in held.items():
+            ref_p = None
+            if bar_idx > 0 and k in stocks_close.columns:
+                prev_c = stocks_close.iloc[bar_idx - 1][k]
+                if pd.notna(prev_c) and prev_c > 0:
+                    ref_p = prev_c
+            if ref_p is None:
+                ref_p = pos.get('last_price', pos['buy_price'])
+            total += pos['qty'] * (ref_p * 1000.0)
+        return total
+
+    def get_stock_valuation_at_close(d):
+        """
+        Định giá danh mục cổ phiếu tại thời điểm kết phiên (ATC/Close[t]).
+        Sử dụng giá đóng cửa Close[t] cùng ngày cho công tác chốt sổ NAV và quản trị rủi ro cuối phiên.
+        """
         total = 0.0
         for k, pos in held.items():
             curr_p = stocks_close.at[d, k] if (k in stocks_close.columns and pd.notna(stocks_close.at[d, k]) and stocks_close.at[d, k] > 0) else pos.get('last_price', pos['buy_price'])
@@ -425,9 +450,10 @@ def run_ai_quant_system(
             sells_executed = []
             for c, reason in pending_sells:
                 if c in held:
-                    open_p = stocks_open.at[date, c] if (c in stocks_open.columns and pd.notna(stocks_open.at[date, c]) and stocks_open.at[date, c] > 0) else (stocks_close.at[date, c] if c in stocks_close.columns else np.nan)
+                    # BẮT BUỘC: Khớp tại Open[t]. TUYỆT ĐỐI KHÔNG fallback về Close[t] cùng ngày (chống nhìn trước tương lai)
+                    open_p = stocks_open.at[date, c] if (c in stocks_open.columns and pd.notna(stocks_open.at[date, c]) and stocks_open.at[date, c] > 0) else np.nan
                     if pd.isna(open_p) or open_p <= 0:
-                        continue  # Tạm ngừng giao dịch -> Giữ lại lệnh bán cho phiên tiếp theo
+                        continue  # Tạm ngừng giao dịch hoặc thiếu Open -> Giữ lại lệnh bán cho phiên tiếp theo
                     
                     # RÀNG BUỘC LÔ CHẴN 100 CỔ PHIẾU HOSE KHI BÁN HẠ 50% TỶ TRỌNG
                     if 'Hoán đổi 50% tỷ trọng' in reason:
@@ -464,7 +490,7 @@ def run_ai_quant_system(
                         
                     sells_executed.append((c, reason))
                     
-                    rem_stock_val = get_current_stock_valuation(date)
+                    rem_stock_val = get_stock_valuation_at_open(i)
                     trade_nav = cash + rem_stock_val
                     cum_ret_pct = ((trade_nav / INITIAL_CAPITAL) - 1.0) * 100.0
                     
@@ -486,14 +512,20 @@ def run_ai_quant_system(
 
         # (B) KHỚP LỆNH MUA CHỜ TẠI OPEN[t] THEO LÔ CHẴN 100 CỔ PHIẾU HOSE
         if pending_buys:
-            stock_val_open = get_current_stock_valuation(date)
+            # ĐỊNH GIÁ ĐẦU PHIÊN CHUẨN XÁC: Chỉ dùng Close[t-1] (Giá tham chiếu HOSE), triệt tiêu Look-ahead Bias
+            stock_val_open = get_stock_valuation_at_open(i)
             current_nav_open = cash + stock_val_open
             target_slot_size = current_nav_open / MAX_SLOTS
+            
+            # GIỚI HẠN TỶ TRỌNG CỔ PHIẾU THEO NGÂN SÁCH THỰC TẾ (EXPOSURE BUDGETING)
+            # Khắc phục triệt để lỗi vượt trần: Cấp vốn mỗi lệnh phải nằm trong hạn mức thực tế còn lại
+            allowed_stock_val = current_nav_open * current_max_exposure
+            rem_exposure_budget = max(0.0, allowed_stock_val - stock_val_open)
             
             buys_today = 0
             for cand in pending_buys:
                 empty_slots = MAX_SLOTS - len(held)
-                if empty_slots <= 0 or cash < 2_000_000 or buys_today >= MAX_BUYS_PER_DAY:
+                if empty_slots <= 0 or cash < 2_000_000 or buys_today >= MAX_BUYS_PER_DAY or rem_exposure_budget <= 0:
                     break
                 c = cand['ticker']
                 if c in held:
@@ -507,25 +539,22 @@ def run_ai_quant_system(
                 if current_sec_count >= MAX_PER_SECTOR or current_eco_count >= MAX_PER_ECOSYSTEM:
                     continue
 
-                open_p = stocks_open.at[date, c] if (c in stocks_open.columns and pd.notna(stocks_open.at[date, c]) and stocks_open.at[date, c] > 0) else (stocks_close.at[date, c] if c in stocks_close.columns else np.nan)
+                # BẮT BUỘC: Khớp tại Open[t]. TUYỆT ĐỐI KHÔNG fallback về Close[t] cùng ngày
+                open_p = stocks_open.at[date, c] if (c in stocks_open.columns and pd.notna(stocks_open.at[date, c]) and stocks_open.at[date, c] > 0) else np.nan
                 if pd.isna(open_p) or open_p <= 0:
-                    continue
+                    continue  # Bỏ qua / Hủy lệnh nếu không có giá Open hợp lệ (không fallback về Close[t])
                 
                 price_vnd = open_p * 1000.0
                 cost_per_share_vnd = price_vnd * (1.0 + BUY_FRICTION)
                 cost_per_lot_vnd = cost_per_share_vnd * 100.0
                 
                 # GIẢI PHÁP 1 & CƠ CHẾ HOÁN ĐỔI TỶ TRỌNG CHO LEADER (LEADER REBALANCE):
-                # Tìm các mã cùng ngành hoặc cùng hệ sinh thái đang nắm giữ
                 held_siblings = [
                     h for h in held
                     if (SECTOR_MAP.get(h, 'OTHER') == cand_sec or ECOSYSTEM_MAP.get(h, h) == cand_eco)
                     and h != c
                 ]
                 
-                # Nếu mã mới có AI Score cao hơn mã cũ trong held:
-                # -> Mã mới là Leader thực sự: Cấp trọn vẹn 20% NAV (slot_multiplier = 1.0)
-                # -> Đánh dấu mã cũ để hoán đổi 50% tỷ trọng nhường vốn cho Leader
                 max_held_sibling_score = max([held[h].get('score', 0.55) for h in held_siblings], default=0.0)
                 is_leader_upgrade = len(held_siblings) > 0 and (cand.get('score', 0.0) > max_held_sibling_score)
 
@@ -547,21 +576,25 @@ def run_ai_quant_system(
                     slot_multiplier = 0.5 if is_split_pos else 1.0
 
                 target_alloc = target_slot_size * slot_multiplier
+                # KHỐNG CHẾ NGÂN SÁCH LỆNH MUA CHUẨN XÁC:
+                # Giá trị đặt mua tối đa không được vượt quá: Target Slot, Tiền mặt hiện có, VÀ Ngân sách tỷ trọng còn lại!
+                alloc_budget = min(target_alloc, cash, rem_exposure_budget)
+
                 # KIỂM TRA SỨC MUA TIỀN MẶT DỰ PHÒNG THỰC TẾ (CASH PURCHASING POWER):
-                # 1. Tiền mặt phải đủ mua tối thiểu 1 lô 100 cổ phiếu
-                # 2. Tiền mặt phải đủ trang trải ít nhất 50% vị thế chuẩn (chống mua manh mún khi tiền cũ chưa về)
-                if cash < cost_per_lot_vnd or cash < (target_alloc * 0.50):
+                # 1. Ngân sách khả dụng phải đủ mua tối thiểu 1 lô 100 cổ phiếu
+                # 2. Ngân sách khả dụng phải đủ trang trải ít nhất 50% vị thế chuẩn (chống mua manh mún khi tiền cũ chưa về)
+                if alloc_budget < cost_per_lot_vnd or alloc_budget < (target_alloc * 0.50):
                     continue
 
-                max_lots_target = np.floor(target_alloc / cost_per_lot_vnd)
-                max_lots_cash = np.floor(cash / cost_per_lot_vnd)
-                lots = min(max_lots_target, max_lots_cash)
-                shares = lots * 100.0  # Luôn là bội số chính xác của 100 cổ phiếu HOSE
+                max_lots = np.floor(alloc_budget / cost_per_lot_vnd)
+                shares = max_lots * 100.0  # Luôn là bội số chính xác của 100 cổ phiếu HOSE
                 total_spent = shares * cost_per_share_vnd
                 
-                # Chặn tuyệt đối nếu không đủ tiền mặt thanh toán thực tế
-                if shares >= 100 and cash >= total_spent:
+                # Chặn tuyệt đối nếu không đủ tiền mặt thanh toán hoặc vượt trần tỷ trọng
+                if shares >= 100 and cash >= total_spent and total_spent <= (rem_exposure_budget + 1e-4):
                     cash -= total_spent
+                    rem_exposure_budget -= total_spent
+                    stock_val_open += total_spent
                     held[c] = {
                         'qty': shares,
                         'buy_price': open_p,
@@ -576,8 +609,7 @@ def run_ai_quant_system(
                     }
                     buys_today += 1
                     
-                    rem_stock_val = get_current_stock_valuation(date)
-                    trade_nav = cash + rem_stock_val
+                    trade_nav = cash + stock_val_open
                     cum_ret_pct = ((trade_nav / INITIAL_CAPITAL) - 1.0) * 100.0
                     
                     trade_log.append({
@@ -616,7 +648,7 @@ def run_ai_quant_system(
                 held[c]['consecutive_below_ma20'] = 0
 
         # Cập nhật NAV cuối phiên chuẩn xác theo Close[t]
-        stock_val_close = get_current_stock_valuation(date)
+        stock_val_close = get_stock_valuation_at_close(date)
         current_nav = cash + stock_val_close
         
         # Cập nhật đỉnh NAV của chu kỳ nắm giữ
@@ -751,36 +783,37 @@ def run_ai_quant_system(
                     if profit_margin <= -0.08:
                         pending_sells.append((c, 'SELL (Cắt lỗ cứng -8%)'))
 
-                    # 2. VỊ THẾ CÓ LÃI ĐỆM TỐT (>= +5%):
-                    # KHÔNG bán ngay ở phiên đầu tiên vi phạm MA20 (tránh rũ bỏ ATC giả).
-                    # Yêu cầu 2 phiên liên tiếp đóng cửa dưới MA20 mới xác nhận bán.
-                    elif profit_margin >= 0.05:
-                        # Siêu cổ phiếu (Lãi đỉnh >= 20%)
-                        if peak_margin >= SUPER_WINNER_PEAK:
-                            super_drop = max(SUPER_WINNER_DROP, 2.5 * atr_pct)
-                            if curr_price < (held[c]['highest'] * (1.0 - super_drop)):
-                                pending_sells.append((c, 'SELL (Trailing Stop chốt siêu cổ)'))
-                            elif consec_below >= 2:
-                                pending_sells.append((c, 'SELL (Xác nhận 2 phiên thủng MA20 chốt siêu cổ)'))
-                            elif pd.notna(ma50_c) and curr_price < ma50_c:
-                                pending_sells.append((c, 'SELL (Gãy MA50 chốt lời sóng lớn)'))
-                            elif profit_margin <= 0.05:
-                                pending_sells.append((c, 'SELL (Khóa lãi sàn bảo vệ +5%)'))
-                        # Vị thế lãi khá (Lãi đỉnh 10% - 20%)
-                        elif peak_margin >= PROFIT_PROTECTION_PEAK:
-                            standard_drop = max(PROFIT_PROTECTION_DROP, 2.5 * atr_pct)
-                            if curr_price < (held[c]['highest'] * (1.0 - standard_drop)):
-                                pending_sells.append((c, 'SELL (Trailing Stop ATR chốt lời)'))
-                            elif consec_below >= 2:
-                                pending_sells.append((c, 'SELL (Xác nhận 2 phiên thủng MA20 bảo toàn lãi)'))
-                            elif profit_margin <= PROFIT_PROTECTION_FLOOR:
-                                pending_sells.append((c, 'SELL (Khóa bảo vệ vốn +2%)'))
-                        # Vị thế lãi 5% - 10% (Chưa kích hoạt Trailing Stop, để cổ phiếu có không gian tăng trưởng)
-                        else:
-                            if consec_below >= 2:
-                                pending_sells.append((c, 'SELL (Xác nhận 2 phiên thủng MA20 bảo toàn lãi)'))
+                    # 2. SIÊU CỔ PHIẾU (LÃI ĐỈNH >= 20%):
+                    # Duy trì trạng thái bảo vệ theo đỉnh; không bao giờ bị rơi rụng nhánh khi lãi giảm
+                    elif peak_margin >= SUPER_WINNER_PEAK:
+                        super_drop = max(SUPER_WINNER_DROP, 2.5 * atr_pct)
+                        if curr_price < (held[c]['highest'] * (1.0 - super_drop)):
+                            pending_sells.append((c, 'SELL (Trailing Stop chốt siêu cổ)'))
+                        elif profit_margin <= 0.05:
+                            pending_sells.append((c, 'SELL (Khóa lãi sàn bảo vệ +5%)'))
+                        elif pd.notna(ma50_c) and curr_price < ma50_c:
+                            pending_sells.append((c, 'SELL (Gãy MA50 chốt lời sóng lớn)'))
+                        elif consec_below >= 2:
+                            pending_sells.append((c, 'SELL (Xác nhận 2 phiên thủng MA20 chốt siêu cổ)'))
 
-                    # 3. VỊ THẾ LÃI MỎNG HOẶC LỖ (< +5%): Cắt nhanh bảo vệ vốn
+                    # 3. VỊ THẾ LÃI KHÁ (LÃI ĐỈNH 10% - 20%):
+                    # Kích hoạt Trailing Stop & Sàn khóa lãi +2% bảo vệ thành quả
+                    elif peak_margin >= PROFIT_PROTECTION_PEAK:
+                        standard_drop = max(PROFIT_PROTECTION_DROP, 2.5 * atr_pct)
+                        if curr_price < (held[c]['highest'] * (1.0 - standard_drop)):
+                            pending_sells.append((c, 'SELL (Trailing Stop ATR chốt lời)'))
+                        elif profit_margin <= PROFIT_PROTECTION_FLOOR:
+                            pending_sells.append((c, 'SELL (Khóa bảo vệ vốn +2%)'))
+                        elif consec_below >= 2:
+                            pending_sells.append((c, 'SELL (Xác nhận 2 phiên thủng MA20 bảo toàn lãi)'))
+
+                    # 4. VỊ THẾ CÓ LÃI ĐỆM (5% - 10%, đỉnh chưa chạm 10%):
+                    # Cho cổ phiếu không gian co lắc; chỉ bán khi xác nhận 2 phiên thủng MA20
+                    elif profit_margin >= 0.05:
+                        if consec_below >= 2:
+                            pending_sells.append((c, 'SELL (Xác nhận 2 phiên thủng MA20 bảo toàn lãi)'))
+
+                    # 5. VỊ THẾ LÃI MỎNG HOẶC LỖ (< +5%): Cắt nhanh bảo vệ vốn
                     else:
                         if index_below_ma20 and pd.notna(ma20_c) and curr_price < ma20_c:
                             pending_sells.append((c, 'SELL (Thị trường dưới MA20 cắt vị thế yếu)'))
@@ -831,6 +864,7 @@ def run_ai_quant_system(
         else:
             max_exposure = 1.0
 
+        current_max_exposure = max_exposure
         allowed_stock_cap = max(0.0, (current_nav * max_exposure) - stock_val_close)
 
         # 1. VÙNG ĐỆM HYSTERESIS: VN-Index phải vượt MA100 tối thiểu +1.5%
@@ -1005,7 +1039,7 @@ def run_ai_quant_system(
                 pending_buys = selected_buys
 
     # Chốt NAV phiên cuối cùng
-    final_stock_val = get_current_stock_valuation(backtest['Date'].iloc[-1])
+    final_stock_val = get_stock_valuation_at_close(backtest['Date'].iloc[-1])
     final_nav = cash + final_stock_val
 
     df_nav = pd.DataFrame(daily_nav_history)
@@ -1129,13 +1163,24 @@ def main():
                 stocks_vol_ma20[f'{c}_V'] = s_v.rolling(20).mean().shift(1)
 
     # =====================================================================
-    # TÍNH ĐỘ RỘNG THỊ TRƯỜNG POINT-IN-TIME (TỶ LỆ MÃ VN30 TRÊN MA50)
+    # TÍNH ĐỘ RỘNG THỊ TRƯỜNG POINT-IN-TIME (TỶ LỆ MÃ VN30 THỰC TẾ TRÊN MA50)
+    # Tuyệt đối chỉ tính trên 30 mã đang thuộc rổ VN30 tại mỗi ngày giao dịch
     # =====================================================================
-    above_ma50_cnt = (stocks_close > stocks_ma50).sum(axis=1)
-    valid_ma50_cnt = (stocks_close.notna() & stocks_ma50.notna()).sum(axis=1)
-    market_breadth_series = (above_ma50_cnt / valid_ma50_cnt.replace(0, np.nan)).fillna(0.5)
-
-    breadth_map = dict(zip(pd.to_datetime(market_breadth_series.index).strftime('%Y-%m-%d'), market_breadth_series.values))
+    breadth_map = {}
+    for dt in stocks_close.index:
+        d_str = dt.strftime('%Y-%m-%d')
+        active_vn30 = get_vn30_constituents(d_str, use_live=False)
+        above_cnt = 0
+        valid_cnt = 0
+        for ticker in active_vn30:
+            if ticker in stocks_close.columns and ticker in stocks_ma50.columns:
+                c_val = stocks_close.at[dt, ticker]
+                m_val = stocks_ma50.at[dt, ticker]
+                if pd.notna(c_val) and pd.notna(m_val) and c_val > 0 and m_val > 0:
+                    valid_cnt += 1
+                    if c_val > m_val:
+                        above_cnt += 1
+        breadth_map[d_str] = (above_cnt / valid_cnt) if valid_cnt > 0 else 0.5
 
     # ==========================================
     # 3. TẢI BỘ NHỚ AI & ĐỒNG BỘ VĨ MÔ CSV
@@ -1148,6 +1193,18 @@ def main():
         macro_df = macro_df.drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
     except Exception as e:
         sys.exit(f"🛑 LỖI ĐỌC FILE VĨ MÔ: {e}")
+
+    # LÀM SẠCH TỶ GIÁ USD/VND (Xử lý đơn vị nghìn 21.055, 21.0 và dị biệt 3210, 3211)
+    macro_df['USD_VND'] = pd.to_numeric(macro_df['USD_VND'], errors='coerce')
+    macro_df['USD_VND'] = macro_df['USD_VND'].apply(lambda x: x * 1000.0 if (pd.notna(x) and 10.0 <= x <= 40.0) else x)
+    macro_df['USD_VND'] = macro_df['USD_VND'].apply(lambda x: np.nan if (pd.notna(x) and (x < 15000.0 or x > 35000.0)) else x)
+    macro_df['USD_VND'] = macro_df['USD_VND'].interpolate(method='linear').ffill().bfill()
+
+    # ĐỒNG BỘ THỜI ĐIỂM CÔNG BỐ (PUBLICATION LAG):
+    # Thị trường VN đóng cửa lúc 15:00 (phát tín hiệu 15:30). Dữ liệu đóng cửa Mỹ (DXY, US10Y)
+    # kết thúc sau đó (rạng sáng hôm sau giờ VN). Bắt buộc shift(1) để chống nhìn trước tương lai!
+    macro_df['DXY'] = pd.to_numeric(macro_df['DXY'], errors='coerce').shift(1)
+    macro_df['US10Y'] = pd.to_numeric(macro_df['US10Y'], errors='coerce').shift(1)
 
     market_context = vnindex_df[['Date', 'VN_MFI', 'VNINDEX', 'MA200', 'VN_ATR_PCT']].copy()
     market_context['VN_Dist_MA200'] = market_context['VNINDEX'] / market_context['MA200']
@@ -1162,7 +1219,7 @@ def main():
     for col in macro_cols:
         macro_df[col] = pd.to_numeric(macro_df[col], errors='coerce')
         roll_m = macro_df[col].rolling(120, min_periods=5).mean()
-        roll_s = macro_df[col].rolling(120, min_periods=5).std()
+        roll_s = macro_df[col].rolling(120, min_periods=5).std().replace(0, np.nan)
         macro_df[f'Z_{col}'] = (macro_df[col] - roll_m) / roll_s
     z_cols = [f'Z_{c}' for c in macro_cols]
 
@@ -1212,22 +1269,32 @@ def main():
                 print(f"   ⚠️ Lỗi đọc {fn}: {e}")
 
     DEFAULT_MODEL_FILE = "xgboost_ultimate.json"
-    default_model = xgb.XGBClassifier()
+    default_model = None
     if os.path.exists(DEFAULT_MODEL_FILE):
+        default_model = xgb.XGBClassifier()
         default_model.load_model(DEFAULT_MODEL_FILE)
         print(f"   🧠 Đã nạp mô hình cơ sở: {DEFAULT_MODEL_FILE}")
-    elif wf_models:
-        default_model = list(wf_models.values())[-1]
-    else:
-        sys.exit(f"⚠️ Không tìm thấy {DEFAULT_MODEL_FILE}! Bác phải chạy train_bot.py trước.")
+
+    def get_model_for_year(target_year):
+        if target_year in wf_models:
+            return wf_models[target_year]
+        # CHẶN TUYỆT ĐỐI MODEL TƯƠNG LAI: Chỉ tìm model của các năm <= target_year
+        valid_past_years = [py for py in sorted(wf_models.keys()) if py <= target_year]
+        if valid_past_years:
+            fallback_year = max(valid_past_years)
+            print(f"   ℹ️ Năm {target_year} thiếu model riêng -> Dùng model năm quá khứ gần nhất: {fallback_year}")
+            return wf_models[fallback_year]
+        if default_model is not None:
+            return default_model
+        sys.exit(f"🛑 LỖI BẢO MẬT WALK-FORWARD: Không tìm thấy mô hình hợp lệ cho năm {target_year}! Cấm tuyệt đối dùng model tương lai.")
 
     # Chấm điểm AI Score thích ứng Walk-Forward OOS
     ml_master['AI_Score'] = np.nan
 
-    # 1. Giai đoạn <= 2021: Dùng mô hình học trên 2014-2021 (model 2022 hoặc default)
+    # 1. Giai đoạn <= 2021: Dùng mô hình học trên 2014-2021 (model 2022 hoặc model quá khứ)
     pre_2022_mask = ml_master['Date'] < '2022-01-01'
-    base_m = wf_models.get(2022, default_model)
     if pre_2022_mask.sum() > 0:
+        base_m = get_model_for_year(2022)
         ml_master.loc[pre_2022_mask, 'AI_Score'] = base_m.predict_proba(ml_master.loc[pre_2022_mask, ml_features])[:, 1]
 
     # 2. Các năm Out-of-Sample 2022 -> 2026: Dùng đúng mô hình học trước năm đó!
@@ -1238,7 +1305,7 @@ def main():
             y_mask = (ml_master['Date'] >= f"{y}-01-01") & (ml_master['Date'] < f"{y+1}-01-01")
 
         if y_mask.sum() > 0:
-            m_y = wf_models.get(y, default_model)
+            m_y = get_model_for_year(y)
             ml_master.loc[y_mask, 'AI_Score'] = m_y.predict_proba(ml_master.loc[y_mask, ml_features])[:, 1]
 
     # Tạo tra cứu AI Score dạng dict (Key: ticker -> {date_str: score})
@@ -1333,6 +1400,31 @@ def main():
     avg_loss_pct = sells.loc[sells['Profit(%)'] < 0, 'Profit(%)'].mean() if loss_sells > 0 else 0.0
     payoff_ratio = abs(avg_win_pct / avg_loss_pct) if avg_loss_pct != 0 else 999.0
 
+    total_net_pnl = final_nav - initial_capital
+    trade_pnl_total = sells['PnL_VND'].sum() if total_sells > 0 else 0.0
+    interest_share_pct = (total_interest / total_net_pnl * 100.0) if total_net_pnl > 0 else 0.0
+    trade_share_pct = (trade_pnl_total / total_net_pnl * 100.0) if total_net_pnl > 0 else 0.0
+
+    if total_sells > 0:
+        pnl_by_ticker = sells.groupby('Ticker')['PnL_VND'].sum().sort_values(ascending=False)
+        top_ticker = pnl_by_ticker.index[0]
+        top_ticker_pnl = pnl_by_ticker.iloc[0]
+        top_ticker_share_of_trade = (top_ticker_pnl / trade_pnl_total * 100.0) if trade_pnl_total > 0 else 0.0
+        rest_tickers_pnl = trade_pnl_total - top_ticker_pnl
+    else:
+        top_ticker = "N/A"
+        top_ticker_pnl = 0.0
+        top_ticker_share_of_trade = 0.0
+        rest_tickers_pnl = 0.0
+
+    cash_only_days = len(df_nav_hist[df_nav_hist['Cash'] == df_nav_hist['NAV']])
+    cash_only_pct = (cash_only_days / len(df_nav_hist) * 100.0) if len(df_nav_hist) > 0 else 0.0
+
+    vnindex_start = df_clean.loc[df_clean['Date'] >= BACKTEST_START_DATE, 'VNINDEX'].iloc[0]
+    vnindex_end = df_clean['VNINDEX'].iloc[-1]
+    vnindex_return_pct = ((vnindex_end / vnindex_start) - 1.0) * 100.0
+    pure_cash_return_pct = (((1.0 + 0.04/250) ** len(df_nav_hist)) - 1.0) * 100.0
+
     print("\n" + "="*58)
     print(f"📊 BÁO CÁO ĐỊNH LƯỢNG THỰC CHIẾN TỪ {BACKTEST_START_DATE[:4]} ĐẾN NAY")
     print("🧠 MÔ HÌNH CƠ SỞ (BASE MODEL): HUẤN LUYỆN TRÊN CHU KỲ VÀNG 10 NĂM (2012 -> 2021)")
@@ -1340,9 +1432,20 @@ def main():
     print("="*58)
     print(f"💵 Vốn khởi điểm ({BACKTEST_START_DATE}):        {initial_capital:,.0f} VNĐ")
     print(f"🏦 TỔNG TÀI SẢN HIỆN TẠI (NAV):   {final_nav:,.0f} VNĐ")
-    print(f"💰 LÃI BANK THU VỀ (4%/năm):      +{total_interest:,.0f} VNĐ")
-    print(f"🚀 TỔNG LỢI NHUẬN (Đã trừ phí):    +{total_return_pct:.2f}%")
+    print(f"🚀 TỔNG LỢI NHUẬN (Đã trừ phí):    +{total_return_pct:.2f}% (+{total_net_pnl:,.0f} VNĐ)")
     print(f"📈 Lợi nhuận kép TB (CAGR):        {cagr:.2f}% / năm")
+    print(f"----------------------------------------------------------")
+    print(f"🔍 PHÂN RÃ NGUỒN LỢI NHUẬN (ATTRIBUTION ANALYSIS):")
+    print(f"   💰 Lãi tiền gửi nhàn rỗi (4%/năm): +{total_interest:,.0f} VNĐ ({interest_share_pct:.1f}% tổng lãi)")
+    print(f"   📊 Lãi giao dịch cổ phiếu thuần:   +{trade_pnl_total:,.0f} VNĐ ({trade_share_pct:.1f}% tổng lãi)")
+    print(f"   ⭐ Đóng góp siêu cổ #{top_ticker}:       +{top_ticker_pnl:,.0f} VNĐ ({top_ticker_share_of_trade:.1f}% lãi trade)")
+    print(f"   💼 Lãi các cổ phiếu còn lại:       +{rest_tickers_pnl:,.0f} VNĐ")
+    print(f"   🛡 Tỷ lệ phiên giữ 100% tiền mặt:  {cash_only_pct:.1f}% ({cash_only_days}/{len(df_nav_hist)} phiên)")
+    print(f"----------------------------------------------------------")
+    print(f"🏁 ĐỐI CHUẨN THỊ TRƯỜNG (BENCHMARKS COMPARISON):")
+    print(f"   🤖 Chiến lược AI Quant Bot:       +{total_return_pct:.2f}% (CAGR: {cagr:.2f}%)")
+    print(f"   🏦 Tiền gửi tiết kiệm (Risk-free): +{pure_cash_return_pct:.2f}%")
+    print(f"   🇻🇳 VN-Index (Buy & Hold):          {vnindex_return_pct:+.2f}% ({vnindex_start:,.1f} -> {vnindex_end:,.1f})")
     print(f"----------------------------------------------------------")
     print(f"📉 SỤT GIẢM TỐI ĐA (Max Drawdown): {max_mdd:.2f}%")
     print(f"   (Thời kỳ chịu đựng lớn nhất: Từ đỉnh {pd.to_datetime(peak_date).strftime('%d/%m/%Y')} về đáy {pd.to_datetime(trough_date).strftime('%d/%m/%Y')})")
