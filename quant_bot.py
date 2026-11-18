@@ -123,6 +123,7 @@ ENABLE_MA20_SLOPE_FILTER = os.environ.get('ENABLE_MA20_SLOPE_FILTER', 'True').lo
 ENABLE_ANTI_CHASE_FILTER = os.environ.get('ENABLE_ANTI_CHASE_FILTER', 'True').lower() in ('true', '1', 'yes')
 MAX_PER_SECTOR = int(os.environ.get('MAX_PER_SECTOR', '2'))        # Nới trần 2 mã/ngành, áp dụng Split-Size (10% NAV/lệnh khi cùng ngành)
 MAX_PER_ECOSYSTEM = int(os.environ.get('MAX_PER_ECOSYSTEM', '2'))  # Nới trần 2 mã/hệ sinh thái, áp dụng Split-Size (10% NAV/lệnh khi cùng hệ sinh thái)
+HARD_STOPLOSS = float(os.environ.get('HARD_STOPLOSS', '-0.075'))    # Cắt lỗ cứng độc lập -7.5% (Chặn đứng mọi khoản lỗ đuôi trái)
 
 # ==========================================
 # CÁC HÀM TÍNH TOÁN CHỈ BÁO KỸ THUẬT
@@ -347,7 +348,8 @@ def run_ai_quant_system(
     enable_dynamic_percentile_ai=ENABLE_DYNAMIC_PERCENTILE_AI,
     enable_asymmetric_atr_exit=ENABLE_ASYMMETRIC_ATR_EXIT,
     enable_ma20_slope_filter=ENABLE_MA20_SLOPE_FILTER,
-    enable_anti_chase_filter=ENABLE_ANTI_CHASE_FILTER
+    enable_anti_chase_filter=ENABLE_ANTI_CHASE_FILTER,
+    hard_stoploss=HARD_STOPLOSS
 ):
     if backtest_start_date is None:
         backtest_start_date = BACKTEST_START_DATE
@@ -384,7 +386,7 @@ def run_ai_quant_system(
     PROFIT_PROTECTION_DROP = 0.08      # Rớt 8% từ đỉnh thì chốt toàn bộ vị thế
     PROFIT_PROTECTION_FLOOR = 0.02     # Sàn bảo vệ vốn/lãi tối thiểu +2%
     MA20_PROFIT_EXIT = 0.10            # Thủng MA20 chốt lãi khi đã có đệm > 10%
-    HARD_STOPLOSS = -0.075             # Cắt lỗ cứng -7.5% (Chặn đứng mọi khoản lỗ đuôi trái trên -10%)
+    HARD_STOPLOSS = hard_stoploss      # Cắt lỗ cứng độc lập (Chặn đứng mọi khoản lỗ đuôi trái)
     PORTFOLIO_MDD_LIMIT = -0.18        # Portfolio Stop: Tổng NAV giảm 18% từ đỉnh chu kỳ -> bán hết
     
     INITIAL_CAPITAL = initial_capital  # Vốn khởi điểm (mặc định 100 triệu VNĐ)
@@ -1461,7 +1463,8 @@ def main():
         enable_dynamic_percentile_ai=ENABLE_DYNAMIC_PERCENTILE_AI,
         enable_asymmetric_atr_exit=ENABLE_ASYMMETRIC_ATR_EXIT,
         enable_ma20_slope_filter=ENABLE_MA20_SLOPE_FILTER,
-        enable_anti_chase_filter=ENABLE_ANTI_CHASE_FILTER
+        enable_anti_chase_filter=ENABLE_ANTI_CHASE_FILTER,
+        hard_stoploss=HARD_STOPLOSS
     )
 
     # Ghi nhận file trading_log.csv
