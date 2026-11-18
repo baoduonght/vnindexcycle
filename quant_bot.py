@@ -123,7 +123,8 @@ ENABLE_MA20_SLOPE_FILTER = os.environ.get('ENABLE_MA20_SLOPE_FILTER', 'True').lo
 ENABLE_ANTI_CHASE_FILTER = os.environ.get('ENABLE_ANTI_CHASE_FILTER', 'True').lower() in ('true', '1', 'yes')
 MAX_PER_SECTOR = int(os.environ.get('MAX_PER_SECTOR', '2'))        # Nới trần 2 mã/ngành, áp dụng Split-Size (10% NAV/lệnh khi cùng ngành)
 MAX_PER_ECOSYSTEM = int(os.environ.get('MAX_PER_ECOSYSTEM', '2'))  # Nới trần 2 mã/hệ sinh thái, áp dụng Split-Size (10% NAV/lệnh khi cùng hệ sinh thái)
-HARD_STOPLOSS = float(os.environ.get('HARD_STOPLOSS', '-0.075'))    # Cắt lỗ cứng độc lập -7.5% (Chặn đứng mọi khoản lỗ đuôi trái)
+HARD_STOPLOSS_FLOOR = float(os.environ.get('HARD_STOPLOSS_FLOOR', '-0.085'))  # Biên dưới tuyệt đối cắt lỗ động (mã biến động mạnh tối đa -8.5%)
+ATR_STOPLOSS_MULTIPLIER = float(os.environ.get('ATR_STOPLOSS_MULTIPLIER', '2.2'))  # Hệ số ATR cho cắt lỗ động: max(FLOOR, -ATR_MULT * ATR_pct)
 
 # ==========================================
 # CÁC HÀM TÍNH TOÁN CHỈ BÁO KỸ THUẬT
@@ -349,7 +350,8 @@ def run_ai_quant_system(
     enable_asymmetric_atr_exit=ENABLE_ASYMMETRIC_ATR_EXIT,
     enable_ma20_slope_filter=ENABLE_MA20_SLOPE_FILTER,
     enable_anti_chase_filter=ENABLE_ANTI_CHASE_FILTER,
-    hard_stoploss=HARD_STOPLOSS
+    hard_stoploss_floor=HARD_STOPLOSS_FLOOR,
+    atr_stoploss_multiplier=ATR_STOPLOSS_MULTIPLIER
 ):
     if backtest_start_date is None:
         backtest_start_date = BACKTEST_START_DATE
@@ -386,8 +388,23 @@ def run_ai_quant_system(
     PROFIT_PROTECTION_DROP = 0.08      # Rớt 8% từ đỉnh thì chốt toàn bộ vị thế
     PROFIT_PROTECTION_FLOOR = 0.02     # Sàn bảo vệ vốn/lãi tối thiểu +2%
     MA20_PROFIT_EXIT = 0.10            # Thủng MA20 chốt lãi khi đã có đệm > 10%
-    HARD_STOPLOSS = hard_stoploss      # Cắt lỗ cứng độc lập (Chặn đứng mọi khoản lỗ đuôi trái)
+    HARD_STOPLOSS_FLOOR = hard_stoploss_floor    # Biên dưới tuyệt đối cắt lỗ động (mã biến động mạnh tối đa -8.5%)
+    ATR_STOPLOSS_MULT = atr_stoploss_multiplier  # Hệ số ATR cho cắt lỗ động
     PORTFOLIO_MDD_LIMIT = -0.18        # Portfolio Stop: Tổng NAV giảm 18% từ đỉnh chu kỳ -> bán hết
+    
+    def calc_dynamic_stoploss(ticker, d):
+        """
+        Cắt lỗ động theo ATR từng mã: max(FLOOR, -ATR_MULT * ATR_pct)
+        - Mã biến động mạnh (ATR_pct cao): biên thở tới HARD_STOPLOSS_FLOOR (-8.5%)
+        - Mã hiền lành (ATR_pct thấp): tự siết chặt quanh -5% đến -6%
+        - Fallback -6.5% nếu thiếu dữ liệu ATR
+        """
+        atr_val = stocks_atr.at[d, ticker] if (stocks_atr is not None and ticker in stocks_atr.columns and d in stocks_atr.index and pd.notna(stocks_atr.at[d, ticker])) else np.nan
+        ref_p = stocks_close.at[d, ticker] if (ticker in stocks_close.columns and pd.notna(stocks_close.at[d, ticker]) and stocks_close.at[d, ticker] > 0) else np.nan
+        if pd.notna(atr_val) and pd.notna(ref_p) and ref_p > 0:
+            atr_pct = atr_val / ref_p
+            return max(HARD_STOPLOSS_FLOOR, -ATR_STOPLOSS_MULT * atr_pct)
+        return -0.065  # Fallback bảo thủ khi thiếu ATR
     
     INITIAL_CAPITAL = initial_capital  # Vốn khởi điểm (mặc định 100 triệu VNĐ)
     cash = INITIAL_CAPITAL
@@ -672,14 +689,15 @@ def run_ai_quant_system(
         for c in held:
             held[c]['hold_days'] += 1
 
-        # KIỂM TRA HARD STOP-LOSS THEO GIÁ LOW TRONG PHIÊN (SAU KHI ĐỦ T+2.5):
-        # Chạm ngưỡng dừng lỗ theo Low <= buy_price * (1 + HARD_STOPLOSS)
-        # Khớp tại min(Open, buy_price * (1 + HARD_STOPLOSS)) để chặn đứng các cú trượt lỗ sâu vượt -8%
+        # KIỂM TRA HARD STOP-LOSS ĐỘNG THEO ATR TRONG PHIÊN (SAU KHI ĐỦ T+2.5):
+        # Ngưỡng cắt lỗ = max(-8.5%, -2.2 * ATR_pct) — mã hiền tự siết chặt, mã mạnh có biên thở rộng
+        # Khớp tại min(Open, stop_price) để chặn đứng các cú trượt lỗ sâu
         intraday_stopped = []
         for c in list(held.keys()):
             if held[c]['hold_days'] >= MIN_HOLD_DAYS:
                 buy_p = held[c]['buy_price']
-                stop_threshold_price = buy_p * (1.0 + HARD_STOPLOSS)
+                dynamic_sl = calc_dynamic_stoploss(c, date)
+                stop_threshold_price = buy_p * (1.0 + dynamic_sl)
                 curr_l = stocks_low.at[date, f'{c}_L'] if f'{c}_L' in stocks_low.columns else (stocks_close.at[date, c] if c in stocks_close.columns else np.nan)
                 
                 if pd.notna(curr_l) and curr_l <= stop_threshold_price:
@@ -698,10 +716,14 @@ def run_ai_quant_system(
                         else:
                             # Trắng bên mua cả ngày: Hoãn khớp sang phiên sau nếu chưa hoãn
                             held[c]['floor_lock_count'] = held[c].get('floor_lock_count', 0) + 1
-                            if held[c]['floor_lock_count'] < 2:
+                            if held[c]['floor_lock_count'] < 3:
                                 continue  # Hoãn khớp sang phiên kế tiếp có thanh khoản
                             else:
-                                exec_price = floor_price * 0.98  # Sau 2 phiên kịch sàn: Phạt trượt giá 2% thanh lý cưỡng bức
+                                # STRESS HAIRCUT (Khoản phạt rủi ro mô phỏng, KHÔNG phải mức khớp lệnh thực tế):
+                                # Sau 3 phiên kịch sàn liên tiếp không có thanh khoản, giả lập giá thoát
+                                # bằng giá sàn phiên cuối cùng. Đây là worst-case liquidation assumption
+                                # vì trên thực tế ATO phiên thứ 4 thường có lệnh hấp thụ tại sàn hoặc gần sàn.
+                                exec_price = floor_price
                     else:
                         exec_price = min(open_p, stop_threshold_price) if (pd.notna(open_p) and open_p > 0) else stop_threshold_price
                     
@@ -735,7 +757,7 @@ def run_ai_quant_system(
                         'Total_PnL_VND': int(round(total_pos_pnl_vnd)),
                         'Profit(%)': round(float(pos_profit_pct), 2),
                         'Hold_Days': int(hold_days),
-                        'Reason': f'Cắt lỗ cứng {HARD_STOPLOSS*100:.1f}% (Low trong phiên chạm ngưỡng)'
+                        'Reason': f'Cắt lỗ động ATR {dynamic_sl*100:.1f}% (Low trong phiên chạm ngưỡng)'
                     })
                     
                     del held[c]
@@ -748,7 +770,7 @@ def run_ai_quant_system(
                     trade_log.append({
                         'Date': date_str,
                         'Trade_ID': trade_id,
-                        'Action': f"SELL_FULL (Cắt lỗ cứng {HARD_STOPLOSS*100:.1f}% trong phiên)",
+                        'Action': f"SELL_FULL (Cắt lỗ động ATR {dynamic_sl*100:.1f}% trong phiên)",
                         'Ticker': c,
                         'Price': round(float(exec_price), 2),
                         'Shares': int(sell_qty),
