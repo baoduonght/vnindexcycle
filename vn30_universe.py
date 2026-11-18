@@ -342,11 +342,24 @@ VN30_TIMELINE = [
     ),
 
     # -------------------------------------------------------------
-    # 20. KỲ 2/2025 (Hiệu lực: 04/08/2025 đến nay)
+    # 20. KỲ 2/2025 (Hiệu lực: 04/08/2025 đến 01/02/2026)
     # HOSE thêm DGC (Hóa chất Đức Giang); loại BVH (Bảo Việt - không đủ thanh khoản)
     # -------------------------------------------------------------
     (
-        "2025-08-04", "2099-12-31",   # end date mở - sẽ bị override nếu fetch thành công
+        "2025-08-04", "2026-02-01",
+        [
+            "ACB", "BCM", "BID", "CTG", "DGC", "FPT", "GAS", "GVR", "HDB", "HPG",
+            "LPB", "MBB", "MSN", "MWG", "PLX", "SAB", "SHB", "SSB", "SSI", "STB",
+            "TCB", "TPB", "VCB", "VHM", "VIB", "VIC", "VJC", "VNM", "VPB", "VRE"
+        ]
+    ),
+
+    # -------------------------------------------------------------
+    # 21. KỲ 1/2026 (Hiệu lực: 02/02/2026 đến 02/08/2026)
+    # Rổ VN30 bán niên đầu 2026 (duy trì danh mục chuẩn từ HOSE)
+    # -------------------------------------------------------------
+    (
+        "2026-02-02", "2026-08-02",
         [
             "ACB", "BCM", "BID", "CTG", "DGC", "FPT", "GAS", "GVR", "HDB", "HPG",
             "LPB", "MBB", "MSN", "MWG", "PLX", "SAB", "SHB", "SSB", "SSI", "STB",
