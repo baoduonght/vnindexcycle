@@ -725,7 +725,18 @@ def run_ai_quant_system(
                                 # vì trên thực tế ATO phiên thứ 4 thường có lệnh hấp thụ tại sàn hoặc gần sàn.
                                 exec_price = floor_price
                     else:
-                        exec_price = min(open_p, stop_threshold_price) if (pd.notna(open_p) and open_p > 0) else stop_threshold_price
+                        # RÀNG BUỘC CHU KỲ T+2.5 (CHIỀU T+2 MỚI CÓ CỔ PHIẾU TRONG TÀI KHOẢN):
+                        if held[c]['hold_days'] == MIN_HOLD_DAYS:
+                            # Sáng T+2 hàng chưa về -> Tuyệt đối không thể khớp tại Open sáng T+2!
+                            # Khớp trong phiên chiều theo giá chạm ngưỡng hoặc giá Close nếu rơi sâu hơn:
+                            curr_c = stocks_close.at[date, c] if c in stocks_close.columns else stop_threshold_price
+                            exec_price = min(curr_c, stop_threshold_price) if (pd.notna(curr_c) and curr_c > 0) else stop_threshold_price
+                        else:
+                            # Từ T+3 trở đi: Hàng đã có sẵn từ 09:00, nếu gap-down sáng thì khớp tại min(Open, stop_price)
+                            exec_price = min(open_p, stop_threshold_price) if (pd.notna(open_p) and open_p > 0) else stop_threshold_price
+                    
+                    # Chặn sàn tuyệt đối theo quy định biên độ HOSE: không bao giờ khớp dưới giá sàn phiên hôm đó
+                    exec_price = max(exec_price, floor_price)
                     
                     sell_qty = int(held[c]['qty'])
                     sell_price_vnd = exec_price * 1000.0
