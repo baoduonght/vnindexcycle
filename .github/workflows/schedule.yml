@@ -1,41 +1,87 @@
-name: Daily Macro Tracker
+name: HỆ THỐNG QUANT VN30
 
 on:
   schedule:
-    # 🎯 Chạy lúc 07:30 SÁNG hàng ngày từ Thứ 2 đến Thứ 6 (Giờ VN: UTC+7 -> Giờ UTC là 00:30)
-    # Lúc này: Sàn Mỹ vừa chốt số đêm qua (05:00 sáng) + Sàn VN đã có đủ dữ liệu ngày hôm trước
-    - cron: '30 0 * * 1-5'
+    # 🎯 NHÁNH THỰC CHIẾN: Chạy quant_bot.py vào 15:30 chiều Thứ 2 đến Thứ 6
+    # Giờ VN (UTC+7) là 15:30 -> Giờ UTC là 08:30
+    - cron: '30 8 * * 1-5'
     
-  workflow_dispatch: 
+    # 🧠 NHÁNH HỌC TẬP: Chạy train_bot.py vào 09:00 sáng Thứ 7
+    # Giờ VN (UTC+7) là 09:00 -> Giờ UTC là 02:00
+    - cron: '0 2 * * 6'
+    
+  # Cho phép bác bấm nút "Run workflow" bằng tay trên Github để test thử bot Telegram
+  workflow_dispatch:
+
+permissions:
+  # Cấp quyền tối cao để Bot tự động lưu file não bộ (.json) và lịch sử giao dịch (.csv) lên Github
+  contents: write 
 
 jobs:
-  run-daily-macro:
+  quant-trading-bot:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write 
-
     steps:
-      - name: 📥 Lấy mã nguồn từ Repository
+      - name: 📥 Lấy mã nguồn và Dữ liệu từ Repository
         uses: actions/checkout@v4
 
-      - name: 🐍 Cài đặt Python 3.11
+      - name: 🐍 Cài đặt môi trường Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: ⚙️ Cài đặt các thư viện
+      - name: ⚙️ Cài đặt thư viện tài chính & AI
         run: |
           python -m pip install --upgrade pip
-          pip install pandas yfinance requests beautifulsoup4 pandas-datareader
+          pip install pandas numpy yfinance requests xgboost scikit-learn plotly python-dotenv pandas-datareader
+          pip install --extra-index-url https://vnstocks.com/api/packages "vnstock-oapi>=0.1.0,<1" || echo "Không cài được vnstock-oapi, dùng fallback direct API"
           pip install git+https://github.com/rongardF/tvdatafeed.git
 
-      - name: 🌍 Chạy Bot cào dữ liệu vĩ mô hàng ngày
+      # ==========================================
+      # NHÁNH 1: LUYỆN ĐAN & LƯU BỘ NHỚ (CHỈ CHẠY THỨ 7 HOẶC BẤM TEST TAY)
+      # ==========================================
+      - name: 📡 Cập nhật Cơ sở Dữ liệu Vĩ mô (macro_database.py)
+        if: github.event.schedule == '0 2 * * 6' || github.event_name == 'workflow_dispatch'
+        env:
+          DNSE_API_KEY: ${{ secrets.DNSE_API_KEY }}
+          DNSE_API_SECRET: ${{ secrets.DNSE_API_SECRET }}
+          VNSTOCK_OAPI_SESSION_BACKEND: file
         run: python macro_database.py
 
-      - name: 💾 Lưu và cập nhật file CSV lên GitHub cho Power BI
+      - name: 🧠 Mở Lò Luyện Đan (train_bot.py)
+        if: github.event.schedule == '0 2 * * 6' || github.event_name == 'workflow_dispatch'
+        env:
+          DNSE_API_KEY: ${{ secrets.DNSE_API_KEY }}
+          DNSE_API_SECRET: ${{ secrets.DNSE_API_SECRET }}
+          VNSTOCK_OAPI_SESSION_BACKEND: file
+        run: python train_bot.py
+
+      - name: 💾 Lưu Não Bộ Mới & Dữ liệu Vĩ mô Lên Github
+        if: github.event.schedule == '0 2 * * 6' || github.event_name == 'workflow_dispatch'
         run: |
-          git config --global user.name "Macro AutoBot"
-          git config --global user.email "bot@macro.com"
-          git add markets_database10years.csv markets_database_now.csv vn_markets_database10years.csv global_markets_database10years.csv
-          git commit -m "📊 [Daily-Macro] Cập nhật số liệu Vĩ mô sáng sớm [skip ci]" || echo "Không có thay đổi để commit"
+          git config --global user.name "Quant AutoBot"
+          git config --global user.email "bot@quant.com"
+          git add xgboost_*.json markets_database*.csv vn_markets_database*.csv global_markets_database*.csv
+          git commit -m "🤖 [Auto-Update] Đã đúc xong não bộ AI Walk-Forward & Cập nhật Vĩ mô tuần mới" || echo "Không có sự thay đổi để commit"
+          git push
+
+      # ==========================================
+      # NHÁNH 2: NGẮM BẮN & BÁO CÁO (CHẠY T2-T6 HOẶC BẤM TEST TAY)
+      # ==========================================
+      - name: 🎯 Bắn tín hiệu Telegram (quant_bot.py)
+        if: github.event.schedule == '30 8 * * 1-5' || github.event_name == 'workflow_dispatch'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DNSE_API_KEY: ${{ secrets.DNSE_API_KEY }}
+          DNSE_API_SECRET: ${{ secrets.DNSE_API_SECRET }}
+          VNSTOCK_OAPI_SESSION_BACKEND: file
+        run: python quant_bot.py
+
+      - name: 📊 Cập nhật Sổ Kế Toán trading_log.csv, daily_nav.csv & completed_trades.csv lên Github (cho Power BI)
+        if: github.event.schedule == '30 8 * * 1-5' || github.event_name == 'workflow_dispatch'
+        run: |
+          git config --global user.name "Quant AutoBot"
+          git config --global user.email "bot@quant.com"
+          git add trading_log.csv daily_nav.csv completed_trades.csv
+          git commit -m "📊 [Auto-Update] Cập nhật sổ kế toán giao dịch & chu kỳ vị thế cho Power BI" || echo "Không có giao dịch mới để commit"
           git push
