@@ -15,7 +15,14 @@ import sys
 import os
 import datetime
 
-from vn30_universe import ALL_HISTORICAL_VN30_TICKERS
+# Nạp biến môi trường từ file .env nếu có (dành cho chạy cục bộ)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+from vn30_universe import ALL_HISTORICAL_VN30_TICKERS, get_vn30_constituents
 
 warnings.filterwarnings('ignore')
 logging.getLogger("tvDatafeed").setLevel(logging.CRITICAL)
@@ -180,6 +187,8 @@ def fetch_ticker_data(symbol, n_bars=4000):
                 c_df = csv_df[['Date', 'VNINDEX', 'VN_VOLUME']].dropna(subset=['VNINDEX']).copy()
                 c_df['Date'] = pd.to_datetime(c_df['Date']).dt.tz_localize(None).dt.normalize()
                 c_df.rename(columns={'VNINDEX': 'Close', 'VN_VOLUME': 'Volume'}, inplace=True)
+                # BẮT BUỘC: Sắp xếp Date tăng dần trước mọi phép tính thời gian (tránh nhìn trước tương lai khi file gốc xếp giảm dần)
+                c_df = c_df.drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
                 
                 # Tái tạo biên độ dao động nến dựa trên độ biến động lịch sử để không làm phẳng nến
                 daily_vol = c_df['Close'].pct_change().abs().rolling(20, min_periods=5).mean().fillna(0.012)
@@ -255,13 +264,24 @@ def main():
                 stocks_vol_ma20[f'{c}_V'] = s_v.rolling(20).mean().shift(1)
 
     # =====================================================================
-    # TÍNH ĐỘ RỘNG THỊ TRƯỜNG POINT-IN-TIME (TỶ LỆ MÃ VN30 TRÊN MA50)
+    # TÍNH ĐỘ RỘNG THỊ TRƯỜNG POINT-IN-TIME (TỶ LỆ MÃ VN30 THỰC TẾ TRÊN MA50)
+    # Tuyệt đối chỉ tính trên 30 mã đang thuộc rổ VN30 tại mỗi ngày giao dịch
     # =====================================================================
-    above_ma50_cnt = (stocks_close > stocks_ma50).sum(axis=1)
-    valid_ma50_cnt = (stocks_close.notna() & stocks_ma50.notna()).sum(axis=1)
-    market_breadth_series = (above_ma50_cnt / valid_ma50_cnt.replace(0, np.nan)).fillna(0.5)
-
-    breadth_map = dict(zip(pd.to_datetime(market_breadth_series.index).strftime('%Y-%m-%d'), market_breadth_series.values))
+    breadth_map = {}
+    for dt in stocks_close.index:
+        d_str = dt.strftime('%Y-%m-%d')
+        active_vn30 = get_vn30_constituents(d_str, use_live=False)
+        above_cnt = 0
+        valid_cnt = 0
+        for ticker in active_vn30:
+            if ticker in stocks_close.columns and ticker in stocks_ma50.columns:
+                c_val = stocks_close.at[dt, ticker]
+                m_val = stocks_ma50.at[dt, ticker]
+                if pd.notna(c_val) and pd.notna(m_val) and c_val > 0 and m_val > 0:
+                    valid_cnt += 1
+                    if c_val > m_val:
+                        above_cnt += 1
+        breadth_map[d_str] = (above_cnt / valid_cnt) if valid_cnt > 0 else 0.5
 
     # ==========================================
     # 3. CHUẨN BỊ TẬP DỮ LIỆU ĐỂ AI HỌC (TRAIN DATA)
@@ -274,6 +294,18 @@ def main():
         macro_df = macro_df.drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
     except Exception as e:
         sys.exit(f"🛑 LỖI ĐỌC FILE VĨ MÔ: {e}")
+
+    # LÀM SẠCH TỶ GIÁ USD/VND (Xử lý đơn vị nghìn 21.055, 21.0 và dị biệt 3210, 3211)
+    macro_df['USD_VND'] = pd.to_numeric(macro_df['USD_VND'], errors='coerce')
+    macro_df['USD_VND'] = macro_df['USD_VND'].apply(lambda x: x * 1000.0 if (pd.notna(x) and 10.0 <= x <= 40.0) else x)
+    macro_df['USD_VND'] = macro_df['USD_VND'].apply(lambda x: np.nan if (pd.notna(x) and (x < 15000.0 or x > 35000.0)) else x)
+    macro_df['USD_VND'] = macro_df['USD_VND'].interpolate(method='linear').ffill().bfill()
+
+    # ĐỒNG BỘ THỜI ĐIỂM CÔNG BỐ (PUBLICATION LAG):
+    # Thị trường VN đóng cửa lúc 15:00 (phát tín hiệu 15:30). Dữ liệu đóng cửa Mỹ (DXY, US10Y)
+    # kết thúc sau đó (rạng sáng hôm sau giờ VN). Bắt buộc shift(1) để chống nhìn trước tương lai!
+    macro_df['DXY'] = pd.to_numeric(macro_df['DXY'], errors='coerce').shift(1)
+    macro_df['US10Y'] = pd.to_numeric(macro_df['US10Y'], errors='coerce').shift(1)
 
     market_context = vnindex_df[['Date', 'VN_MFI', 'VNINDEX', 'MA200', 'VN_ATR_PCT']].copy()
     market_context['VN_Dist_MA200'] = market_context['VNINDEX'] / market_context['MA200']
@@ -288,7 +320,7 @@ def main():
     for col in macro_cols:
         macro_df[col] = pd.to_numeric(macro_df[col], errors='coerce')
         roll_m = macro_df[col].rolling(120, min_periods=5).mean()
-        roll_s = macro_df[col].rolling(120, min_periods=5).std()
+        roll_s = macro_df[col].rolling(120, min_periods=5).std().replace(0, np.nan)
         macro_df[f'Z_{col}'] = (macro_df[col] - roll_m) / roll_s
     z_cols = [f'Z_{c}' for c in macro_cols]
 
