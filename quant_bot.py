@@ -375,7 +375,7 @@ def run_ai_quant_system(
     MIN_HOLD_DAYS = 3                  # Chu kỳ T+2.5 (mua Open ngày t, bán sớm nhất Open ngày t+3)
     
     AI_THRESHOLD = 0.60                # Ngưỡng AI Score chọn lọc cao cấp (Lọc bỏ bẫy Breakout phân khúc 0.55-0.59)
-    VOL_BREAKOUT_RATIO = 1.3           # Volume đột biến >= 1.3x MA20 (Lọc bỏ các cú breakout yếu)
+    VOL_BREAKOUT_RATIO = 1.2           # Volume đột biến >= 1.2x MA20 (Nhạy bén bắt trúng chân sóng lớn)
     ADX_MIN = 18                       # Bắt xu hướng thị trường ADX > 18
     MAX_BUYS_PER_DAY = 2               # Tối đa 2 lệnh mua / ngày (Giải ngân phân lớp)
     TRAILING_STOP_TRIGGER = 0.15       # Trailing stop tiêu chuẩn khi lãi đỉnh >= 15%
@@ -567,10 +567,10 @@ def run_ai_quant_system(
                 if c in held:
                     continue
                 
-                # Kiểm tra trần ngành (Riêng Bank tối đa 1 mã) và hệ sinh thái thực tế tại thời điểm khớp
+                # Kiểm tra trần ngành và hệ sinh thái thực tế tại thời điểm khớp (kèm cơ chế Split-Size)
                 cand_sec = SECTOR_MAP.get(c, 'OTHER')
                 cand_eco = ECOSYSTEM_MAP.get(c, c)
-                sec_cap_limit = 1 if cand_sec == 'BANK' else MAX_PER_SECTOR
+                sec_cap_limit = MAX_PER_SECTOR
                 eco_cap_limit = MAX_PER_ECOSYSTEM
                 current_sec_count = sum(1 for h in held if SECTOR_MAP.get(h, 'OTHER') == cand_sec)
                 current_eco_count = sum(1 for h in held if ECOSYSTEM_MAP.get(h, h) == cand_eco)
@@ -663,10 +663,86 @@ def run_ai_quant_system(
             pending_buys = []
 
         # -------------------------------------------------------------
-        # 3. TRONG PHIÊN & CUỐI PHIÊN: CẬP NHẬT TRẠNG THÁI VỊ THẾ
+        # 3. TRONG PHIÊN & CUỐI PHIÊN: CẬP NHẬT TRẠNG THÁI VỊ THẾ & HARD STOP INTRADAY
         # -------------------------------------------------------------
         for c in held:
             held[c]['hold_days'] += 1
+
+        # KIỂM TRA HARD STOP-LOSS THEO GIÁ LOW TRONG PHIÊN (SAU KHI ĐỦ T+2.5):
+        # Chạm ngưỡng dừng lỗ theo Low <= buy_price * (1 + HARD_STOPLOSS)
+        # Khớp tại min(Open, buy_price * (1 + HARD_STOPLOSS)) để chặn đứng các cú trượt lỗ sâu vượt -8%
+        intraday_stopped = []
+        for c in list(held.keys()):
+            if held[c]['hold_days'] >= MIN_HOLD_DAYS:
+                buy_p = held[c]['buy_price']
+                stop_threshold_price = buy_p * (1.0 + HARD_STOPLOSS)
+                curr_l = stocks_low.at[date, f'{c}_L'] if f'{c}_L' in stocks_low.columns else (stocks_close.at[date, c] if c in stocks_close.columns else np.nan)
+                
+                if pd.notna(curr_l) and curr_l <= stop_threshold_price:
+                    open_p = stocks_open.at[date, c] if (c in stocks_open.columns and pd.notna(stocks_open.at[date, c]) and stocks_open.at[date, c] > 0) else curr_l
+                    exec_price = min(open_p, stop_threshold_price) if (pd.notna(open_p) and open_p > 0) else stop_threshold_price
+                    
+                    sell_qty = int(held[c]['qty'])
+                    sell_price_vnd = exec_price * 1000.0
+                    buy_price_vnd = buy_p * 1000.0
+                    
+                    gross_val = sell_qty * sell_price_vnd
+                    net_val = gross_val * (1.0 - SELL_FRICTION)
+                    buy_cost = sell_qty * buy_price_vnd * (1.0 + BUY_FRICTION)
+                    pnl_vnd = net_val - buy_cost
+                    pnl_pct = ((sell_price_vnd * (1.0 - SELL_FRICTION)) / (buy_price_vnd * (1.0 + BUY_FRICTION)) - 1.0) * 100.0
+                    hold_days = held[c]['hold_days']
+                    trade_id = held[c].get('trade_id', 'T000')
+                    
+                    cash += net_val
+                    
+                    total_pos_pnl_vnd = held[c].get('accumulated_pnl', 0.0) + pnl_vnd
+                    init_shares = held[c].get('initial_qty', sell_qty)
+                    buy_cost_total = init_shares * (held[c]['buy_price'] * 1000.0) * (1.0 + BUY_FRICTION)
+                    pos_profit_pct = (total_pos_pnl_vnd / buy_cost_total) * 100.0 if buy_cost_total > 0 else 0.0
+                    
+                    completed_trades.append({
+                        'Trade_ID': trade_id,
+                        'Ticker': c,
+                        'Buy_Date': held[c]['buy_date'],
+                        'Exit_Date': date_str,
+                        'Buy_Price': held[c]['buy_price'],
+                        'Exit_Price': round(float(exec_price), 2),
+                        'Initial_Qty': int(init_shares),
+                        'Total_PnL_VND': int(round(total_pos_pnl_vnd)),
+                        'Profit(%)': round(float(pos_profit_pct), 2),
+                        'Hold_Days': int(hold_days),
+                        'Reason': f'Cắt lỗ cứng {HARD_STOPLOSS*100:.1f}% (Low trong phiên chạm ngưỡng)'
+                    })
+                    
+                    del held[c]
+                    intraday_stopped.append(c)
+                    
+                    rem_stock_val = get_stock_valuation_at_open(date, i)
+                    trade_nav = cash + rem_stock_val
+                    cum_ret_pct = ((trade_nav / INITIAL_CAPITAL) - 1.0) * 100.0
+                    
+                    trade_log.append({
+                        'Date': date_str,
+                        'Trade_ID': trade_id,
+                        'Action': f'SELL (Cắt lỗ cứng {HARD_STOPLOSS*100:.1f}%)',
+                        'Ticker': c,
+                        'Price': round(float(exec_price), 2),
+                        'Shares': int(sell_qty),
+                        'Rem_Shares': 0,
+                        'Trade_Value': int(round(net_val)),
+                        'PnL_VND': int(round(pnl_vnd)),
+                        'Profit(%)': round(float(pnl_pct), 2),
+                        'Hold_Days': int(hold_days),
+                        'Total_NAV': int(round(trade_nav)),
+                        'Portfolio_Return(%)': round(float(cum_ret_pct), 2),
+                        'AI_Score': None
+                    })
+
+        if intraday_stopped:
+            pending_sells = [(tick, r) for tick, r in pending_sells if tick not in intraday_stopped]
+
+        for c in held:
             curr_p = stocks_close.at[date, c] if c in stocks_close.columns else np.nan
             curr_h = stocks_high.at[date, f'{c}_H'] if f'{c}_H' in stocks_high.columns else curr_p
             if pd.notna(curr_h) and curr_h > 0:
@@ -963,10 +1039,10 @@ def run_ai_quant_system(
         else:
             current_ai_threshold = AI_THRESHOLD
 
-        # GIẢI PHÁP 4: BỘ LỌC ĐỘ DỐC MA20 CỦA INDEX & NGƯỠNG VOLUME BREAKOUT 1.3x
+        # GIẢI PHÁP 4: BỘ LỌC ĐỘ DỐC MA20 CỦA INDEX & NGƯỠNG VOLUME BREAKOUT 1.2x
         prev5_ma20 = backtest['MA20'].iloc[i-5] if i >= 5 else backtest['MA20'].iloc[0]
         is_ma20_slope_rising = (market_ma20 > prev5_ma20) if (pd.notna(market_ma20) and pd.notna(prev5_ma20)) else True
-        vol_breakout_target = 1.3 if enable_ma20_slope_filter else VOL_BREAKOUT_RATIO
+        vol_breakout_target = 1.2 if enable_ma20_slope_filter else VOL_BREAKOUT_RATIO
 
         is_full_trend_ok = (
             is_macro_buffer_ok
@@ -996,7 +1072,7 @@ def run_ai_quant_system(
             buy_candidates = []
             vn_ret20 = (idx - backtest['VNINDEX'].iloc[i-20]) / backtest['VNINDEX'].iloc[i-20] if i >= 20 else 0.0
             prev5_date = backtest['Date'].iloc[i-5] if i >= 5 else backtest['Date'].iloc[0]
-            vol_target = max(1.30, vol_breakout_target)
+            vol_target = vol_breakout_target
 
             for c in active_vn30:
                 if c not in held and c in loaded_tickers and c in stocks_close.columns:
@@ -1030,22 +1106,8 @@ def run_ai_quant_system(
                         if is_chasing:
                             continue
 
-                    # BỘ LỌC CHẤT LƯỢNG CỔ PHIẾU KHI BREAKOUT:
-                    # 1. Đường MA20 của cổ phiếu dốc lên (đảm bảo cấu trúc giá xu hướng tăng ngắn hạn)
-                    curr_ma20 = stocks_ma20.at[date, c] if c in stocks_ma20.columns else np.nan
-                    prev5_ma20_c = stocks_ma20.at[prev5_date, c] if c in stocks_ma20.columns else np.nan
-                    is_stock_ma20_rising = (curr_ma20 > prev5_ma20_c) if (pd.notna(curr_ma20) and pd.notna(prev5_ma20_c)) else True
-
-                    # 2. Sức mạnh giá tương đối (Relative Strength): không yếu hơn VN-Index quá 2%
-                    ret_20 = stocks_ret20.at[date, c] if (stocks_ret20 is not None and c in stocks_ret20.columns and pd.notna(stocks_ret20.at[date, c])) else 0.0
-                    is_outperforming_vnindex = (ret_20 >= vn_ret20 - 0.02)
-
-                    # Tín hiệu Momentum Breakout chuẩn mực (Đầy đủ tiêu chuẩn Trend, Volume bứt phá >= 1.3x, AI Score & RS)
-                    if (curr_price > prev_h20 
-                        and v_ratio >= vol_target 
-                        and score >= current_ai_threshold 
-                        and is_stock_ma20_rising 
-                        and is_outperforming_vnindex):
+                    # Tín hiệu Momentum Breakout chuẩn mực (Volume bứt phá >= 1.2x, AI Score vượt ngưỡng)
+                    if curr_price > prev_h20 and v_ratio >= vol_target and score >= current_ai_threshold:
                         breakout_pct = ((curr_price / prev_h20) - 1.0) if (pd.notna(prev_h20) and prev_h20 > 0) else 0.0
 
                         buy_candidates.append({
@@ -1084,7 +1146,7 @@ def run_ai_quant_system(
                     eco_in_held = sum(1 for h in held if ECOSYSTEM_MAP.get(h, h) == eco and h not in [s[0] for s in pending_sells])
                     eco_in_selected = sum(1 for b in selected_buys if b.get('ecosystem') == eco)
                     
-                    sec_cap_limit = 1 if sec == 'BANK' else MAX_PER_SECTOR
+                    sec_cap_limit = MAX_PER_SECTOR
                     if (sec_in_held + sec_in_selected) < sec_cap_limit and (eco_in_held + eco_in_selected) < MAX_PER_ECOSYSTEM:
                         # CƠ CHẾ HOÁN ĐỔI CHO LEADER: Nếu mã mới có AI Score vượt trội mã đang nắm giữ cùng nhóm (ngưỡng tối thiểu +0.03)
                         LEADER_MIN_AI_MARGIN = 0.03
@@ -1426,11 +1488,11 @@ def main():
     print(f"   • Solution 1: Time-Decayed Retrain Model: BẬT")
     print(f"   • Solution 2: Rolling Percentile Dynamic AI (Top 20% / 120 bars): {'BẬT' if ENABLE_DYNAMIC_PERCENTILE_AI else 'TẮT (Cố định 0.60)'}")
     print(f"   • Solution 3: Asymmetric Exit Rules (2 nến MA20 + 2.5x ATR Trailing): {'BẬT' if ENABLE_ASYMMETRIC_ATR_EXIT else 'TẮT'}")
-    print(f"   • Solution 4: Index MA20 Slope & 1.3x Breakout Volume: {'BẬT' if ENABLE_MA20_SLOPE_FILTER else 'TẮT'}")
-    print(f"   • Solution 5: Split-Size & Leader Rebalance (Tối đa {MAX_PER_SECTOR} mã/ngành [Bank: 1], {MAX_PER_ECOSYSTEM} mã/HST | Hoán đổi 20% NAV cho Leader)")
+    print(f"   • Solution 4: Index MA20 Slope & 1.2x Breakout Volume: {'BẬT' if ENABLE_MA20_SLOPE_FILTER else 'TẮT'}")
+    print(f"   • Solution 5: Split-Size & Leader Rebalance (Tối đa {MAX_PER_SECTOR} mã/ngành, {MAX_PER_ECOSYSTEM} mã/HST | Hoán đổi 20% NAV cho Leader)")
     print(f"   • Solution 6: Sắp xếp ưu tiên lệnh mua: Động lượng (AI Score -> Breakout% -> Ret20)")
     print(f"   • Solution 7: Anti-Chase Filter (Chặn mua đuổi > MA50*1.20 hoặc RSI>82): {'BẬT' if ENABLE_ANTI_CHASE_FILTER else 'TẮT'}")
-    print(f"   • Solution 8: Macro Synchronization & Hard Stop-Loss (Index > MA100 & MA50 dốc lên | Hard Stop: {HARD_STOPLOSS*100:.1f}%): BẬT")
+    print(f"   • Solution 8: Macro Synchronization & Intraday Hard Stop-Loss (Index > MA100 & MA50 dốc lên | Hard Stop Low: {HARD_STOPLOSS*100:.1f}%): BẬT")
     print("="*70 + "\n")
 
     # ==========================================
