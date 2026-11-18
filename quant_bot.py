@@ -1070,8 +1070,6 @@ def run_ai_quant_system(
 
         if available_slots > 0 and can_enter_new_trades:
             buy_candidates = []
-            vn_ret20 = (idx - backtest['VNINDEX'].iloc[i-20]) / backtest['VNINDEX'].iloc[i-20] if i >= 20 else 0.0
-            prev5_date = backtest['Date'].iloc[i-5] if i >= 5 else backtest['Date'].iloc[0]
             vol_target = vol_breakout_target
 
             for c in active_vn30:
@@ -1109,6 +1107,7 @@ def run_ai_quant_system(
                     # Tín hiệu Momentum Breakout chuẩn mực (Volume bứt phá >= 1.2x, AI Score vượt ngưỡng)
                     if curr_price > prev_h20 and v_ratio >= vol_target and score >= current_ai_threshold:
                         breakout_pct = ((curr_price / prev_h20) - 1.0) if (pd.notna(prev_h20) and prev_h20 > 0) else 0.0
+                        ret_20 = stocks_ret20.at[date, c] if (stocks_ret20 is not None and c in stocks_ret20.columns and pd.notna(stocks_ret20.at[date, c])) else 0.0
 
                         buy_candidates.append({
                             'ticker': c,
