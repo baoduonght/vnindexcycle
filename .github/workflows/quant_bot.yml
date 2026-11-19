@@ -53,7 +53,7 @@ jobs:
           DNSE_API_KEY: ${{ secrets.DNSE_API_KEY }}
           DNSE_API_SECRET: ${{ secrets.DNSE_API_SECRET }}
           VNSTOCK_OAPI_SESSION_BACKEND: file
-        run: python train_bot.py
+        run:  ENTRY_MODE=balanced python train_bot.py
 
       - name: 💾 Lưu Não Bộ Mới & Dữ liệu Vĩ mô Lên Github
         if: github.event.schedule == '0 2 * * 6' || github.event_name == 'workflow_dispatch'
