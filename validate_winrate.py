@@ -16,7 +16,7 @@ import shutil
 import sys
 
 ROOT = Path(__file__).resolve().parent
-MODES = ('baseline', 'quality', 'index_trend', 'balanced')
+MODES = ('baseline', 'balanced', 'profit_guard')
 STRESS_CASES = {
     'higher_slippage': {'additional_slippage': 0.005},
     'exclude_vic_pdr': {'excluded_entries': ['VIC', 'PDR']},
@@ -84,19 +84,35 @@ def summarize(nav_rows, trades, start=None, end=None, initial=100_000_000):
     }
 
 
-def evaluate_candidate(candidate, baseline):
+def nonnegative_finite(value):
+    """Argparse type for a declared minimum gain in percentage points."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError('must be a finite, nonnegative number')
+    if not math.isfinite(number) or number < 0:
+        raise argparse.ArgumentTypeError('must be a finite, nonnegative number')
+    return number
+
+
+def evaluate_candidate(candidate, baseline, min_win_rate_gain_pp=0.0):
     """Apply predeclared historical gates. A pass does not promote the mode."""
+    minimum_gain = nonnegative_finite(min_win_rate_gain_pp)
     c = candidate['full_period']
     b = baseline['full_period']
     both_pf = c['profit_factor'] is not None and b['profit_factor'] is not None
     both_win = c['win_rate_pct'] is not None and b['win_rate_pct'] is not None
+    # Summaries have four decimal places; avoid losing an exact 5 pp gain to
+    # binary floating-point subtraction (for example 30.53 - 25.53).
+    win_rate_gain = round(c['win_rate_pct'] - b['win_rate_pct'], 10) if both_win else None
     years = [y for y, result in candidate['annual'].items()
              if result and result['start'] <= f'{y}-01-10'
              and result['end'] >= f'{y}-12-25' and baseline['annual'].get(y)]
     cash_beating_years = sum(candidate['annual'][y]['excess_over_cash_pp'] > 0 for y in years)
     baseline_years = sum(baseline['annual'][y]['excess_over_cash_pp'] > 0 for y in years)
     checks = {
-        'higher_win_rate': both_win and c['win_rate_pct'] > b['win_rate_pct'],
+        'higher_win_rate': (both_win and win_rate_gain > 0
+                            and win_rate_gain >= minimum_gain),
         'at_least_30_closes_and_75pct_of_baseline':
             c['closed_positions'] >= max(30, math.ceil(0.75 * b['closed_positions'])),
         'profit_factor_at_least_baseline_and_above_one':
@@ -116,18 +132,99 @@ def evaluate_candidate(candidate, baseline):
             and stressed['return_pct'] >= base_stress['return_pct']
         )
     return {'historical_pass': all(checks.values()), 'checks': checks,
+            'min_win_rate_gain_pp': minimum_gain, 'win_rate_gain_pp': win_rate_gain,
             'full_years_evaluated': years, 'cash_beating_years': cash_beating_years,
             'baseline_cash_beating_years': baseline_years}
 
 
-def main(argv=None):
+def assess_modes(summaries, reference_mode='balanced', min_win_rate_gain_pp=5.0):
+    """Compare every other mode with one incumbent on the same snapshot.
+
+    Existing check names retain ``baseline`` for report/test compatibility;
+    their comparator is always the explicitly recorded reference mode.
+    """
+    minimum_gain = nonnegative_finite(min_win_rate_gain_pp)
+    reference = summaries[reference_mode]
+    for mode, result in summaries.items():
+        result['reference_mode'] = reference_mode
+        result['min_win_rate_gain_pp'] = minimum_gain
+        result.pop('assessment', None)
+        if mode != reference_mode:
+            result['assessment'] = evaluate_candidate(result, reference, minimum_gain)
+    return summaries
+
+
+def comparison_summary(summaries, reference_mode, min_win_rate_gain_pp):
+    """A compact, reviewable report for stdout and GitHub's step summary."""
+    def number(value, places=2):
+        return 'n/a' if value is None else f'{value:.{places}f}'
+
+    lines = [
+        f'## Fixed-snapshot comparison against {reference_mode}',
+        f'Minimum win rate gain: {min_win_rate_gain_pp:g} percentage points; '
+        'all existing profit and risk criteria must also pass.',
+        '',
+        '| Mode | Win rate % | Gain pp | Return % | Profit factor | Max drawdown % | Closes | Criteria |',
+        '| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |',
+    ]
+    for mode, result in summaries.items():
+        m = result['full_period']
+        assessment = result.get('assessment')
+        status = ('PASS' if assessment['historical_pass'] else 'FAIL') if assessment else 'REFERENCE'
+        gain = assessment['win_rate_gain_pp'] if assessment else 0.0
+        lines.append(f'| {mode} | {number(m["win_rate_pct"])} | {number(gain)} | '
+                     f'{number(m["return_pct"])} | {number(m["profit_factor"])} | '
+                     f'{number(m["max_drawdown_pct"])} | {m["closed_positions"]} | {status} |')
+    assessed = [(mode, result['assessment']) for mode, result in summaries.items()
+                if 'assessment' in result]
+    if assessed:
+        labels = {
+            'higher_win_rate': 'Win rate gain meets minimum and is positive',
+            'at_least_30_closes_and_75pct_of_baseline': 'At least 30 closes and 75% of reference',
+            'profit_factor_at_least_baseline_and_above_one': 'Profit factor >= reference and > 1',
+            'net_return_at_least_baseline_and_above_cash': 'Net return >= reference and above cash',
+            'drawdown_no_worse_than_baseline': 'Drawdown no worse than reference',
+            'beat_cash_in_at_least_half_the_full_years_and_match_baseline': 'Full-year cash consistency >= reference',
+            'higher_slippage_above_cash_and_at_least_baseline': 'Higher slippage: above cash and >= reference',
+            'exclude_vic_pdr_above_cash_and_at_least_baseline': 'Exclude VIC/PDR: above cash and >= reference',
+        }
+        lines.extend(['', '| Check | ' + ' | '.join(mode for mode, _ in assessed) + ' |',
+                      '| --- | ' + ' | '.join('---' for _ in assessed) + ' |'])
+        for key in assessed[0][1]['checks']:
+            lines.append('| ' + labels.get(key, key) + ' | ' + ' | '.join(
+                'PASS' if assessment['checks'][key] else 'FAIL'
+                for _, assessment in assessed) + ' |')
+        target = next(((mode, assessment) for mode, assessment in assessed
+                       if mode == 'profit_guard'), None)
+        conclusions = [target] if target else assessed
+        for mode, assessment in conclusions:
+            status = 'PASS' if assessment['historical_pass'] else 'FAIL'
+            lines.extend(['', f'Conclusion: {mode} historical criteria {status} against {reference_mode}.'])
+    lines.extend(['', 'Historical comparison only; not a forecast or untouched holdout. '
+                  'No automatic promotion: review the artifacts before choosing a mode manually.'])
+    return '\n'.join(lines) + '\n'
+
+
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--data-dir', type=Path, default=ROOT/'data')
     parser.add_argument('--output', type=Path, default=ROOT/'validation')
     parser.add_argument('--end-date', default='2026-11-19')
     parser.add_argument('--allow-missing', default='', help='Explicit comma-separated unavailable historical symbols')
+    parser.add_argument('--reference-mode', choices=MODES, default='balanced',
+                        help='Incumbent for all profit and risk gates (default: balanced)')
+    parser.add_argument('--min-win-rate-gain-pp', type=nonnegative_finite, default=5.0,
+                        help='Required positive win rate gain in percentage points (default: 5.0)')
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
     args = parser.parse_args(argv)
-    date.fromisoformat(args.end_date)
+    try:
+        date.fromisoformat(args.end_date)
+    except ValueError:
+        parser.error('--end-date must be an ISO date (YYYY-MM-DD)')
     missing_deps = [p for p in ('pandas','numpy','requests','xgboost','sklearn')
                     if importlib.util.find_spec(p) is None]
     if missing_deps:
@@ -196,6 +293,8 @@ def main(argv=None):
                 'python':sys.version,
                 'packages':{p:importlib.metadata.version(p) for p in ('pandas','numpy','requests','xgboost','scikit-learn')},
                 'modes':MODES, 'stress_cases':STRESS_CASES,
+                'reference_mode':args.reference_mode,
+                'min_win_rate_gain_pp':args.min_win_rate_gain_pp,
                 'status':'preparing'}
     (out/'manifest.json').write_text(json.dumps(manifest,indent=2),encoding='utf-8')
     # Capture main()'s prepared inputs before it writes reports or sends Telegram.
@@ -256,16 +355,19 @@ def main(argv=None):
                 'open_positions':list(held), 'final_nav':final, 'bank_interest':interest,
                 'stress':stress_results,
             }
-        for mode in MODES[1:]:
-            summaries[mode]['assessment'] = evaluate_candidate(summaries[mode], summaries['baseline'])
-        (out/'comparison.json').write_text(json.dumps(summaries,ensure_ascii=False,indent=2),encoding='utf-8')
+        assess_modes(summaries, args.reference_mode, args.min_win_rate_gain_pp)
+        comparison = {'reference_mode':args.reference_mode,
+                      'min_win_rate_gain_pp':args.min_win_rate_gain_pp,
+                      'modes':summaries}
+        (out/'comparison.json').write_text(json.dumps(comparison,ensure_ascii=False,indent=2),encoding='utf-8')
+        report = comparison_summary(summaries, args.reference_mode, args.min_win_rate_gain_pp)
+        (out/'comparison.md').write_text(report, encoding='utf-8')
         manifest['status'] = 'complete'
         (out/'manifest.json').write_text(json.dumps(manifest,indent=2),encoding='utf-8')
-        for mode, result in summaries.items():
-            m = result['full_period']
-            print(mode, json.dumps(m,ensure_ascii=False))
-            if 'assessment' in result:
-                print(mode, json.dumps(result['assessment'], ensure_ascii=False))
+        print(report)
+        if os.environ.get('GITHUB_STEP_SUMMARY'):
+            with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a', encoding='utf-8') as stream:
+                stream.write(report)
     except BaseException as exc:
         manifest['status'] = 'failed'
         manifest['error'] = str(exc)
