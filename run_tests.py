@@ -8,8 +8,10 @@ REQUIRED_TESTS = (
     'test_execution_policy.py',
     'test_integration_contract.py',
     'test_profit_criteria.py',
+    'test_profit_guard.py',
     'test_run_audit.py',
     'test_test_runner.py',
+    'test_validation_reference.py',
     'test_workflow_config.py',
 )
 REQUIRED_PROJECT_FILES = (
@@ -18,6 +20,7 @@ REQUIRED_PROJECT_FILES = (
     'run_audit.py',
     'validate_winrate.py',
     '.github/workflows/quant_bot.yml',
+    '.github/workflows/validate_strategy.yml',
 )
 
 
