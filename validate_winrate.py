@@ -8,6 +8,7 @@ from datetime import date, datetime, timezone
 import hashlib
 import importlib.util
 import importlib.metadata
+import io
 import json
 import math
 import os
@@ -15,7 +16,10 @@ from pathlib import Path
 import shutil
 import sys
 
+from ohlcv_quality import OHLCVValidationError, validate_rows, write_json_atomic
+
 ROOT = Path(__file__).resolve().parent
+BACKTEST_START = '2022-01-01'
 MODES = ('baseline', 'balanced', 'profit_guard')
 STRESS_CASES = {
     'higher_slippage': {'additional_slippage': 0.005},
@@ -23,9 +27,88 @@ STRESS_CASES = {
 }
 
 
-def read_csv(path):
-    with Path(path).open(encoding='utf-8-sig', newline='') as stream:
-        return list(csv.DictReader(stream))
+def validate_market_coverage(rows, symbol='VNINDEX', start_date=BACKTEST_START):
+    """Require enough market history for the replay's fixed 200-session warmup."""
+    if symbol != 'VNINDEX':
+        return
+    before = sum(row['Date'] < start_date for row in rows)
+    in_period = sum(row['Date'] >= start_date for row in rows)
+    reasons = []
+    if before < 200:
+        reasons.append(f'at least 200 market rows strictly before {start_date} are required; found {before}')
+    if not in_period:
+        reasons.append(f'at least one market row on or after {start_date} and before the cutoff is required')
+    if reasons:
+        raise OHLCVValidationError(symbol, [{
+            'csv_row': None, 'date': None, 'reasons': reasons, 'raw_values': {},
+            'parsed_values': {'warmup_rows': before, 'in_period_rows': in_period},
+        }])
+
+
+def validate_input_file(path, symbol, end_date, reportdir):
+    """Validate the untouched source before cutoff selection or replay output.
+
+    A failure writes diagnostics only. Every source row is checked first so the
+    report retains actual CSV row numbers and cannot hide malformed dated rows
+    behind the cutoff. This function never repairs or rewrites source data.
+    """
+    path = Path(path)
+    rows = []
+    selected = None
+    digest = None
+    try:
+        try:
+            source = path.read_bytes()
+            digest = hashlib.sha256(source).hexdigest()
+            with io.StringIO(source.decode('utf-8-sig'), newline='') as stream:
+                rows = list(csv.DictReader(stream, strict=True))
+        except (OSError, UnicodeError, csv.Error) as exc:
+            raise OHLCVValidationError(symbol, [{
+                'csv_row': None, 'date': None,
+                'reasons': [f'cannot read OHLCV CSV: {exc}'],
+                'raw_values': {}, 'parsed_values': {},
+            }]) from exc
+        normalized = validate_rows(rows, symbol, min_rows=0)
+        selected = [row for row in normalized if row['Date'] <= end_date]
+        selected = validate_rows(selected, symbol, min_rows=51)
+        validate_market_coverage(selected, symbol)
+        return selected
+    except OHLCVValidationError as exc:
+        # Counts do not filter validation: malformed dates are still rejected.
+        candidates = 0
+        unknown_dates = 0
+        for row in rows:
+            stamp = row.get('Date')
+            try:
+                if not isinstance(stamp, str) or len(stamp.strip()) != 10:
+                    raise ValueError('non-ISO date')
+                stamp = date.fromisoformat(stamp.strip()).isoformat()
+            except (TypeError, ValueError):
+                unknown_dates += 1
+                continue
+            candidates += stamp <= end_date
+        issues = exc.issues
+        report = {
+            'phase': 'preflight', 'status': 'failed', 'symbol': symbol,
+            'source_file': str(path.resolve()), 'sha256': digest,
+            'end_date': end_date, 'backtest_start': BACKTEST_START,
+            'created_utc': datetime.now(timezone.utc).isoformat(),
+            'input_row_count': len(rows), 'candidate_row_count': candidates,
+            'unparseable_date_count': unknown_dates,
+            'error_count': len(issues),
+            'invalid_row_count': len({issue['csv_row'] for issue in issues
+                                      if issue.get('csv_row') is not None}),
+            'reason_count': sum(len(issue.get('reasons', [])) for issue in issues),
+            'issues': issues, 'error': str(exc), 'replay_started': False,
+        }
+        if selected is not None and symbol == 'VNINDEX':
+            report['market_coverage'] = {
+                'warmup_rows': sum(row['Date'] < BACKTEST_START for row in selected),
+                'in_period_rows': sum(row['Date'] >= BACKTEST_START for row in selected),
+                'required_warmup_rows': 200,
+            }
+        write_json_atomic(Path(reportdir)/'preflight_report.json', report)
+        raise
 
 
 def summarize(nav_rows, trades, start=None, end=None, initial=100_000_000):
@@ -222,9 +305,12 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        date.fromisoformat(args.end_date)
+        if date.fromisoformat(args.end_date).isoformat() != args.end_date:
+            raise ValueError('not canonical ISO date')
     except ValueError:
         parser.error('--end-date must be an ISO date (YYYY-MM-DD)')
+    if args.end_date < BACKTEST_START:
+        parser.error(f'--end-date must be on or after the fixed backtest start {BACKTEST_START}')
     missing_deps = [p for p in ('pandas','numpy','requests','xgboost','sklearn')
                     if importlib.util.find_spec(p) is None]
     if missing_deps:
@@ -234,7 +320,7 @@ def main(argv=None):
     protocol = {
         'QUANT_OFFLINE':'1', 'VN30_PREFETCH':'0', 'PYTHON_DOTENV_DISABLED':'1',
         'ENTRY_MODE':'baseline', 'RUN_EXPECTED_ENTRY_MODE':'baseline',
-        'BACKTEST_START_DATE':'2022-01-01',
+        'BACKTEST_START_DATE':BACKTEST_START,
         'ENABLE_DYNAMIC_PERCENTILE_AI':'True', 'ENABLE_ASYMMETRIC_ATR_EXIT':'True',
         'ENABLE_MA20_SLOPE_FILTER':'False', 'ENABLE_ANTI_CHASE_FILTER':'False',
         'MAX_PER_SECTOR':'2', 'MAX_PER_ECOSYSTEM':'2',
@@ -242,7 +328,6 @@ def main(argv=None):
     }
     os.environ.update(protocol)
     from vn30_universe import ALL_HISTORICAL_VN30_TICKERS
-    from execution_policy import valid_bar
     allowed = set(filter(None, (s.strip() for s in args.allow_missing.split(','))))
     expected = ['VNINDEX'] + list(ALL_HISTORICAL_VN30_TICKERS)
     missing = [s for s in expected if not (args.data_dir/f'{s}.csv').is_file()]
@@ -252,28 +337,21 @@ def main(argv=None):
                     '. Run download_all_data.py where network is available.\n')
     if allowed-set(expected):
         parser.error('Unknown allowed-missing symbols: '+', '.join(sorted(allowed-set(expected))))
-    # Validate before creating any replay artifacts.
+    out = args.output.resolve()
+    if out.exists():
+        parser.error(f'Output already exists: {out}; choose another --output')
+    # Validate before creating any replay artifacts. Failures retain diagnostics.
     inputs = {}
     for symbol in expected:
         if symbol in missing:
             continue
-        rows = [r for r in read_csv(args.data_dir/f'{symbol}.csv') if r['Date'][:10] <= args.end_date]
-        if len(rows) < 51:
-            parser.error(f'{symbol}: fewer than 51 rows before cutoff')
-        seen = set()
-        for row in rows:
-            stamp = row['Date'][:10]
-            date.fromisoformat(stamp)
-            prices = [float(row[k]) for k in ('Open','High','Low','Close')]
-            volume = float(row['Volume'])
-            if stamp in seen or not valid_bar(*prices) or not math.isfinite(volume) or volume < 0:
-                parser.error(f'{symbol}: invalid or duplicate OHLCV row on {stamp}')
-            seen.add(stamp)
-            row['Date'] = stamp
-        inputs[symbol] = rows
-    out = args.output.resolve()
-    if out.exists():
-        parser.error(f'Output already exists: {out}; choose another --output')
+        try:
+            inputs[symbol] = validate_input_file(args.data_dir/f'{symbol}.csv', symbol,
+                                                args.end_date, out)
+        except OHLCVValidationError as exc:
+            parser.exit(2, f'OHLCV preflight failed: {exc}\n'
+                        f'Diagnostics: {out / "preflight_report.json"}\n'
+                        'Source data was not changed; no replay results were generated.\n')
     snapshot = out/'snapshot'
     (snapshot/'data').mkdir(parents=True)
     for symbol, rows in inputs.items():
@@ -282,7 +360,7 @@ def main(argv=None):
             writer.writeheader()
             writer.writerows(sorted(rows,key=lambda r:r['Date']))
     for name in ('markets_database10years.csv','quant_bot.py','execution_policy.py','run_audit.py',
-                 'vn30_universe.py','validate_winrate.py'):
+                 'vn30_universe.py','validate_winrate.py','ohlcv_quality.py'):
         shutil.copyfile(ROOT/name, snapshot/name)
     for path in ROOT.glob('xgboost_*.json'):
         shutil.copyfile(path, snapshot/path.name)
