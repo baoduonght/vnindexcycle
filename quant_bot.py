@@ -13,7 +13,7 @@ import logging
 import sys
 import os
 import datetime
-from execution_policy import (get_policy, signal_rejection, open_rejection,
+from execution_policy import (get_policy, signal_rejection, open_rejection, profit_floor_price,
                               stop_fraction, stop_fill_price, opening_sell_price,
                               valid_bar, position_budget)
 from run_audit import resolve_entry_mode, build_manifest, write_manifest
@@ -751,6 +751,25 @@ def run_ai_quant_system(
                 buy_p = held[c]['buy_price']
                 dynamic_sl = calc_dynamic_stoploss(c, known_date)  # Known before this session.
                 stop_threshold_price = buy_p * (1.0 + dynamic_sl)
+                stop_reason = f'Cắt lỗ ATR {dynamic_sl*100:.1f}% từ phiên trước (có thể gap)'
+                stop_action = f'Cắt lỗ động ATR {dynamic_sl*100:.1f}% trong phiên'
+                if policy.profit_guard and enable_asymmetric_atr_exit:
+                    previous_floor = held[c].get('profit_floor')
+                    guard_floor = profit_floor_price(
+                        buy_p, held[c].get('highest'), previous_floor,
+                        trigger=PROFIT_PROTECTION_PEAK, floor=PROFIT_PROTECTION_FLOOR,
+                        super_trigger=SUPER_WINNER_PEAK, super_floor=0.05)
+                    held[c]['profit_floor'] = guard_floor
+                    if guard_floor is not None:
+                        if guard_floor != previous_floor:
+                            record(date, c, 'profit_guard', 'armed_from_prior_session',
+                                   Floor=float(guard_floor), Known_Peak=float(held[c]['highest']))
+                        if guard_floor > stop_threshold_price:
+                            stop_threshold_price = guard_floor
+                            floor_pct = (guard_floor / buy_p - 1.0) * 100.0
+                            stop_reason = (f'Bảo vệ lãi +{floor_pct:.1f}% từ đỉnh phiên trước '
+                                           '(ngưỡng giá gộp; có thể gap)')
+                            stop_action = stop_reason
                 curr_l = stocks_low.at[date, f'{c}_L'] if f'{c}_L' in stocks_low.columns else np.nan
                 curr_h = stocks_high.at[date, f'{c}_H'] if f'{c}_H' in stocks_high.columns else np.nan
                 curr_c = stocks_close.at[date, c]
@@ -790,7 +809,7 @@ def run_ai_quant_system(
                         'Total_PnL_VND': int(round(total_pos_pnl_vnd)),
                         'Profit(%)': round(float(pos_profit_pct), 2),
                         'Hold_Days': int(hold_days),
-                        'Reason': f'Cắt lỗ ATR {dynamic_sl*100:.1f}% từ phiên trước (có thể gap)'
+                        'Reason': stop_reason
                     })
                     
                     del held[c]
@@ -803,7 +822,7 @@ def run_ai_quant_system(
                     trade_log.append({
                         'Date': date_str,
                         'Trade_ID': trade_id,
-                        'Action': f"SELL_FULL (Cắt lỗ động ATR {dynamic_sl*100:.1f}% trong phiên)",
+                        'Action': f"SELL_FULL ({stop_action})",
                         'Ticker': c,
                         'Price': round(float(exec_price), 2),
                         'Shares': int(sell_qty),
@@ -1614,6 +1633,7 @@ def main():
     print(f"   • Entry mode: {ENTRY_MODE}")
     policy = get_policy(ENTRY_MODE)
     print(f"   • Candle/gap filter: {'BẬT' if policy.candle_filter else 'TẮT'} | Risk/entry: {policy.risk_per_trade}")
+    print(f"   • Profit guard từ đỉnh phiên trước: {'BẬT (ứng viên kiểm định)' if policy.profit_guard else 'TẮT'}")
     print("   • AI score dự báo vượt chỉ số sau 30 phiên, không phải xác suất thắng vị thế.")
     print(f"   • Solution 1: Time-Decayed Retrain Model: BẬT")
     print(f"   • Solution 2: Rolling Percentile Dynamic AI (Top 20% / 120 bars): {'BẬT' if ENABLE_DYNAMIC_PERCENTILE_AI else 'TẮT (Cố định 0.60)'}")
