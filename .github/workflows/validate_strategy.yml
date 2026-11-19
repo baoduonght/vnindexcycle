@@ -1,0 +1,67 @@
+name: Compare balanced and profit guard
+
+on:
+  workflow_dispatch:
+    inputs:
+      end_date:
+        description: 'Inclusive OHLCV cutoff (YYYY-MM-DD)'
+        type: string
+        default: '2026-11-19'
+        required: true
+      allow_missing:
+        description: 'Explicit unavailable historical symbols, comma-separated'
+        type: string
+        default: 'FLC,HVG,PVF,ROS'
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      PYTHON_DOTENV_DISABLED: '1'
+      VN30_PREFETCH: '0'
+    steps:
+      - name: Check out strategy and models
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run dependency-free regression tests
+        run: python run_tests.py
+
+      - name: Install replay dependencies
+        run: python -m pip install -r requirements-winrate.txt
+
+      - name: Download one shared OHLCV snapshot
+        run: python download_all_data.py
+
+      - name: Compare all modes against balanced
+        shell: bash
+        env:
+          END_DATE: ${{ inputs.end_date }}
+          ALLOW_MISSING: ${{ inputs.allow_missing }}
+        run: >-
+          python validate_winrate.py
+          --output validation
+          --end-date "$END_DATE"
+          --allow-missing "$ALLOW_MISSING"
+          --reference-mode balanced
+          --min-win-rate-gain-pp 5.0
+
+      - name: Upload reports and frozen snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: strategy-validation-${{ github.run_id }}
+          path: validation/
+          if-no-files-found: warn
+          retention-days: 14
