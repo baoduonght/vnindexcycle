@@ -12,12 +12,15 @@ class EntryPolicy:
     max_open_gap_atr: float = 0.75
     max_open_gap_pct: float = 0.04
     risk_per_trade: float | None = None
+    profit_guard: bool = False
 
 
 POLICIES = {
     "baseline": EntryPolicy("baseline"),
     "quality": EntryPolicy("quality", candle_filter=True),
     "balanced": EntryPolicy("balanced", candle_filter=True, risk_per_trade=0.015),
+    "profit_guard": EntryPolicy("profit_guard", candle_filter=True, risk_per_trade=0.015,
+                                profit_guard=True),
     "index_trend": EntryPolicy("index_trend", index_slopes=True),
 }
 
@@ -76,6 +79,43 @@ def stop_fraction(atr, reference_close, floor=-0.085, multiple=2.2):
     if not valid_prices(atr, reference_close):
         return max(floor, -0.065)
     return max(floor, -multiple * atr / reference_close)
+
+
+def profit_floor_price(buy_price, known_high, previous_floor=None,
+                       trigger=0.10, floor=0.02,
+                       super_trigger=0.20, super_floor=0.05):
+    """Latch existing gross profit floors using only a prior-session peak.
+
+    This is an activation level, not a guaranteed fill or net return. The
+    caller must freeze it before observing today's OHLC and respect settlement,
+    gaps and unavailable liquidity. No fixed take-profit caps an upward trend.
+    """
+    try:
+        valid_configuration = (
+            all(math.isfinite(float(v)) for v in (trigger, floor, super_trigger, super_floor))
+            and 0 <= floor < trigger < super_trigger
+            and floor <= super_floor < super_trigger
+        )
+    except (ValueError, TypeError):
+        valid_configuration = False
+    if not valid_configuration:
+        raise ValueError('Profit guard requires finite 0 <= floor < trigger < super_trigger '
+                         'and floor <= super_floor < super_trigger')
+    armed_floor = float(previous_floor) if valid_prices(previous_floor) else None
+    if not valid_prices(buy_price, known_high):
+        return armed_floor
+    buy_price, known_high = float(buy_price), float(known_high)
+
+    def reached(level):
+        return known_high >= level or math.isclose(known_high, level, rel_tol=1e-12, abs_tol=1e-12)
+
+    if reached(buy_price * (1 + super_trigger)):
+        candidate = buy_price * (1 + super_floor)
+    elif reached(buy_price * (1 + trigger)):
+        candidate = buy_price * (1 + floor)
+    else:
+        return armed_floor
+    return max(candidate, armed_floor) if armed_floor is not None else candidate
 
 
 def position_budget(policy, nav, slot, stop, buy_friction, sell_friction):
