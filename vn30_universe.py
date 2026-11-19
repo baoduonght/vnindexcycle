@@ -594,7 +594,8 @@ def _silent_prefetch():
 
 # Kích hoạt prefetch ngay khi import (không dùng thread để tránh phức tạp)
 # Comment dòng dưới nếu muốn tắt auto-fetch
-_silent_prefetch()
+if os.environ.get('VN30_PREFETCH', '0') == '1':
+    _silent_prefetch()
 
 
 # =============================================================================
