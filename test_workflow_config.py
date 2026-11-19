@@ -5,7 +5,8 @@ import re
 import unittest
 
 
-ROOT = Path(__file__).resolve().parents[1]
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent if HERE.name == 'tests' else HERE
 
 
 def workflow_steps(text):
@@ -65,7 +66,7 @@ class WorkflowModeTests(unittest.TestCase):
         self.assertIn('run_manifest.json', commit_step)
 
     def test_tests_run_before_trading_process(self):
-        self.assertLess(self.workflow.index('run: python -m unittest discover'),
+        self.assertLess(self.workflow.index('run: python run_tests.py'),
                         self.workflow.index('run: python quant_bot.py'))
 
     def test_bot_resolves_environment_mode_with_shared_checker(self):
