@@ -1,11 +1,10 @@
-"""Run local tests from this file's directory; fail clearly on partial uploads."""
+"""Run local regression tests from either supported repository layout."""
 from pathlib import Path
 import sys
 import unittest
 
 ROOT = Path(__file__).resolve().parent
 REQUIRED_TESTS = (
-    '__init__.py',
     'test_execution_policy.py',
     'test_integration_contract.py',
     'test_profit_criteria.py',
@@ -13,18 +12,34 @@ REQUIRED_TESTS = (
     'test_test_runner.py',
     'test_workflow_config.py',
 )
+REQUIRED_PROJECT_FILES = (
+    'quant_bot.py',
+    'execution_policy.py',
+    'run_audit.py',
+    'validate_winrate.py',
+    '.github/workflows/quant_bot.yml',
+)
 
 
 def build_suite(root=None):
     root = Path(root if root is not None else ROOT).resolve()
+    missing_project = [name for name in REQUIRED_PROJECT_FILES
+                       if not (root/name).is_file()]
+    if missing_project:
+        raise RuntimeError('Incomplete project upload. Missing: '+', '.join(missing_project))
     tests = root/'tests'
-    if not tests.is_dir():
+    if tests.is_dir():
+        required = ('__init__.py',) + REQUIRED_TESTS
+    elif any((root/name).is_file() for name in REQUIRED_TESTS):
+        tests = root
+        required = REQUIRED_TESTS
+    else:
         raise RuntimeError(
-            f'Missing local test directory: {tests}. Upload tests/ next to quant_bot.py '
-            'and run_tests.py, not inside another vnindexcycle-main/ directory.')
-    missing = [name for name in REQUIRED_TESTS if not (tests/name).is_file()]
+            f'No local regression tests in {root} or {tests}. '
+            'Upload all test_*.py files next to run_tests.py, or inside tests/.')
+    missing = [name for name in required if not (tests/name).is_file()]
     if missing:
-        raise RuntimeError('Incomplete tests/ upload. Missing: '+', '.join(missing))
+        raise RuntimeError(f'Incomplete test upload in {tests}. Missing: '+', '.join(missing))
     suite = unittest.TestLoader().discover(
         start_dir=str(tests), pattern='test_*.py', top_level_dir=str(root))
     if suite.countTestCases() == 0:
