@@ -12,7 +12,8 @@ from execution_policy import get_policy
 import run_audit
 
 
-ROOT = Path(__file__).resolve().parents[1]
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent if HERE.name == 'tests' else HERE
 
 
 class EntryModeResolutionTests(unittest.TestCase):
