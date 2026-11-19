@@ -12,6 +12,20 @@ on:
     
   # Cho phép bác bấm nút "Run workflow" bằng tay trên Github để test thử bot Telegram
   workflow_dispatch:
+    inputs:
+      entry_mode:
+        description: 'Chế độ chạy bot'
+        type: choice
+        default: balanced
+        options:
+          - balanced
+          - baseline
+          - quality
+          - index_trend
+      retrain:
+        description: 'Huấn luyện lại model trước khi chạy (không bật khi so sánh các chế độ)'
+        type: boolean
+        default: false
 
 permissions:
   # Cấp quyền tối cao để Bot tự động lưu file não bộ (.json) và lịch sử giao dịch (.csv) lên Github
@@ -32,15 +46,19 @@ jobs:
       - name: ⚙️ Cài đặt thư viện tài chính & AI
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy yfinance requests xgboost scikit-learn plotly python-dotenv pandas-datareader
+          pip install -r requirements-winrate.txt
+          pip install yfinance plotly python-dotenv pandas-datareader
           pip install --extra-index-url https://vnstocks.com/api/packages "vnstock-oapi>=0.1.0,<1" || echo "Không cài được vnstock-oapi, dùng fallback direct API"
           pip install git+https://github.com/rongardF/tvdatafeed.git
+
+      - name: Kiểm tra logic trước khi chạy
+        run: python -m unittest discover -s tests -v
 
       # ==========================================
       # NHÁNH 1: LUYỆN ĐAN & LƯU BỘ NHỚ (CHỈ CHẠY THỨ 7 HOẶC BẤM TEST TAY)
       # ==========================================
       - name: 📡 Cập nhật Cơ sở Dữ liệu Vĩ mô (macro_database.py)
-        if: github.event.schedule == '0 2 * * 6' || github.event_name == 'workflow_dispatch'
+        if: github.event.schedule == '0 2 * * 6' || (github.event_name == 'workflow_dispatch' && inputs.retrain)
         env:
           DNSE_API_KEY: ${{ secrets.DNSE_API_KEY }}
           DNSE_API_SECRET: ${{ secrets.DNSE_API_SECRET }}
@@ -48,15 +66,15 @@ jobs:
         run: python macro_database.py
 
       - name: 🧠 Mở Lò Luyện Đan (train_bot.py)
-        if: github.event.schedule == '0 2 * * 6' || github.event_name == 'workflow_dispatch'
+        if: github.event.schedule == '0 2 * * 6' || (github.event_name == 'workflow_dispatch' && inputs.retrain)
         env:
           DNSE_API_KEY: ${{ secrets.DNSE_API_KEY }}
           DNSE_API_SECRET: ${{ secrets.DNSE_API_SECRET }}
           VNSTOCK_OAPI_SESSION_BACKEND: file
-        run:  ENTRY_MODE=balanced python train_bot.py
+        run: python train_bot.py
 
       - name: 💾 Lưu Não Bộ Mới & Dữ liệu Vĩ mô Lên Github
-        if: github.event.schedule == '0 2 * * 6' || github.event_name == 'workflow_dispatch'
+        if: github.event.schedule == '0 2 * * 6' || (github.event_name == 'workflow_dispatch' && inputs.retrain)
         run: |
           git config --global user.name "Quant AutoBot"
           git config --global user.email "bot@quant.com"
@@ -70,6 +88,8 @@ jobs:
       - name: 🎯 Bắn tín hiệu Telegram (quant_bot.py)
         if: github.event.schedule == '30 8 * * 1-5' || github.event_name == 'workflow_dispatch'
         env:
+          ENTRY_MODE: ${{ inputs.entry_mode || 'balanced' }}
+          RUN_EXPECTED_ENTRY_MODE: ${{ inputs.entry_mode || 'balanced' }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           DNSE_API_KEY: ${{ secrets.DNSE_API_KEY }}
@@ -82,6 +102,6 @@ jobs:
         run: |
           git config --global user.name "Quant AutoBot"
           git config --global user.email "bot@quant.com"
-          git add trading_log.csv daily_nav.csv completed_trades.csv
+          git add trading_log.csv daily_nav.csv completed_trades.csv signal_diagnostics.csv run_manifest.json
           git commit -m "📊 [Auto-Update] Cập nhật sổ kế toán giao dịch & chu kỳ vị thế cho Power BI" || echo "Không có giao dịch mới để commit"
           git push
