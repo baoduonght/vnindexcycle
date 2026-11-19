@@ -19,6 +19,7 @@ on:
         default: balanced
         options:
           - balanced
+          - profit_guard
           - baseline
           - quality
           - index_trend
