@@ -16,6 +16,7 @@ import datetime
 from execution_policy import (get_policy, signal_rejection, open_rejection,
                               stop_fraction, stop_fill_price, opening_sell_price,
                               valid_bar, position_budget)
+from run_audit import resolve_entry_mode, build_manifest, write_manifest
 
 # Nạp biến môi trường từ file .env nếu có (dành cho chạy cục bộ)
 try:
@@ -116,7 +117,7 @@ ECOSYSTEM_MAP = {
 }
 
 BACKTEST_START_DATE = os.environ.get('BACKTEST_START_DATE', '2022-01-01')
-ENTRY_MODE = os.environ.get('ENTRY_MODE', 'baseline')
+ENTRY_MODE = resolve_entry_mode(os.environ)
 get_policy(ENTRY_MODE)  # Fail explicitly on a misspelled mode.
 QUANT_OFFLINE = os.environ.get('QUANT_OFFLINE', '0').lower() in ('1', 'true', 'yes')
 
@@ -1611,6 +1612,9 @@ def main():
     print("\n" + "="*70)
     print("⚙️ CẤU HÌNH HỆ THỐNG GIAO DỊCH ĐỊNH LƯỢNG (AI QUANT CONFIG):")
     print(f"   • Entry mode: {ENTRY_MODE}")
+    policy = get_policy(ENTRY_MODE)
+    print(f"   • Candle/gap filter: {'BẬT' if policy.candle_filter else 'TẮT'} | Risk/entry: {policy.risk_per_trade}")
+    print("   • AI score dự báo vượt chỉ số sau 30 phiên, không phải xác suất thắng vị thế.")
     print(f"   • Solution 1: Time-Decayed Retrain Model: BẬT")
     print(f"   • Solution 2: Rolling Percentile Dynamic AI (Top 20% / 120 bars): {'BẬT' if ENABLE_DYNAMIC_PERCENTILE_AI else 'TẮT (Cố định 0.60)'}")
     print(f"   • Solution 3: Asymmetric Exit Rules (2 nến MA20 + 2.5x ATR Trailing): {'BẬT' if ENABLE_ASYMMETRIC_ATR_EXIT else 'TẮT'}")
@@ -1655,6 +1659,25 @@ def main():
     )
 
     pd.DataFrame(decision_log).to_csv('signal_diagnostics.csv', index=False)
+
+    model_files = [f'xgboost_model_{year}.json' for year in wf_models]
+    if default_model is not None:
+        model_files.append(DEFAULT_MODEL_FILE)
+    audit = build_manifest(
+        '.', ENTRY_MODE, model_files,
+        {'market': df_clean, 'open': stocks_open, 'high': stocks_high,
+         'low': stocks_low, 'close': stocks_close, 'volume': stocks_volume,
+         'ai_scores': ml_master[['Date', 'Ticker', 'AI_Score']]},
+        {'backtest_start_date': BACKTEST_START_DATE,
+         'dynamic_ai': ENABLE_DYNAMIC_PERCENTILE_AI,
+         'asymmetric_exit': ENABLE_ASYMMETRIC_ATR_EXIT,
+         'index_slopes': ENABLE_MA20_SLOPE_FILTER or policy.index_slopes,
+         'anti_chase': ENABLE_ANTI_CHASE_FILTER,
+         'max_per_sector': MAX_PER_SECTOR, 'max_per_ecosystem': MAX_PER_ECOSYSTEM,
+         'stop_floor': HARD_STOPLOSS_FLOOR, 'atr_multiple': ATR_STOPLOSS_MULTIPLIER},
+        loaded_tickers, delisted_or_empty)
+    write_manifest('run_manifest.json', audit)
+    print('✅ Đã ghi run_manifest.json: chế độ thực chạy, SHA256 model và dữ liệu.')
 
     # Ghi nhận file trading_log.csv
     df_trade_log.to_csv('trading_log.csv', index=False, na_rep='', float_format='%.2f')
@@ -1736,7 +1759,7 @@ def main():
     print("\n" + "="*58)
     print(f"📊 BÁO CÁO ĐỊNH LƯỢNG THỰC CHIẾN TỪ {BACKTEST_START_DATE[:4]} ĐẾN NAY")
     print("🧠 MÔ HÌNH CƠ SỞ (BASE MODEL): HUẤN LUYỆN TRÊN CHU KỲ VÀNG 10 NĂM (2012 -> 2021)")
-    print("🎯 KIỂM THỬ THỰC CHIẾN OOS: TÁI HUẤN LUYỆN CUỐN CHIẾU TỪNG NĂM (100% BLIND TEST / ZERO LEAKAGE)")
+    print("🎯 WALK-FORWARD THEO NĂM; CẦN KIỂM ĐỊNH DỮ LIỆU VÀ LỰA CHỌN CHIẾN LƯỢC")
     print("="*58)
     print(f"💵 Vốn khởi điểm ({BACKTEST_START_DATE}):        {initial_capital:,.0f} VNĐ")
     print(f"🏦 TỔNG TÀI SẢN HIỆN TẠI (NAV):   {final_nav:,.0f} VNĐ")
