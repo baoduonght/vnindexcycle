@@ -14,7 +14,8 @@ import uuid
 import validate_winrate
 
 
-ROOT = Path(__file__).resolve().parents[1]
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent if HERE.name == 'tests' else HERE
 
 
 def function_named(tree, name):
