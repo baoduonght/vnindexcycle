@@ -42,8 +42,8 @@ class WorkflowModeTests(unittest.TestCase):
         self.assertRegex(mode_block, r'(?m)^        type: choice\s*$')
         self.assertRegex(mode_block, r'(?m)^        default: balanced\s*$')
         options = re.findall(r'(?m)^          - (\w+)\s*$', mode_block)
-        self.assertEqual(set(options), {'baseline', 'quality', 'balanced', 'index_trend'})
-        self.assertEqual(len(options), 4)
+        self.assertEqual(set(options), {'baseline', 'quality', 'balanced', 'index_trend', 'profit_guard'})
+        self.assertEqual(len(options), 5)
 
     def test_manual_retraining_is_opt_in_for_all_mutating_training_steps(self):
         retrain_block = self.workflow.split('      retrain:', 1)[1].split('\npermissions:', 1)[0]
