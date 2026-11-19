@@ -10,9 +10,17 @@ import os
 import sys
 import time
 import datetime
+import csv
+import hashlib
+import io
+from pathlib import Path
+import re
 import requests
 import pandas as pd
 import numpy as np
+
+from ohlcv_quality import (encode_csv, select_valid_source, validate_rows,
+                           write_json_atomic, write_text_atomic)
 
 # Nạp biến môi trường từ .env nếu có
 try:
@@ -64,7 +72,40 @@ START_TS = int(datetime.datetime(2012, 1, 1).timestamp())
 NOW_TS = int(datetime.datetime.now().timestamp())
 NOW_DATE_STR = datetime.datetime.now().strftime("%Y-%m-%d")
 
-def fetch_ticker_multi_source(symbol):
+QUALITY_REPORT_PATH = Path('data_quality_report.json')
+DATA_QUALITY_REPORT = {
+    'created_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    'requested_range': {'start': START_DATE_STR, 'end': NOW_DATE_STR},
+    'strict_ohlcv_validation': True,
+    'symbols': {},
+}
+
+
+def _symbol_report(symbol):
+    return DATA_QUALITY_REPORT['symbols'].setdefault(symbol, {'attempts': []})
+
+
+def _record_fetch_error(symbol, source, error):
+    # Record exception type only: SDK errors can contain private request details.
+    _symbol_report(symbol)['attempts'].append({
+        'source': source, 'status': 'fetch_error', 'error_type': type(error).__name__,
+    })
+    write_json_atomic(QUALITY_REPORT_PATH, DATA_QUALITY_REPORT)
+
+
+def _record_rejected_source(symbol, source, rows, error):
+    key = re.sub(r'[^A-Za-z0-9_-]+', '_', source).strip('_')
+    raw_path = Path(DATA_DIR)/'_rejected'/f'{symbol}_{key}.json'
+    write_json_atomic(raw_path, {'symbol': symbol, 'source': source,
+                                'candidate_rows': rows, 'issues': error.issues})
+    _symbol_report(symbol)['attempts'].append({
+        'source': source, 'status': 'rejected', 'rows': len(rows),
+        'issues': error.issues, 'candidate_evidence': str(raw_path),
+    })
+    write_json_atomic(QUALITY_REPORT_PATH, DATA_QUALITY_REPORT)
+    print(f'\n   [REJECT {source}] {error}', flush=True)
+
+def _iter_ticker_sources(symbol):
     """
     Tải nến OHLCV thật từ hệ thống màng lưới đa API:
     1. vnstock-oapi (Nếu đã cài đặt và cấu hình khoá DNSE/SSI/TCBS)
@@ -89,12 +130,12 @@ def fetch_ticker_multi_source(symbol):
                     'High': data['h'],
                     'Low': data['l'],
                     'Close': data['c'],
-                    'Volume': data.get('v', [0] * len(data['t']))
+                    'Volume': data['v']
                 })
-                df = df.drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
-                return df, "DNSE Entrade (Không cần key)"
-    except Exception:
-        pass
+                df = df.sort_values('Date').reset_index(drop=True)
+                yield df, "DNSE Entrade (Không cần key)"
+    except Exception as exc:
+        _record_fetch_error(symbol, 'DNSE Entrade', exc)
 
     # --- NGUỒN 2: VNDIRECT DCHART API (Dự phòng 1) ---
     try:
@@ -109,12 +150,12 @@ def fetch_ticker_multi_source(symbol):
                     'High': data['h'],
                     'Low': data['l'],
                     'Close': data['c'],
-                    'Volume': data.get('v', [0] * len(data['t']))
+                    'Volume': data['v']
                 })
-                df = df.drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
-                return df, "VNDirect"
-    except Exception:
-        pass
+                df = df.sort_values('Date').reset_index(drop=True)
+                yield df, "VNDirect"
+    except Exception as exc:
+        _record_fetch_error(symbol, 'VNDirect', exc)
 
     # --- NGUỒN 3: TCBS PUBLIC API (Dự phòng 2) ---
     try:
@@ -127,10 +168,10 @@ def fetch_ticker_multi_source(symbol):
                 df = pd.DataFrame(data)
                 df.rename(columns={'tradingDate': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
                 df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None).dt.normalize()
-                df = df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
-                return df, "TCBS"
-    except Exception:
-        pass
+                df = df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].sort_values('Date').reset_index(drop=True)
+                yield df, "TCBS"
+    except Exception as exc:
+        _record_fetch_error(symbol, 'TCBS', exc)
 
     # --- NGUỒN 4: VNSTOCK-OAPI (Dự phòng nếu có khoá trong .env) ---
     if VNSTOCK_OAPI_AVAILABLE:
@@ -163,10 +204,10 @@ def fetch_ticker_multi_source(symbol):
                         
                         if 'Date' in df_o.columns and 'Close' in df_o.columns:
                             df_o['Date'] = pd.to_datetime(df_o['Date']).dt.tz_localize(None).dt.normalize()
-                            df_o = df_o[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
-                            return df_o, f"vnstock-oapi ({src_name.upper()})"
-            except Exception:
-                pass
+                            df_o = df_o[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].sort_values('Date').reset_index(drop=True)
+                            yield df_o, f"vnstock-oapi ({src_name.upper()})"
+            except Exception as exc:
+                _record_fetch_error(symbol, f'vnstock-oapi ({src_name.upper()})', exc)
 
     # --- NGUỒN 5: VNSTOCK (Gen 6 Market) ---
     if VNSTOCK_AVAILABLE:
@@ -176,12 +217,30 @@ def fetch_ticker_multi_source(symbol):
             if df is not None and len(df) > 50:
                 df.rename(columns={'time': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
                 df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None).dt.normalize()
-                df = df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
-                return df, "Vnstock (Market)"
-        except Exception:
-            pass
+                df = df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].sort_values('Date').reset_index(drop=True)
+                yield df, "Vnstock (Market)"
+        except Exception as exc:
+            _record_fetch_error(symbol, 'Vnstock (Market)', exc)
 
-    return None, None
+
+def fetch_ticker_multi_source(symbol):
+    """Choose the first complete provider dataset passing the replay contract."""
+    candidates = ((source, frame.to_dict('records'))
+                  for frame, source in _iter_ticker_sources(symbol))
+    rows, source = select_valid_source(
+        candidates, symbol, min_rows=51,
+        on_rejected=lambda source, rows, error:
+            _record_rejected_source(symbol, source, rows, error))
+    report = _symbol_report(symbol)
+    if rows is None:
+        report['status'] = 'failed_no_valid_source'
+        write_json_atomic(QUALITY_REPORT_PATH, DATA_QUALITY_REPORT)
+        return None, None
+    report.update(status='validated', source=source, rows=len(rows))
+    write_json_atomic(QUALITY_REPORT_PATH, DATA_QUALITY_REPORT)
+    frame = pd.DataFrame(rows)
+    frame['Date'] = pd.to_datetime(frame['Date'])
+    return frame, source
 
 def main():
     print("=" * 75)
@@ -207,7 +266,16 @@ def main():
         df, source = fetch_ticker_multi_source(sym)
         if df is not None and not df.empty:
             file_path = os.path.join(DATA_DIR, f"{sym}.csv")
-            df.to_csv(file_path, index=False, float_format='%.2f')
+            rows = validate_rows(df.to_dict('records'), sym, min_rows=51)
+            serialized = encode_csv(rows)
+            # Validate the exact CSV bytes' numeric round trip before replacing
+            # any previous dataset. Do not round prices or manufacture candles.
+            validate_rows(csv.DictReader(io.StringIO(serialized)), sym, min_rows=51)
+            write_text_atomic(file_path, serialized)
+            _symbol_report(sym).update(
+                status='saved', csv_file=file_path,
+                csv_sha256=hashlib.sha256(serialized.encode('utf-8')).hexdigest())
+            write_json_atomic(QUALITY_REPORT_PATH, DATA_QUALITY_REPORT)
 
             df_master = df.copy()
             df_master['Ticker'] = sym
@@ -221,6 +289,11 @@ def main():
         else:
             print("❌ Thất bại (Không có dữ liệu hoặc mã đã hủy niêm yết từ lâu)")
             failed_symbols.append(sym)
+            if sym == 'VNINDEX':
+                DATA_QUALITY_REPORT['status'] = 'failed'
+                write_json_atomic(QUALITY_REPORT_PATH, DATA_QUALITY_REPORT)
+                raise SystemExit('VNINDEX: no valid provider dataset; see data_quality_report.json '
+                                 'and data/_rejected/ for evidence. No replay can run.')
 
         time.sleep(0.08)
 
@@ -230,7 +303,7 @@ def main():
         master_df = pd.concat(all_master_rows, ignore_index=True)
         master_df = master_df.sort_values(by=['Date', 'Ticker']).reset_index(drop=True)
         master_file = "vn_database_all_tickers_2012_2026.csv"
-        master_df.to_csv(master_file, index=False, float_format='%.2f')
+        write_text_atomic(master_file, master_df.to_csv(index=False, float_format='%.17g'))
         print(f"✅ Đã xuất File Master: {master_file} ({len(master_df):,} dòng dữ liệu)")
 
     elapsed = time.time() - start_time
@@ -240,6 +313,8 @@ def main():
     if failed_symbols:
         print(f"   • Mã không tải được: {', '.join(failed_symbols)}")
     print(f"   • Thư mục chứa file CSV từng mã: {os.path.abspath(DATA_DIR)}")
+    DATA_QUALITY_REPORT.update(status='download_complete', failed_symbols=failed_symbols)
+    write_json_atomic(QUALITY_REPORT_PATH, DATA_QUALITY_REPORT)
     print("=" * 75)
 
 if __name__ == "__main__":
