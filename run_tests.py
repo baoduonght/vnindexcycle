@@ -6,6 +6,9 @@ import unittest
 ROOT = Path(__file__).resolve().parent
 REQUIRED_TESTS = (
     'test_execution_policy.py',
+    'test_data_quality.py',
+    'test_download_contract.py',
+    'test_preflight_quality.py',
     'test_integration_contract.py',
     'test_profit_criteria.py',
     'test_profit_guard.py',
@@ -19,6 +22,8 @@ REQUIRED_PROJECT_FILES = (
     'execution_policy.py',
     'run_audit.py',
     'validate_winrate.py',
+    'ohlcv_quality.py',
+    'download_all_data.py',
     '.github/workflows/quant_bot.yml',
     '.github/workflows/validate_strategy.yml',
 )
