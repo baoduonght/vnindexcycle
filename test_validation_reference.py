@@ -1,4 +1,5 @@
 """Dependency-free guards for the incumbent and declared win rate target."""
+import ast
 from contextlib import redirect_stderr
 import io
 import math
@@ -197,6 +198,58 @@ class ValidationWorkflowTests(unittest.TestCase):
         self.assertIn('--min-win-rate-gain-pp 5.0', self.workflow)
         self.assertIn('if: always()', self.workflow)
         self.assertIn('uses: actions/upload-artifact@v4', self.workflow)
+
+    def test_comparison_download_declares_2021_warmup_and_quoted_inclusive_window(self):
+        history_input = self.workflow.split('      history_start:\n', 1)[1].split(
+            '      allow_missing:', 1)[0]
+        self.assertIn("default: '2021-01-01'", history_input)
+        self.assertIn('200 prior VNINDEX bars', history_input)
+        download = self.workflow.split(
+            '- name: Download one shared OHLCV snapshot', 1)[1].split('- name:', 1)[0]
+        self.assertIn('HISTORY_START: ${{ inputs.history_start }}', download)
+        self.assertIn('END_DATE: ${{ inputs.end_date }}', download)
+        self.assertIn('python download_all_data.py --start-date "$HISTORY_START" '
+                      '--end-date "$END_DATE"', download)
+        self.assertNotIn('${{ inputs.', download.split('run:', 1)[1])
+
+    def test_download_window_does_not_move_the_fixed_2022_replay_start(self):
+        self.assertEqual(validate_winrate.BACKTEST_START, '2022-01-01')
+        self.assertNotIn('--start-date', validate_winrate.build_parser().format_help())
+        comparison = self.workflow.split(
+            '- name: Compare all modes against balanced', 1)[1].split('- name:', 1)[0]
+        self.assertNotIn('--start-date', comparison)
+        self.assertNotIn('BACKTEST_START_DATE:', self.workflow)
+        self.assertNotIn('HISTORY_START', comparison)
+        rows = ([{'Date': f'2021-{month:02d}-{day:02d}'}
+                 for month in range(1, 11) for day in range(1, 21)]
+                + [{'Date': '2022-01-01'}, {'Date': '2022-12-30'}])
+        validate_winrate.validate_market_coverage(rows)
+        with self.assertRaises(validate_winrate.OHLCVValidationError) as caught:
+            validate_winrate.validate_market_coverage(rows[1:])
+        self.assertIn('200 market rows strictly before 2022-01-01', str(caught.exception))
+
+    def test_training_history_keeps_2012_origin_and_frozen_model_artifacts(self):
+        tree = ast.parse((ROOT / 'train_bot.py').read_text(encoding='utf-8'))
+        base_masks = [node.value for node in ast.walk(tree)
+                      if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == 'base_train_mask'
+                              for target in node.targets)]
+        self.assertEqual(len(base_masks), 1)
+        strings = {node.value for node in ast.walk(base_masks[0])
+                   if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+        self.assertTrue({'2012-01-01', '2022-01-01', 'Date', 'Future_Date'} <= strings)
+        expanding_starts = [node.value.value for node in ast.walk(tree)
+                            if isinstance(node, ast.Assign)
+                            and any(isinstance(target, ast.Name)
+                                    and target.id == 'start_train_date'
+                                    for target in node.targets)
+                            and isinstance(node.value, ast.Constant)]
+        self.assertEqual(expanding_starts, ['2012-01-01'])
+        for name in ['xgboost_ultimate.json', 'xgboost_live_latest.json'] + [
+                f'xgboost_model_{year}.json' for year in range(2022, 2027)]:
+            with self.subTest(model=name):
+                self.assertTrue((ROOT / name).is_file())
+        self.assertNotIn('train_bot.py', self.workflow)
 
 
 if __name__ == '__main__':
