@@ -1,15 +1,15 @@
 {
-  "created_utc": "2026-11-20T08:34:55.243872+00:00",
-  "entry_mode": "profit_guard",
+  "created_utc": "2026-11-20T10:33:44.299789+00:00",
+  "entry_mode": "balanced",
   "entry_policy": {
-    "name": "profit_guard",
+    "name": "balanced",
     "candle_filter": true,
     "index_slopes": false,
     "min_close_location": 0.6,
     "max_open_gap_atr": 0.75,
     "max_open_gap_pct": 0.04,
     "risk_per_trade": 0.015,
-    "profit_guard": true
+    "profit_guard": false
   },
   "effective_config": {
     "backtest_start_date": "2022-01-01",
@@ -25,7 +25,7 @@
   "sha256": {
     "execution_policy.py": "0e049b475a657cc893269816888978538a676984182dbf81142a9bc737acfe9f",
     "markets_database10years.csv": "7c1fb9a619c349180048a8da4226f0573c03bf9d18cb5d363e65b2d4e3fbaa12",
-    "quant_bot.py": "595273e10afd449244751a6d360f660355dbf2d439c59649ae3a6b41d995312d",
+    "quant_bot.py": "f690bd2010dedf829d0b73c9a0256a2b830533f3041d92d0413d30547ce2fb21",
     "run_audit.py": "e2e5ac1dcedac40f22839db190e12c9f18b42f191f1bac58c08d9c8631132dea",
     "vn30_universe.py": "d4b2769f4b307bf465c68b52ce4b9e0d2cefafb048db1354f2dd66f9dd019e6f",
     "xgboost_model_2022.json": "1b9369841dbd2ebd8bb08a21406734fce6ce07b4681660167187f55f4d851739",
@@ -37,12 +37,12 @@
   },
   "input_frames_sha256": {
     "market": "ccd4c7b4860851d0fa00103e23c94b873cdb5b716fffb0b5463e2346dc780f03",
-    "open": "3d9f0704992a4f98c2622e147fb0cb17a51e481cddb972fa14bf4f70606328a6",
-    "high": "8795c0778cc02febc6111144347ddd820b5e9b24e69719aab37eb504feaa69da",
-    "low": "2833d353c307a51bbc5392f0b04194781067463f84012015a07fec6dcd80c5c0",
-    "close": "dc6f7756147cf0e929321443d5fed982bf47daad31598e838cac535c0ff4b5d5",
-    "volume": "58fcb41cc153950d4c30700264b512377edcaae2511d7b2b1fc3a192543e5f30",
-    "ai_scores": "b9183490b8f7211e2283aee67181bbd00310cf09a8f8b3fe328347ed641e4835"
+    "open": "a779c1ce5c66953e284de35ae4e40f748e8ef48387cb4484ea7d06e637683d3b",
+    "high": "9425d144b03573a3dcb12d745a82009e4bd0d0b18267218192e0356a63a6cb42",
+    "low": "01b204064505a6f4bc54ef7fa09650a85c225c63495305de060f12bc5edd7bd6",
+    "close": "5ec2443f7a7d913c812d879ba22a60b0fd87030ea427700491839e6fe12f6e94",
+    "volume": "c10491e8af8cf4e1681833a419424bb796fb1085c051b6ff37c1dc46055bc9d7",
+    "ai_scores": "19473627655226bcfcf843c5852f83109c183cc3c1933c4b56eb61ed04f8e8c8"
   },
   "versions": {
     "python": "3.11.18",
