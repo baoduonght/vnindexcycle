@@ -1,23 +1,29 @@
- 
 import pandas as pd
-from tvDatafeed import TvDatafeed, Interval
+import numpy as np
+try:
+    from tvDatafeed import TvDatafeed, Interval
+    tv = TvDatafeed()
+except Exception:
+    tv = None
+    Interval = None
 import pandas_datareader.data as web
 import yfinance as yf
 import datetime
 import requests
 
-print("🚀 Khởi động Siêu Radar Vĩ mô: Bản Tối thượng (Ép chuẩn Thời gian & Đưa Tỷ giá về VN)...")
+print("🚀 Khởi động Siêu Radar Vĩ mô: Bản Tối thượng (Mốc 2011-06 -> Nay | 100% Raw Data)...")
 
-tv = TvDatafeed()
-end_date = datetime.datetime.now()
-start_date = end_date - datetime.timedelta(days=10*365)
+# Lấy dư từ 01/06/2011 để MA200 và Rolling Z-Score 120 phiên sẵn sàng ngay đầu năm 2012
+START_FETCH_DATE = '2011-06-01'
+start_date = pd.to_datetime(START_FETCH_DATE)
+end_date = pd.to_datetime('today')
 start_ts = int(start_date.timestamp())
-end_ts = int(end_date.timestamp())
+end_ts = int(datetime.datetime.now().timestamp())
 
 # MÀNG LỌC ĐẶC BIỆT: Triệt tiêu múi giờ (02:00:00) để chống lệch dòng
 def clean_index(df):
-    if not df.empty:
-        # Ép tất cả format về đúng định dạng ngày (bỏ giờ phút)
+    if df is not None and not df.empty:
+        df = df.copy()
         df.index = pd.to_datetime(pd.to_datetime(df.index).strftime('%Y-%m-%d'))
         df = df[~df.index.duplicated(keep='last')]
     return df
@@ -29,13 +35,14 @@ print("1. Đang quét chứng khoán Việt Nam (TradingView + DChart Fallback).
 local_df_list = []
 
 def get_vietnam_data(symbol):
-    try:
-        exchange = 'HNX' if symbol == 'VN30F1M' else 'HOSE'
-        raw = tv.get_hist(symbol=symbol, exchange=exchange, interval=Interval.in_daily, n_bars=4000)
-        if raw is not None and len(raw) > 100:
-            return clean_index(raw)
-    except Exception:
-        pass
+    if tv is not None and Interval is not None:
+        try:
+            exchange = 'HNX' if symbol == 'VN30F1M' else 'HOSE'
+            raw = tv.get_hist(symbol=symbol, exchange=exchange, interval=Interval.in_daily, n_bars=5000)
+            if raw is not None and len(raw) > 100:
+                return clean_index(raw)
+        except Exception:
+            pass
 
     url = f"https://dchart-api.vndirect.com.vn/dchart/history?resolution=D&symbol={symbol}&from={start_ts}&to={end_ts}"
     try:
@@ -43,11 +50,11 @@ def get_vietnam_data(symbol):
         res = requests.get(url, headers=headers, timeout=15)
         if res.status_code == 200:
             data = res.json()
-            if data.get('s') == 'ok':
+            if data.get('s') == 'ok' and len(data.get('t', [])) > 0:
                 df = pd.DataFrame({
                     'Date': pd.to_datetime(data['t'], unit='s'),
                     'close': data['c'],
-                    'volume': data.get('v', 0)
+                    'volume': data.get('v', [np.nan] * len(data['t']))
                 })
                 df.set_index('Date', inplace=True)
                 return clean_index(df)
@@ -82,26 +89,20 @@ if local_df_list:
 else:
     local_df = pd.DataFrame()
 
-# ÉP BUỘC MỐC THỜI GIAN BẮT ĐẦU TỪ 1/1/2014 
-# (Đặt ngay trên Phần 2 để các biến bên dưới tự động lấy mốc này)
-start_date = pd.to_datetime('2014-01-01')
-end_date = pd.to_datetime('today')
-
 # =====================================================================
 # --- PHẦN 2, 3, 4: KHỐI NGOẠI, VĨ MÔ TOÀN CẦU & FED ---
 # =====================================================================
-print("2. Đang kéo dữ liệu Dòng tiền, Vĩ mô Thế giới và Thanh khoản FED...")
+print("2. Đang kéo dữ liệu Dòng tiền, Vĩ mô Thế giới và Thanh khoản FED từ 2011-06...")
 
 # Khối ngoại & Tự doanh
 try:
     headers = {'User-Agent': 'Mozilla/5.0'}
     for flow_type, url_endpoint in [('NET_FOREIGN_FLOW', 'foreign_trading'), ('NET_PROP_FLOW', 'proprietary_trading')]:
-        # Tăng size=4000 để phủ kín 13 năm (từ 2014 đến nay)
-        url = f"https://finfo-api.vndirect.com.vn/v4/{url_endpoint}?q=code:VNINDEX~date:gte:2014-01-01&sort=date&size=4000"
+        url = f"https://finfo-api.vndirect.com.vn/v4/{url_endpoint}?q=code:VNINDEX~date:gte:{START_FETCH_DATE}&sort=date&size=5000"
         res = requests.get(url, headers=headers, timeout=15)
         if res.status_code == 200 and 'data' in res.json() and res.json()['data']:
             df = pd.DataFrame(res.json()['data'])
-            df[flow_type] = df['buyVal'] - df['sellVal']
+            df[flow_type] = pd.to_numeric(df['buyVal'], errors='coerce') - pd.to_numeric(df['sellVal'], errors='coerce')
             df = df[['date', flow_type]].rename(columns={'date': 'Date'}).set_index('Date')
             df = clean_index(df)
             local_df = pd.concat([local_df, df[~df.index.duplicated(keep='last')]], axis=1)
@@ -117,40 +118,42 @@ yf_symbols = {
     'CL=F': 'OIL',
     'JPY=X': 'JPY_USD',
     'VND=X': 'USD_VND',
-    'CNY=X': 'USD_CNY', 
+    'CNY=X': 'USD_CNY',
     'VNQ': 'US_REAL_ESTATE'
 }
 try:
-    # Tải dữ liệu chính xác từ 2014-01-01
-    global_df = yf.download(list(yf_symbols.keys()), start=start_date.strftime('%Y-%m-%d'), progress=False)['Close'].rename(columns=yf_symbols)
-    global_df = clean_index(global_df)
-    
-    # CHUYỂN HỘ KHẨU TỶ GIÁ USD/VND VỀ VN
-    if 'USD_VND' in global_df.columns:
-        local_df = pd.concat([local_df, global_df[['USD_VND']]], axis=1)
-        global_df.drop(columns=['USD_VND'], inplace=True)
-        
+    raw_yf = yf.download(list(yf_symbols.keys()), start=START_FETCH_DATE, progress=False, auto_adjust=False)
+    if raw_yf is not None and not raw_yf.empty:
+        close_yf = raw_yf['Close'] if 'Close' in raw_yf else raw_yf
+        global_df = close_yf.rename(columns=yf_symbols)
+        global_df = clean_index(global_df)
+
+        # CHUYỂN HỘ KHẨU TỶ GIÁ USD/VND VỀ VN & CHUẨN HÓA ĐƠN VỊ 2011-2013
+        if 'USD_VND' in global_df.columns:
+            usd_vnd_s = pd.to_numeric(global_df['USD_VND'], errors='coerce')
+            usd_vnd_s = usd_vnd_s.apply(lambda x: x * 1000.0 if (pd.notna(x) and 10.0 <= x <= 40.0) else x)
+            usd_vnd_s = usd_vnd_s.apply(lambda x: np.nan if (pd.notna(x) and (x < 15000.0 or x > 35000.0)) else x)
+            local_df = pd.concat([local_df, usd_vnd_s.to_frame('USD_VND')], axis=1)
+            global_df.drop(columns=['USD_VND'], inplace=True)
+    else:
+        global_df = pd.DataFrame()
 except Exception:
     global_df = pd.DataFrame()
 
 # VN10Y (Từ TradingView)
-try:
-    # Tăng n_bars lên 4000 để lấy đủ dữ liệu từ 2014
-    vn10y_raw = tv.get_hist(symbol='VN10Y', exchange='TVC', interval=Interval.in_daily, n_bars=4000)
-    if vn10y_raw is not None and not vn10y_raw.empty:
-        vn10y_df = vn10y_raw[['close']].rename(columns={'close': 'VN10Y'})
-        vn10y_df = clean_index(vn10y_df)
-        local_df = pd.concat([local_df, vn10y_df], axis=1)
-except Exception:
-    pass
+if tv is not None and Interval is not None:
+    try:
+        vn10y_raw = tv.get_hist(symbol='VN10Y', exchange='TVC', interval=Interval.in_daily, n_bars=5000)
+        if vn10y_raw is not None and not vn10y_raw.empty:
+            vn10y_df = vn10y_raw[['close']].rename(columns={'close': 'VN10Y'})
+            vn10y_df = clean_index(vn10y_df)
+            local_df = pd.concat([local_df, vn10y_df], axis=1)
+    except Exception:
+        pass
 
-# FED Liquidity
+# FED Liquidity (100% Raw Data - Không dùng ffill/fillna)
 try:
-    # Kéo mượt mà từ 2014-01-01
     fred_df = web.DataReader(['WALCL', 'WTREGEN', 'RRPONTSYD'], 'fred', start_date, end_date)
-    # WALCL và WTREGEN là dữ liệu tuần (weekly), RRPONTSYD là hàng ngày (daily)
-    # Bắt buộc ffill() các cột tuần trước khi tính toán để tránh NaN lan truyền vào FED_LIQUIDITY (83.5% rỗng)
-    fred_df = fred_df.ffill()
     fred_df['FED_LIQUIDITY'] = fred_df['WALCL'] - fred_df['WTREGEN'] - fred_df['RRPONTSYD']
     fred_df = fred_df[['FED_LIQUIDITY']]
     fred_df = clean_index(fred_df)
@@ -160,16 +163,14 @@ except Exception:
 # =====================================================================
 # --- PHẦN 5: HỢP NHẤT & GỌT RÁC ---
 # =====================================================================
-print("5. Đang xử lý hợp nhất và gọt bỏ dữ liệu thừa...")
+print("5. Đang xử lý hợp nhất và giữ trọn dữ liệu từ 2011-06-01...")
 combo_df = pd.concat([local_df, global_df, fred_df], axis=1, join='outer')
 
-# CHÉM BỎ QUÁ KHỨ THỪA: Chỉ giữ dữ liệu từ đúng 01/01/2014 trở đi
-combo_df = combo_df[combo_df.index >= '2014-01-01']
-
-# (Đã bỏ màng lọc xóa ngày VNINDEX bị NaN để giữ trọn vẹn nhịp đập vĩ mô Quốc tế)
+# Giữ dữ liệu từ đúng 01/06/2011 trở đi (đủ vùng đệm cho toàn bộ năm 2012)
+combo_df = combo_df[combo_df.index >= START_FETCH_DATE]
 
 # Sắp xếp lại thời gian từ mới nhất xuống cũ nhất
-combo_df = combo_df.round(4).sort_index(ascending=False)
+combo_df = combo_df.apply(pd.to_numeric, errors='coerce').round(4).sort_index(ascending=False)
 combo_df.index.name = 'Date'
 
 # =====================================================================
@@ -179,7 +180,7 @@ print("6. Đang xuất CSV...")
 def update_csv(filename, new_df):
     if not new_df.empty:
         new_df.to_csv(filename)
-        print(f"✅ Đã đóng gói: {filename}")
+        print(f"✅ Đã đóng gói: {filename} ({len(new_df):,} dòng | {new_df.index.min().strftime('%Y-%m-%d')} -> {new_df.index.max().strftime('%Y-%m-%d')})")
 
 # Xuất file tổng
 update_csv('markets_database10years.csv', combo_df)
@@ -198,4 +199,4 @@ if global_cols:
     global_macro_clean = combo_df[global_cols]
     update_csv('global_markets_database10years.csv', global_macro_clean)
 
-print("🎉 HOÀN TẤT! Dữ liệu đã gọt từ 2014, giữ nguyên vĩ mô quốc tế các ngày lễ.")
+print("🎉 HOÀN TẤT! Dữ liệu gốc 100% (không fill) đã phủ kín từ 06/2011 đến nay.")
