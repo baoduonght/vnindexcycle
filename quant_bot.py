@@ -516,7 +516,7 @@ def run_ai_quant_system(
         full_idx = backtest_start_idx + i
         date = backtest['Date'].iloc[i]
         date_str = date.strftime('%Y-%m-%d')
-        known_date = prev_date_map.get(date)
+        known_date = df_clean_sorted.loc[df_clean_sorted['Date'] < date, 'Date'].iloc[-1] if (df_clean_sorted['Date'] < date).any() else None
 
         # -------------------------------------------------------------
         # 1. ĐẦU PHIÊN: CỘNG LÃI QUA ĐÊM CHO TIỀN MẶT NHÀN RỖI
