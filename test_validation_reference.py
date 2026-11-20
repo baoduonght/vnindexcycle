@@ -174,7 +174,9 @@ class ValidationWorkflowTests(unittest.TestCase):
         self.assertNotIn('schedule:', self.workflow)
         self.assertIn('contents: read', self.workflow)
         self.assertNotIn('contents: write', self.workflow)
-        self.assertNotIn('secrets.', self.workflow)
+        self.assertNotIn('TELEGRAM_BOT_TOKEN', self.workflow)
+        self.assertNotIn('TELEGRAM_CHAT_ID', self.workflow)
+        self.assertIn('FHSC_API_KEY: ${{ secrets.FHSC_API_KEY }}', self.workflow)
         self.assertNotIn('git push', self.workflow)
         self.assertNotIn('train_bot.py', self.workflow)
         self.assertNotIn('TELEGRAM', self.workflow)
@@ -186,6 +188,12 @@ class ValidationWorkflowTests(unittest.TestCase):
         self.assertLess(self.workflow.index('python download_all_data.py'),
                         self.workflow.index('python validate_winrate.py'))
         self.assertIn("python-version: '3.11'", self.workflow)
+
+    def test_validation_installs_optional_last_resort(self):
+        install = self.workflow.split('      - name: Install replay dependencies', 1)[1].split(
+            '      - name: Download one shared OHLCV snapshot', 1)[0]
+        self.assertIn('pip install git+https://github.com/rongardF/tvdatafeed.git', install)
+        self.assertIn('Optional TradingView fallback unavailable', install)
 
     def test_inputs_are_quoted_environment_values_and_artifacts_always_upload(self):
         self.assertIn("default: '2026-11-19'", self.workflow)
