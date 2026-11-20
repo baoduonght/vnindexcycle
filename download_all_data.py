@@ -10,6 +10,7 @@ import os
 import sys
 import time
 import datetime
+import argparse
 import csv
 import hashlib
 import io
@@ -77,8 +78,78 @@ DATA_QUALITY_REPORT = {
     'created_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
     'requested_range': {'start': START_DATE_STR, 'end': NOW_DATE_STR},
     'strict_ohlcv_validation': True,
+    'validation_scope': 'requested_date_window',
     'symbols': {},
 }
+
+
+def build_download_window(start_date, end_date):
+    """Return an explicit, inclusive daily window using UTC API timestamps."""
+    try:
+        start = datetime.date.fromisoformat(start_date)
+        end = datetime.date.fromisoformat(end_date)
+    except (TypeError, ValueError) as exc:
+        raise ValueError('Download dates must be ISO YYYY-MM-DD dates') from exc
+    if start.isoformat() != start_date or end.isoformat() != end_date:
+        raise ValueError('Download dates must be canonical YYYY-MM-DD dates')
+    if start > end:
+        raise ValueError('--start-date must not be later than --end-date')
+    if end == datetime.date.max:
+        raise ValueError('--end-date is outside the supported UTC timestamp range')
+    utc = datetime.timezone.utc
+    start_time = datetime.datetime.combine(start, datetime.time.min, tzinfo=utc)
+    next_day = datetime.datetime.combine(end + datetime.timedelta(days=1),
+                                         datetime.time.min, tzinfo=utc)
+    return {'start': start.isoformat(), 'end': end.isoformat(),
+            'from_ts': int(start_time.timestamp()),
+            'to_ts': int(next_day.timestamp()) - 1}
+
+
+def _filter_source_window(rows, start_date=None, end_date=None):
+    """Keep every row in a declared date window, including malformed records.
+
+    Unknown/missing dates remain for strict OHLCV rejection. Only records with
+    valid dates known to be outside the requested range are excluded here.
+    """
+    start = datetime.date.fromisoformat(start_date) if start_date is not None else None
+    end = datetime.date.fromisoformat(end_date) if end_date is not None else None
+    if start is not None and start.isoformat() != start_date:
+        raise ValueError('Window start must be canonical YYYY-MM-DD')
+    if end is not None and end.isoformat() != end_date:
+        raise ValueError('Window end must be canonical YYYY-MM-DD')
+    if start is not None and end is not None and start > end:
+        raise ValueError('Window start must not exceed window end')
+    records = list(rows)
+    selected = []
+    counts = {'input_rows': len(records), 'kept_rows': 0,
+              'excluded_before_start': 0, 'excluded_after_end': 0,
+              'invalid_dates_kept': 0}
+    for row in records:
+        try:
+            raw = row['Date']
+            if isinstance(raw, datetime.datetime):
+                stamp = raw.date().isoformat()
+            elif isinstance(raw, datetime.date):
+                stamp = raw.isoformat()
+            elif isinstance(raw, str):
+                stamp = raw.strip()
+            else:
+                raise ValueError('Missing or non-ISO date')
+            parsed = datetime.date.fromisoformat(stamp)
+            if parsed.isoformat() != stamp:
+                raise ValueError('Noncanonical date')
+        except (KeyError, TypeError, ValueError, OverflowError, AttributeError):
+            selected.append(row)
+            counts['invalid_dates_kept'] += 1
+            continue
+        if start is not None and parsed < start:
+            counts['excluded_before_start'] += 1
+        elif end is not None and parsed > end:
+            counts['excluded_after_end'] += 1
+        else:
+            selected.append(row)
+    counts['kept_rows'] = len(selected)
+    return selected, counts
 
 
 def _symbol_report(symbol):
@@ -104,6 +175,22 @@ def _record_rejected_source(symbol, source, rows, error):
     })
     write_json_atomic(QUALITY_REPORT_PATH, DATA_QUALITY_REPORT)
     print(f'\n   [REJECT {source}] {error}', flush=True)
+
+
+def _record_window_crop(symbol, source, rows, counts, start_date, end_date):
+    entry = {'source': source, 'status': 'window_filter',
+             'start': start_date, 'end': end_date, **counts}
+    if counts['excluded_before_start'] or counts['excluded_after_end']:
+        key = re.sub(r'[^A-Za-z0-9_-]+', '_', source).strip('_')
+        evidence = Path(DATA_DIR)/'_window_input'/f'{symbol}_{key}.json'
+        write_json_atomic(evidence, {'symbol': symbol, 'source': source,
+                                    'requested_start': start_date,
+                                    'requested_end': end_date,
+                                    'reason': 'Outside explicitly requested download window',
+                                    'original_candidate_rows': rows, 'counts': counts})
+        entry['original_candidate_evidence'] = str(evidence)
+    _symbol_report(symbol)['attempts'].append(entry)
+    write_json_atomic(QUALITY_REPORT_PATH, DATA_QUALITY_REPORT)
 
 def _iter_ticker_sources(symbol):
     """
@@ -223,12 +310,18 @@ def _iter_ticker_sources(symbol):
             _record_fetch_error(symbol, 'Vnstock (Market)', exc)
 
 
-def fetch_ticker_multi_source(symbol):
+def fetch_ticker_multi_source(symbol, history_start=None, history_end=None):
     """Choose the first complete provider dataset passing the replay contract."""
-    candidates = ((source, frame.to_dict('records'))
-                  for frame, source in _iter_ticker_sources(symbol))
+    def candidates():
+        for frame, source in _iter_ticker_sources(symbol):
+            rows = frame.to_dict('records')
+            if history_start is not None or history_end is not None:
+                selected, counts = _filter_source_window(rows, history_start, history_end)
+                _record_window_crop(symbol, source, rows, counts, history_start, history_end)
+                rows = selected
+            yield source, rows
     rows, source = select_valid_source(
-        candidates, symbol, min_rows=51,
+        candidates(), symbol, min_rows=51,
         on_rejected=lambda source, rows, error:
             _record_rejected_source(symbol, source, rows, error))
     report = _symbol_report(symbol)
@@ -242,7 +335,22 @@ def fetch_ticker_multi_source(symbol):
     frame['Date'] = pd.to_datetime(frame['Date'])
     return frame, source
 
-def main():
+def main(argv=None):
+    global START_DATE_STR, START_TS, NOW_DATE_STR, NOW_TS
+    parser = argparse.ArgumentParser(description='Download validated daily OHLCV for an explicit UTC date window.')
+    parser.add_argument('--start-date', default='2012-01-01',
+                        help='Inclusive history start; comparison uses 2021 warmup for a 2022 replay.')
+    parser.add_argument('--end-date', default=datetime.datetime.now(datetime.timezone.utc).date().isoformat(),
+                        help='Inclusive history end, YYYY-MM-DD (default: current UTC date).')
+    args = parser.parse_args(argv)
+    try:
+        window = build_download_window(args.start_date, args.end_date)
+    except (ValueError, OverflowError, OSError) as exc:
+        parser.error(str(exc))
+    START_DATE_STR, NOW_DATE_STR = window['start'], window['end']
+    START_TS, NOW_TS = window['from_ts'], window['to_ts']
+    DATA_QUALITY_REPORT['requested_range'] = {**window, 'timestamp_timezone': 'UTC'}
+    write_json_atomic(QUALITY_REPORT_PATH, DATA_QUALITY_REPORT)
     print("=" * 75)
     print("🚀 BỘ TẢI DỮ LIỆU ĐỊNH LƯỢNG CHỨNG KHOÁN VIỆT NAM (2012 - NAY)")
     print(f"📅 Khung thời gian: Từ {START_DATE_STR} đến {NOW_DATE_STR}")
@@ -263,7 +371,8 @@ def main():
     for idx, sym in enumerate(target_symbols, 1):
         print(f"[{idx:02d}/{total_targets:02d}] Đang tải {sym:<8} ... ", end="", flush=True)
         
-        df, source = fetch_ticker_multi_source(sym)
+        df, source = fetch_ticker_multi_source(
+            sym, history_start=START_DATE_STR, history_end=NOW_DATE_STR)
         if df is not None and not df.empty:
             file_path = os.path.join(DATA_DIR, f"{sym}.csv")
             rows = validate_rows(df.to_dict('records'), sym, min_rows=51)
@@ -302,7 +411,7 @@ def main():
     if all_master_rows:
         master_df = pd.concat(all_master_rows, ignore_index=True)
         master_df = master_df.sort_values(by=['Date', 'Ticker']).reset_index(drop=True)
-        master_file = "vn_database_all_tickers_2012_2026.csv"
+        master_file = f"vn_database_all_tickers_{START_DATE_STR[:4]}_{NOW_DATE_STR[:4]}.csv"
         write_text_atomic(master_file, master_df.to_csv(index=False, float_format='%.17g'))
         print(f"✅ Đã xuất File Master: {master_file} ({len(master_df):,} dòng dữ liệu)")
 
