@@ -8,6 +8,11 @@ on:
         type: string
         default: '2026-11-19'
         required: true
+      history_start:
+        description: 'Warmup data start; replay still begins in 2022 (requires 200 prior VNINDEX bars)'
+        type: string
+        default: '2021-01-01'
+        required: true
       allow_missing:
         description: 'Explicit unavailable historical symbols, comma-separated'
         type: string
@@ -42,7 +47,10 @@ jobs:
         run: python -m pip install -r requirements-winrate.txt
 
       - name: Download one shared OHLCV snapshot
-        run: python download_all_data.py
+        env:
+          HISTORY_START: ${{ inputs.history_start }}
+          END_DATE: ${{ inputs.end_date }}
+        run: python download_all_data.py --start-date "$HISTORY_START" --end-date "$END_DATE"
 
       - name: Compare all modes against balanced
         shell: bash
