@@ -1,5 +1,5 @@
 {
-  "created_utc": "2026-11-20T19:05:47.922498+00:00",
+  "created_utc": "2026-11-20T19:28:43.725356+00:00",
   "entry_mode": "balanced",
   "entry_policy": {
     "name": "balanced",
@@ -23,14 +23,14 @@
     "atr_multiple": 2.2
   },
   "sha256": {
-    "data/markets_database10years.csv": "7c1fb9a619c349180048a8da4226f0573c03bf9d18cb5d363e65b2d4e3fbaa12",
+    "data/markets_database10years.csv": "a8f5785e9136161d200e7d24cb4390d3f735e76e12c801a754c940656c4ea801",
     "execution_policy.py": "0e049b475a657cc893269816888978538a676984182dbf81142a9bc737acfe9f",
-    "models/xgboost_model_2022.json": "1b9369841dbd2ebd8bb08a21406734fce6ce07b4681660167187f55f4d851739",
-    "models/xgboost_model_2023.json": "2b9e571ff2b8ab3db2f61ecb478ca13bd7505c840013c8fe44bfb2417212324b",
-    "models/xgboost_model_2024.json": "7989c983627ec70fc8a3551fcd3119a043bc246ea76f84aa02fb6ed78ec548ba",
-    "models/xgboost_model_2025.json": "9f1345c6e400c56aa1f918ca57db25bacc626d202b1591f86e7350577775304a",
-    "models/xgboost_model_2026.json": "9d35ae80c654cbcca160977d9c2111d525dbe8f896809fde713ead6a750d07c8",
-    "models/xgboost_ultimate.json": "9d35ae80c654cbcca160977d9c2111d525dbe8f896809fde713ead6a750d07c8",
+    "models/xgboost_model_2022.json": "75db4f88eb0c8aa6f8a78629dc38ec37eb2250f3974e3d5ed9e1d2f3ec7328eb",
+    "models/xgboost_model_2023.json": "0f507cb4d58ed354ad387a7725ed90574c75fa33ce52273cf10b12baa67045e0",
+    "models/xgboost_model_2024.json": "fe19df9a16780d61b0278ceb5727a66186549b4cd480c52943acfde3406257f8",
+    "models/xgboost_model_2025.json": "06316d773ab60d30630efee5e1169be0d4bd1115fe5e3a221e0e2d0b8e296bed",
+    "models/xgboost_model_2026.json": "0ca5aa4d8f96ec69064d14ab1e2921afa290adf65e22ebd1f17e017730270a7b",
+    "models/xgboost_ultimate.json": "0ca5aa4d8f96ec69064d14ab1e2921afa290adf65e22ebd1f17e017730270a7b",
     "quant_bot.py": "edf1e782addfdc69112d49b31c9b3e6c429b2c756ec53f7526dec279f0fdcf0f",
     "run_audit.py": "8da3237ef853448f6328998b9815f8f4eb2bff59df8be8c41e72151fe56e8c23",
     "vn30_universe.py": "d4b2769f4b307bf465c68b52ce4b9e0d2cefafb048db1354f2dd66f9dd019e6f"
@@ -42,7 +42,7 @@
     "low": "2833d353c307a51bbc5392f0b04194781067463f84012015a07fec6dcd80c5c0",
     "close": "dc6f7756147cf0e929321443d5fed982bf47daad31598e838cac535c0ff4b5d5",
     "volume": "58fcb41cc153950d4c30700264b512377edcaae2511d7b2b1fc3a192543e5f30",
-    "ai_scores": "b9183490b8f7211e2283aee67181bbd00310cf09a8f8b3fe328347ed641e4835"
+    "ai_scores": "e27042bd3325976c1a454dccab0ca0baa9dc3b6816418fd43a38d7a94a855790"
   },
   "versions": {
     "python": "3.11.18",
