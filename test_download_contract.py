@@ -61,6 +61,179 @@ def compile_window_helpers(namespace=None):
     return namespace
 
 
+class YahooTimestampDouble:
+    """Small aware-timestamp surface needed by the Yahoo normalizer."""
+
+    def __init__(self, value):
+        self.value = value
+
+    def tz_convert(self, timezone_name):
+        if timezone_name == 'Asia/Ho_Chi_Minh':
+            offset = datetime_module.timezone(datetime_module.timedelta(hours=7))
+        elif timezone_name == 'UTC':
+            offset = datetime_module.timezone.utc
+        else:
+            raise AssertionError(f'unexpected fixture timezone: {timezone_name}')
+        self.value = self.value.astimezone(offset)
+        return self
+
+    def date(self):
+        return self.value.date()
+
+
+class YahooPandasDouble:
+    def to_datetime(self, value, *, unit, utc):
+        if unit != 's' or utc is not True:
+            raise AssertionError('Yahoo timestamps must be interpreted as UTC seconds')
+        return YahooTimestampDouble(datetime.fromtimestamp(
+            value, tz=datetime_module.timezone.utc))
+
+    def DataFrame(self, rows, *, columns):
+        return SimpleNamespace(rows=rows, columns=list(columns))
+
+
+class VnstockDateSeriesDouble:
+    """Small pandas datetime-series surface used by the Vnstock normalizer."""
+
+    def __init__(self, values):
+        self.values = list(values)
+        self.dt = self
+
+    def __iter__(self):
+        return iter(self.values)
+
+    @property
+    def tz(self):
+        return self.values[0].tzinfo
+
+    def tz_convert(self, timezone_name):
+        if timezone_name != 'Asia/Ho_Chi_Minh':
+            raise AssertionError(f'unexpected timezone: {timezone_name}')
+        vietnam = datetime_module.timezone(datetime_module.timedelta(hours=7))
+        if self.tz is None:
+            raise TypeError('cannot convert timezone-naive timestamps')
+        return VnstockDateSeriesDouble(value.astimezone(vietnam) for value in self)
+
+    def tz_localize(self, timezone):
+        if timezone is not None:
+            raise AssertionError('expected timezone removal')
+        return VnstockDateSeriesDouble(value.replace(tzinfo=None) for value in self)
+
+    def normalize(self):
+        return VnstockDateSeriesDouble(
+            value.replace(hour=0, minute=0, second=0, microsecond=0)
+            for value in self)
+
+
+class VnstockIndexDouble:
+    def __init__(self, values, *, dtype='int64', name=None):
+        self.values = list(values)
+        self.dtype = dtype
+        self.name = name
+
+    def __len__(self):
+        return len(self.values)
+
+
+class VnstockFrameDouble:
+    """The frame operations used to normalize Vnstock history."""
+
+    def __init__(self, rows, *, index=None):
+        self.rows = copy.deepcopy(rows)
+        self.index = index or VnstockIndexDouble(range(len(self.rows)))
+
+    @property
+    def columns(self):
+        return list(dict.fromkeys(key for row in self.rows for key in row))
+
+    @property
+    def empty(self):
+        return not self.rows
+
+    def __len__(self):
+        return len(self.rows)
+
+    def copy(self):
+        return VnstockFrameDouble(self.rows, index=self.index)
+
+    def sort_values(self, column):
+        return VnstockFrameDouble(sorted(self.rows, key=lambda row: row[column]))
+
+    def reset_index(self, *, drop=False):
+        if drop:
+            return VnstockFrameDouble(
+                self.rows, index=VnstockIndexDouble(range(len(self.rows))))
+        key = self.index.name or 'index'
+        return VnstockFrameDouble([{key: value, **row}
+                                   for value, row in zip(self.index.values, self.rows,
+                                                         strict=True)])
+
+    def rename(self, *, columns, inplace):
+        renamed = [{columns.get(key, key): value for key, value in row.items()}
+                   for row in self.rows]
+        if inplace:
+            self.rows = renamed
+            return None
+        return VnstockFrameDouble(renamed)
+
+    def __getitem__(self, key):
+        if isinstance(key, str):
+            return [row[key] for row in self.rows]
+        return VnstockFrameDouble([{column: row[column] for column in key}
+                                   for row in self.rows])
+
+    def __setitem__(self, key, values):
+        for row, value in zip(self.rows, values, strict=True):
+            row[key] = value
+
+
+class VnstockPandasDouble:
+    def __init__(self):
+        self.api = SimpleNamespace(types=SimpleNamespace(
+            is_datetime64_any_dtype=lambda dtype:
+                str(dtype).startswith('datetime64[')))
+
+    def DataFrame(self, data, *, index):
+        columns = list(data)
+        values = [list(data[column]) for column in columns]
+        if any(len(column_values) != len(index) for column_values in values):
+            raise AssertionError('constructed columns and index must have equal lengths')
+        rows = [dict(zip(columns, row_values, strict=True))
+                for row_values in zip(*values, strict=True)]
+        return VnstockFrameDouble(rows, index=index)
+
+    def to_datetime(self, values, *, errors):
+        if errors != 'raise':
+            raise AssertionError('Vnstock dates must reject invalid input')
+        return VnstockDateSeriesDouble(datetime.fromisoformat(value)
+                                       if isinstance(value, str) else value
+                                       for value in values)
+
+
+def compile_yahoo_helpers():
+    namespace = {'re': re, 'pd': YahooPandasDouble()}
+    compile_function('_yahoo_symbol', namespace)
+    compile_function('_normalize_yahoo_chart', namespace)
+    return namespace
+
+
+def yahoo_payload(timestamps=None, currency='VND', **arrays):
+    """Synthetic Yahoo-shaped response, independent of live symbol coverage."""
+    if timestamps is None:
+        timestamps = [int(datetime(2021, 1, 1, 12, tzinfo=datetime_module.timezone.utc).timestamp())]
+    quote = {'open': [100.0], 'high': [110.0], 'low': [90.0],
+             'close': [105.0], 'volume': [1000]}
+    quote.update(arrays)
+    meta = {'exchangeTimezoneName': 'Asia/Ho_Chi_Minh'}
+    if currency is not None:
+        meta['currency'] = currency
+    return {'chart': {'result': [{
+        'timestamp': timestamps,
+        'meta': meta,
+        'indicators': {'quote': [quote]},
+    }], 'error': None}}
+
+
 def window_fixture():
     """Reported anomaly dates and envelopes, with otherwise synthetic bars."""
     old = bars(2)
@@ -551,11 +724,385 @@ class DownloadCliTests(unittest.TestCase):
                 self.assertEqual((namespace['START_TS'], namespace['NOW_TS']), (-1, -1))
 
 
+class VnstockHistoryContractTests(unittest.TestCase):
+    def setUp(self):
+        self.normalize = compile_function('_normalize_vnstock_history',
+                                          {'pd': VnstockPandasDouble()})
+
+    def test_lowercase_history_fields_normalize_without_changing_ohlcv_values(self):
+        history = VnstockFrameDouble([
+            {'time': '2021-01-01 20:00:00', 'open': 100.25,
+             'high': 111.0, 'low': 90.0, 'close': 105.75, 'volume': 123},
+            {'time': '2021-01-02', 'open': 101.5,
+             'high': 112.0, 'low': None, 'close': 106.25, 'volume': 456},
+        ])
+        before = copy.deepcopy(history.rows)
+
+        frame = self.normalize('FPT', history)
+
+        self.assertEqual(frame.columns, ['Date', 'Open', 'High', 'Low', 'Close', 'Volume'])
+        self.assertEqual(frame.rows, [
+            {'Date': datetime(2021, 1, 1), 'Open': 100.25, 'High': 111.0,
+             'Low': 90.0, 'Close': 105.75, 'Volume': 123},
+            {'Date': datetime(2021, 1, 2), 'Open': 101.5, 'High': 112.0,
+             'Low': None, 'Close': 106.25, 'Volume': 456},
+        ])
+        self.assertEqual(history.rows, before)
+
+    def test_timezone_conversion_uses_vietnam_local_trading_date(self):
+        utc = datetime_module.timezone.utc
+        history = VnstockFrameDouble([
+            {'time': datetime(2021, 1, 1, 14, tzinfo=utc), 'open': 1,
+             'high': 2, 'low': 0, 'close': 1, 'volume': 3},
+            {'time': datetime(2021, 1, 1, 18, tzinfo=utc), 'open': 4,
+             'high': 5, 'low': 3, 'close': 4, 'volume': 6},
+        ])
+
+        frame = self.normalize('FPT', history)
+
+        self.assertEqual([row['Date'] for row in frame.rows], [
+            datetime(2021, 1, 1), datetime(2021, 1, 2),
+        ])
+        self.assertTrue(all(row['Date'].tzinfo is None for row in frame.rows))
+
+    def test_missing_time_or_ohlcv_fields_are_rejected(self):
+        full = {'time': datetime(2021, 1, 1), 'open': 1, 'high': 2,
+                'low': 0, 'close': 1, 'volume': 3}
+        for field in ('time', 'open', 'high', 'low', 'close', 'volume'):
+            with self.subTest(missing=field):
+                row = dict(full)
+                del row[field]
+                with self.assertRaisesRegex(ValueError, 'missing fields'):
+                    self.normalize('FPT', VnstockFrameDouble([row]))
+
+    def test_datetime_index_is_a_valid_date_source_but_range_index_is_not(self):
+        utc = datetime_module.timezone.utc
+        index = VnstockIndexDouble(
+            [datetime(2021, 1, 1, 18, tzinfo=utc)],
+            dtype='datetime64[ns, UTC]', name='time')
+        history = VnstockFrameDouble(
+            [{'open': 1, 'high': 2, 'low': 0, 'close': 1, 'volume': 3}],
+            index=index)
+
+        frame = self.normalize('FPT', history)
+
+        self.assertEqual(frame.rows, [{'Date': datetime(2021, 1, 2), 'Open': 1,
+                                       'High': 2, 'Low': 0, 'Close': 1,
+                                       'Volume': 3}])
+        row = {'open': 1, 'high': 2, 'low': 0, 'close': 1, 'volume': 3}
+        with self.assertRaisesRegex(ValueError, 'time/date index'):
+            self.normalize('FPT', VnstockFrameDouble([row]))
+
+    def test_empty_history_returns_none(self):
+        self.assertIsNone(self.normalize('FPT', VnstockFrameDouble([])))
+
+    def test_fhsc_requests_daily_bars_from_the_index_or_equity_endpoint(self):
+        def run_candidate(symbol, *, api_key=None):
+            calls = []
+            errors = []
+            history = VnstockFrameDouble([
+                {'time': row['Date'], 'open': row['Open'], 'high': row['High'],
+                 'low': row['Low'], 'close': row['Close'], 'volume': row['Volume']}
+                for row in bars(first=date(2021, 1, 1))
+            ])
+
+            def market(provider):
+                calls.append(('market', provider))
+
+                def instrument(kind, requested_symbol):
+                    calls.append((kind, requested_symbol))
+
+                    def ohlcv(**kwargs):
+                        calls.append(('ohlcv', kwargs))
+                        return history
+
+                    return SimpleNamespace(ohlcv=ohlcv)
+
+                return SimpleNamespace(index=lambda value: instrument('index', value),
+                                       equity=lambda value: instrument('equity', value))
+
+            def get(_url, **_kwargs):
+                return SimpleNamespace(status_code=404, raise_for_status=lambda: None,
+                                       json=lambda: {})
+
+            def yahoo_symbol(requested_symbol):
+                calls.append(('yahoo', requested_symbol))
+                return f'{requested_symbol}.VN'
+
+            namespace = {
+                'os': SimpleNamespace(environ={'FHSC_API_KEY': api_key} if api_key else {}),
+                'requests': SimpleNamespace(get=get), 'Market': market,
+                '_normalize_vnstock_history': self.normalize,
+                '_record_fetch_error': lambda *args: errors.append(args),
+                'START_TS': 1, 'NOW_TS': 2, 'START_DATE_STR': '2021-01-01',
+                'NOW_DATE_STR': '2022-12-31', 'VNSTOCK_OAPI_AVAILABLE': False,
+                'VNSTOCK_AVAILABLE': True, 'TV_DATAFEED_AVAILABLE': False,
+                '_yahoo_symbol': yahoo_symbol,
+                '_normalize_yahoo_chart': lambda *_args: VnstockFrameDouble([]),
+            }
+            iterator = compile_function('_iter_ticker_sources', namespace)
+            if api_key:
+                frame, source = next(iterator(symbol))
+                self.assertEqual(source, 'Vnstock Open API (FHSC)')
+                self.assertEqual(len(frame), 60)
+                self.assertEqual(frame.rows[0]['Date'], datetime(2021, 1, 1))
+            else:
+                self.assertEqual(list(iterator(symbol)), [])
+            self.assertEqual(errors, [])
+            return calls
+
+        for symbol, endpoint in (('VNINDEX', 'index'), ('FPT', 'equity')):
+            with self.subTest(symbol=symbol):
+                self.assertEqual(run_candidate(symbol, api_key='fake-key'), [
+                    ('market', 'fhsc'), (endpoint, symbol),
+                    ('ohlcv', {'start': '2021-01-01', 'end': '2022-12-31',
+                               'interval': '1D', 'compat': 'v6', 'floating': None}),
+                ])
+        self.assertEqual(run_candidate('FPT'), [('yahoo', 'FPT')])
+
+    def test_fhsc_history_request_precedes_yahoo_and_uses_shared_selector(self):
+        iterator = function_named('_iter_ticker_sources')
+        market_calls = calls_named(iterator, 'Market')
+        self.assertEqual(len(market_calls), 1)
+        fhsc_yields = [node for node in ast.walk(iterator)
+                       if isinstance(node, ast.Yield)
+                       and isinstance(node.value, ast.Tuple)
+                       and len(node.value.elts) == 2
+                       and isinstance(node.value.elts[1], ast.Constant)
+                       and node.value.elts[1].value == 'Vnstock Open API (FHSC)']
+        self.assertEqual(len(fhsc_yields), 1)
+        normalize_calls = calls_named(iterator, '_normalize_vnstock_history')
+        self.assertEqual(len(normalize_calls), 1)
+        yahoo_calls = calls_named(iterator, '_yahoo_symbol')
+        self.assertEqual(len(yahoo_calls), 1)
+        self.assertLess(market_calls[0].lineno, normalize_calls[0].lineno)
+        self.assertLess(normalize_calls[0].lineno, fhsc_yields[0].lineno)
+        self.assertLess(fhsc_yields[0].lineno, yahoo_calls[0].lineno)
+
+        fetch = function_named('fetch_ticker_multi_source')
+        selector_calls = [node for node in ast.walk(fetch)
+                          if isinstance(node, ast.Call)
+                          and isinstance(node.func, ast.Name)
+                          and node.func.id == 'select_valid_source']
+        self.assertEqual(len(selector_calls), 1)
+        self.assertIsInstance(selector_calls[0].args[0], ast.Call)
+        self.assertEqual(ast.unparse(selector_calls[0].args[0]), 'candidates()')
+        candidates = next(node for node in fetch.body
+                          if isinstance(node, ast.FunctionDef)
+                          and node.name == 'candidates')
+        self.assertTrue(any(isinstance(node, ast.Call)
+                            and isinstance(node.func, ast.Name)
+                            and node.func.id == '_iter_ticker_sources'
+                            for node in ast.walk(candidates)))
+
+
+class YahooFallbackContractTests(unittest.TestCase):
+    def setUp(self):
+        namespace = compile_yahoo_helpers()
+        self.yahoo_symbol = namespace['_yahoo_symbol']
+        self.normalize = namespace['_normalize_yahoo_chart']
+
+    def test_symbol_mapping_uses_index_identifier_and_exchange_suffix_for_stocks(self):
+        self.assertEqual(self.yahoo_symbol('VNINDEX'), '^VNINDEX.VN')
+        self.assertEqual(self.yahoo_symbol('eib'), 'EIB.VN')
+        self.assertEqual(self.yahoo_symbol('vnm'), 'VNM.VN')
+        self.assertEqual(self.yahoo_symbol('csm'), 'CSM.VN')
+
+    def test_chart_dates_use_exchange_timezone_and_preserve_each_ohlcv_value(self):
+        timestamps = [
+            int(datetime(2021, 1, 1, 20, tzinfo=datetime_module.timezone.utc).timestamp()),
+            int(datetime(2021, 1, 2, 16, tzinfo=datetime_module.timezone.utc).timestamp()),
+        ]
+        payload = yahoo_payload(
+            timestamps, open=[100.25, 101.5], high=[111.0, 112.0],
+            low=[90.0, 91.0], close=[105.75, 106.25], volume=[123, 456])
+        before = copy.deepcopy(payload)
+        frame = self.normalize('FPT', payload)
+        self.assertEqual(payload, before)
+        self.assertEqual(frame.columns, ['Date', 'Open', 'High', 'Low', 'Close', 'Volume'])
+        self.assertEqual(frame.rows, [
+            {'Date': '2021-01-02', 'Open': 0.10025, 'High': 0.111,
+             'Low': 0.09, 'Close': 0.10575, 'Volume': 123},
+            {'Date': '2021-01-02', 'Open': 0.1015, 'High': 0.112,
+             'Low': 0.091, 'Close': 0.10625, 'Volume': 456},
+        ])
+
+    def test_vnindex_values_are_points_and_are_not_currency_scaled(self):
+        payload = yahoo_payload(open=[1712.5], high=[1730.0], low=[1701.0],
+                                close=[1725.25], volume=[0])
+        before = copy.deepcopy(payload)
+        frame = self.normalize('VNINDEX', payload)
+        self.assertEqual(payload, before)
+        self.assertEqual(frame.rows[0], {
+            'Date': '2021-01-01', 'Open': 1712.5, 'High': 1730.0,
+            'Low': 1701.0, 'Close': 1725.25, 'Volume': 0,
+        })
+
+    def test_yahoo_unit_label_is_preserved_as_validated_source_metadata(self):
+        source = 'Yahoo Finance (EIB.VN; VND→thousand VND)'
+        harness = WrapperHarness([(source, FrameDouble(bars(60)))])
+        _frame, selected_source = harness.fetch('EIB')
+        self.assertEqual(selected_source, source)
+        metadata = harness.writes[-1][1]['symbols']['EIB']
+        self.assertEqual(metadata['source'], source)
+        self.assertEqual(metadata['status'], 'validated')
+
+    def test_security_currency_must_be_present_and_vnd_before_scaling(self):
+        for currency in (None, 'USD', ''):
+            with self.subTest(currency=currency), self.assertRaisesRegex(
+                    ValueError, 'currency'):
+                self.normalize('FPT', yahoo_payload(currency=currency))
+
+    def test_required_ohlcv_arrays_and_matching_lengths_are_mandatory(self):
+        for field in ('open', 'high', 'low', 'close', 'volume'):
+            with self.subTest(missing=field):
+                payload = yahoo_payload()
+                del payload['chart']['result'][0]['indicators']['quote'][0][field]
+                with self.assertRaisesRegex(ValueError, 'missing OHLCV arrays'):
+                    self.normalize('FPT', payload)
+        with self.assertRaisesRegex(ValueError, 'array lengths differ'):
+            self.normalize('FPT', yahoo_payload(volume=[1000, 2000]))
+
+    def test_chart_error_is_rejected_and_null_volume_is_preserved_for_strict_validation(self):
+        errored = yahoo_payload()
+        errored['chart']['error'] = {'code': 'Not Found'}
+        with self.assertRaisesRegex(ValueError, 'no result'):
+            self.normalize('FPT', errored)
+
+        start = int(datetime(2021, 1, 1, 12,
+                             tzinfo=datetime_module.timezone.utc).timestamp())
+        timestamps = [start + index * 86400 for index in range(60)]
+        volume = [1000] * len(timestamps)
+        opens = [100.0] * len(timestamps)
+        volume[25] = None
+        opens[24] = None
+        frame = self.normalize('FPT', yahoo_payload(timestamps, volume=volume,
+                                open=opens, high=[110.0] * 60,
+                                low=[90.0] * 60, close=[105.0] * 60))
+        self.assertIsNone(frame.rows[24]['Open'])
+        self.assertIsNone(frame.rows[25]['Volume'])
+        rejected = []
+        chosen, source = select_valid_source(
+            [('Yahoo Finance', frame.rows)], 'FPT', min_rows=51,
+            on_rejected=lambda name, rows, error: rejected.append((name, rows, error)))
+        self.assertIsNone(chosen)
+        self.assertIsNone(source)
+        self.assertEqual(rejected[0][0], 'Yahoo Finance')
+        self.assertIsNone(rejected[0][1][24]['Open'])
+        self.assertIsNone(rejected[0][1][25]['Volume'])
+
+    def test_yahoo_request_is_late_and_flows_through_shared_source_validation(self):
+        iterator = function_named('_iter_ticker_sources')
+        yahoo_calls = [node for node in ast.walk(iterator)
+                       if isinstance(node, ast.Call)
+                       and isinstance(node.func, ast.Name)
+                       and node.func.id == '_yahoo_symbol']
+        self.assertEqual(len(yahoo_calls), 1)
+        yahoo_line = yahoo_calls[0].lineno
+        earlier_yields = [node.lineno for node in ast.walk(iterator)
+                          if isinstance(node, ast.Yield) and node.lineno < yahoo_line]
+        self.assertTrue(earlier_yields, 'Yahoo must follow the existing providers')
+        vnstock_calls = [node for node in ast.walk(iterator)
+                         if isinstance(node, ast.Call)
+                         and isinstance(node.func, ast.Name)
+                         and node.func.id == 'Market']
+        self.assertTrue(vnstock_calls)
+        self.assertLess(max(node.lineno for node in vnstock_calls), yahoo_line,
+                        'Yahoo must follow the Vnstock Market provider')
+
+        yahoo_requests = [node for node in ast.walk(iterator)
+                          if isinstance(node, ast.Call)
+                          and isinstance(node.func, ast.Attribute)
+                          and isinstance(node.func.value, ast.Name)
+                          and node.func.value.id == 'requests'
+                          and node.func.attr == 'get' and node.lineno > yahoo_line]
+        self.assertEqual(len(yahoo_requests), 1)
+        timeout = next((keyword.value for keyword in yahoo_requests[0].keywords
+                        if keyword.arg == 'timeout'), None)
+        self.assertIsNotNone(timeout)
+        self.assertGreater(ast.literal_eval(timeout), 0)
+        self.assertTrue(any(
+            isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == '_record_fetch_error' and node.lineno > yahoo_line
+            for node in ast.walk(iterator)))
+        yahoo_yields = [node for node in ast.walk(iterator)
+                        if isinstance(node, ast.Yield)
+                        and node.lineno > yahoo_line
+                        and isinstance(node.value, ast.Tuple)
+                        and len(node.value.elts) == 2
+                        and isinstance(node.value.elts[1], ast.JoinedStr)
+                        and any(isinstance(part, ast.Constant)
+                                and isinstance(part.value, str)
+                                and part.value.startswith('Yahoo Finance (')
+                                for part in node.value.elts[1].values)]
+        self.assertEqual(len(yahoo_yields), 1)
+        tv_calls = [node for node in ast.walk(iterator)
+                    if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == 'TvDatafeed']
+        self.assertTrue(tv_calls)
+        self.assertGreater(min(node.lineno for node in tv_calls),
+                           yahoo_yields[0].lineno,
+                           'TradingView must be the last resort after Yahoo')
+        provider_labels = [node.value for node in ast.walk(iterator)
+                           if isinstance(node, ast.Constant)
+                           and isinstance(node.value, str)]
+        self.assertIn('VND→thousand VND', provider_labels)
+        self.assertIn('index points', provider_labels)
+        self.assertIn('TradingView (', provider_labels)
+        tv_yields = [node for node in ast.walk(iterator)
+                     if isinstance(node, ast.Yield)
+                     and isinstance(node.value, ast.Tuple)
+                     and len(node.value.elts) == 2
+                     and isinstance(node.value.elts[1], ast.JoinedStr)
+                     and any(isinstance(part, ast.Constant)
+                             and isinstance(part.value, str)
+                             and part.value.startswith('TradingView (')
+                             for part in node.value.elts[1].values)]
+        self.assertEqual(len(tv_yields), 1)
+        self.assertGreater(tv_yields[0].lineno, yahoo_yields[0].lineno)
+        self.assertTrue(any(
+            isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == '_record_fetch_error'
+            and node.lineno > tv_yields[0].lineno
+            for node in ast.walk(iterator)))
+
+    def test_tradingview_is_optional_and_uses_daily_ohlcv_last(self):
+        source = DOWNLOADER.read_text(encoding='utf-8')
+        self.assertIn('from tvDatafeed import TvDatafeed, Interval', source)
+        self.assertIn('TV_DATAFEED_AVAILABLE = False', source)
+        iterator = function_named('_iter_ticker_sources')
+        tv_call = next(node for node in ast.walk(iterator)
+                       if isinstance(node, ast.Call)
+                       and isinstance(node.func, ast.Attribute)
+                       and node.func.attr == 'get_hist')
+        kwargs = {k.arg: ast.unparse(k.value) for k in tv_call.keywords}
+        self.assertEqual(kwargs, {'symbol':'symbol', 'exchange':"'HOSE'",
+                                  'interval':'Interval.in_daily', 'n_bars':'10000'})
+
+        fetch = function_named('fetch_ticker_multi_source')
+        candidate_factory = next(node for node in fetch.body
+                                 if isinstance(node, ast.FunctionDef)
+                                 and node.name == 'candidates')
+        select_calls = [node for node in ast.walk(fetch)
+                        if isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id == 'select_valid_source']
+        self.assertEqual(len(select_calls), 1)
+        self.assertIsInstance(select_calls[0].args[0], ast.Call)
+        self.assertIsInstance(select_calls[0].args[0].func, ast.Name)
+        self.assertEqual(select_calls[0].args[0].func.id, 'candidates')
+        self.assertTrue(any(
+            isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == '_iter_ticker_sources'
+            for node in ast.walk(candidate_factory)))
+
+
 class DownloadIntegrationContractTests(unittest.TestCase):
     def test_every_provider_branch_yields_without_early_dataset_returns(self):
         iterator = function_named('_iter_ticker_sources')
         yields = [node for node in ast.walk(iterator) if isinstance(node, ast.Yield)]
-        self.assertEqual(len(yields), 5)
+        self.assertEqual(len(yields), 7)
         self.assertTrue(all(isinstance(node.value, ast.Tuple)
                             and len(node.value.elts) == 2 for node in yields))
         returns = [node for node in ast.walk(iterator)
