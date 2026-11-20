@@ -1,15 +1,15 @@
 {
-  "created_utc": "2026-11-20T08:20:57.503232+00:00",
-  "entry_mode": "balanced",
+  "created_utc": "2026-11-20T08:34:55.243872+00:00",
+  "entry_mode": "profit_guard",
   "entry_policy": {
-    "name": "balanced",
+    "name": "profit_guard",
     "candle_filter": true,
     "index_slopes": false,
     "min_close_location": 0.6,
     "max_open_gap_atr": 0.75,
     "max_open_gap_pct": 0.04,
     "risk_per_trade": 0.015,
-    "profit_guard": false
+    "profit_guard": true
   },
   "effective_config": {
     "backtest_start_date": "2022-01-01",
@@ -24,7 +24,7 @@
   },
   "sha256": {
     "execution_policy.py": "0e049b475a657cc893269816888978538a676984182dbf81142a9bc737acfe9f",
-    "markets_database10years.csv": "c6c08b0a98cbfde6d4d54eb8bdc13902e7edba0238a2871852af2ddd792ce9d6",
+    "markets_database10years.csv": "7c1fb9a619c349180048a8da4226f0573c03bf9d18cb5d363e65b2d4e3fbaa12",
     "quant_bot.py": "595273e10afd449244751a6d360f660355dbf2d439c59649ae3a6b41d995312d",
     "run_audit.py": "e2e5ac1dcedac40f22839db190e12c9f18b42f191f1bac58c08d9c8631132dea",
     "vn30_universe.py": "d4b2769f4b307bf465c68b52ce4b9e0d2cefafb048db1354f2dd66f9dd019e6f",
@@ -42,7 +42,7 @@
     "low": "2833d353c307a51bbc5392f0b04194781067463f84012015a07fec6dcd80c5c0",
     "close": "dc6f7756147cf0e929321443d5fed982bf47daad31598e838cac535c0ff4b5d5",
     "volume": "58fcb41cc153950d4c30700264b512377edcaae2511d7b2b1fc3a192543e5f30",
-    "ai_scores": "6d7f2f0c9825d0ef508d2c38b221436b086135c8272c45225bcb70cef2f681d6"
+    "ai_scores": "b9183490b8f7211e2283aee67181bbd00310cf09a8f8b3fe328347ed641e4835"
   },
   "versions": {
     "python": "3.11.18",
