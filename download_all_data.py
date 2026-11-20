@@ -38,17 +38,21 @@ try:
 except ImportError:
     VNSTOCK_OAPI_AVAILABLE = False
 
-# Thử import vnstock thế hệ mới (Gen 6) hoặc cũ (v3)
+# Vnstock 6 market client. Sources must be selected explicitly per call.
 VNSTOCK_AVAILABLE = False
 try:
     from vnstock import Market
     VNSTOCK_AVAILABLE = True
 except ImportError:
-    try:
-        from vnstock import stock_historical_data
-        VNSTOCK_AVAILABLE = True
-    except ImportError:
-        VNSTOCK_AVAILABLE = False
+    VNSTOCK_AVAILABLE = False
+
+# Optional, late fallback independent of the exchange HTTP sources above.
+TV_DATAFEED_AVAILABLE = False
+try:
+    from tvDatafeed import TvDatafeed, Interval
+    TV_DATAFEED_AVAILABLE = True
+except ImportError:
+    TV_DATAFEED_AVAILABLE = False
 
 # Thử import rổ VN30 lịch sử từ vn30_universe
 try:
@@ -152,15 +156,125 @@ def _filter_source_window(rows, start_date=None, end_date=None):
     return selected, counts
 
 
+def _yahoo_symbol(symbol):
+    """Yahoo chart identifiers for the index and listed Vietnamese equities."""
+    symbol = str(symbol).strip().upper()
+    if not re.fullmatch(r'[A-Z0-9^.-]{1,24}', symbol):
+        raise ValueError(f'Invalid ticker for Yahoo chart endpoint: {symbol!r}')
+    if symbol == 'VNINDEX':
+        return '^VNINDEX.VN'
+    if symbol in {'VN30', 'VN100', 'VNXALL', 'HNX', 'HNX30', 'UPCOM'}:
+        return f'{symbol}.VN'
+    return f'{symbol}.VN'
+
+
+def _normalize_yahoo_chart(symbol, payload):
+    """Convert a Yahoo chart payload into unmodified daily OHLCV records."""
+    chart = payload.get('chart', {}) if isinstance(payload, dict) else {}
+    error = chart.get('error')
+    results = chart.get('result') or []
+    if error or not results or not isinstance(results[0], dict):
+        raise ValueError(f'Yahoo chart returned no result for {symbol}: {error!r}')
+    result = results[0]
+    metadata = result.get('meta') or {}
+    timestamps = result.get('timestamp')
+    indicators = result.get('indicators') or {}
+    quotes = indicators.get('quote') or []
+    if not isinstance(timestamps, list) or not quotes or not isinstance(quotes[0], dict):
+        raise ValueError(f'Yahoo chart missing timestamp or quote arrays for {symbol}')
+    quote = quotes[0]
+    is_index = str(symbol).strip().upper() in {
+        'VNINDEX', 'VN30', 'VN100', 'VNXALL', 'HNX', 'HNX30', 'UPCOM'}
+    currency = metadata.get('currency')
+    if not is_index and currency != 'VND':
+        raise ValueError(f'Yahoo chart currency for {symbol} must be VND; got {currency!r}')
+    # The trading engine and historical CSV contract store Vietnamese share
+    # prices in thousand VND. Yahoo reports equity OHLC in full VND; index
+    # levels remain index points and are never scaled.
+    price_scale = 1.0 if is_index else 0.001
+    required = ('open', 'high', 'low', 'close', 'volume')
+    missing = [name for name in required if not isinstance(quote.get(name), list)]
+    if missing:
+        raise ValueError(f'Yahoo chart missing OHLCV arrays for {symbol}: {", ".join(missing)}')
+    lengths = {len(timestamps), *(len(quote[name]) for name in required)}
+    if len(lengths) != 1:
+        raise ValueError(f'Yahoo chart OHLCV array lengths differ for {symbol}')
+    timezone_name = ((result.get('meta') or {}).get('exchangeTimezoneName') or 'UTC')
+    rows = []
+    for index, stamp in enumerate(timestamps):
+        try:
+            utc_stamp = pd.to_datetime(stamp, unit='s', utc=True)
+            local_stamp = utc_stamp.tz_convert(timezone_name).date().isoformat()
+        except Exception as exc:
+            raise ValueError(f'Yahoo chart invalid timestamp at row {index} for {symbol}') from exc
+        rows.append({
+            'Date': local_stamp,
+            'Open': None if quote['open'][index] is None else float(quote['open'][index]) * price_scale,
+            'High': None if quote['high'][index] is None else float(quote['high'][index]) * price_scale,
+            'Low': None if quote['low'][index] is None else float(quote['low'][index]) * price_scale,
+            'Close': None if quote['close'][index] is None else float(quote['close'][index]) * price_scale,
+            'Volume': quote['volume'][index],
+        })
+    return pd.DataFrame(rows, columns=['Date', 'Open', 'High', 'Low', 'Close', 'Volume'])
+
+
+def _normalize_vnstock_history(symbol, history):
+    """Normalize Vnstock 6 OHLCV output before strict provider validation."""
+    if history is None or history.empty:
+        return None
+    frame = history.copy()
+    columns = {str(column).strip().lower(): column for column in frame.columns}
+    date_column = next((columns[name] for name in ('time', 'date', 'datetime')
+                        if name in columns), None)
+    if date_column is None:
+        # Some releases return a named datetime index; never mistake a default
+        # integer RangeIndex for a date field.
+        index = frame.index
+        index_name = str(getattr(index, 'name', '') or '').strip().lower()
+        is_datetime_index = pd.api.types.is_datetime64_any_dtype(index.dtype)
+        if index_name in ('time', 'date', 'datetime') or is_datetime_index:
+            frame = frame.reset_index()
+            columns = {str(column).strip().lower(): column for column in frame.columns}
+            index_aliases = ('time', 'date', 'datetime', 'index') if is_datetime_index else (
+                'time', 'date', 'datetime')
+            date_column = next((columns[name] for name in index_aliases
+                                if name in columns), None)
+    required = {'Open': 'open', 'High': 'high', 'Low': 'low',
+                'Close': 'close', 'Volume': 'volume'}
+    missing = []
+    if date_column is None:
+        missing.append('time/date index')
+    missing.extend(output for output, key in required.items() if key not in columns)
+    if missing:
+        raise ValueError(f'Vnstock FHSC OHLCV missing fields for {symbol}: {", ".join(missing)}')
+    dates = pd.to_datetime(frame[date_column], errors='raise')
+    timezone = getattr(getattr(dates, 'dt', None), 'tz', None)
+    if timezone is not None:
+        dates = dates.dt.tz_convert('Asia/Ho_Chi_Minh').dt.tz_localize(None)
+    normalized = {'Date': dates.dt.normalize()}
+    for output, key in required.items():
+        normalized[output] = frame[columns[key]]
+    return pd.DataFrame(normalized, index=frame.index)
+
+
 def _symbol_report(symbol):
     return DATA_QUALITY_REPORT['symbols'].setdefault(symbol, {'attempts': []})
 
 
 def _record_fetch_error(symbol, source, error):
     # Record exception type only: SDK errors can contain private request details.
-    _symbol_report(symbol)['attempts'].append({
+    attempt = {
         'source': source, 'status': 'fetch_error', 'error_type': type(error).__name__,
-    })
+    }
+    response = getattr(error, 'response', None)
+    status_code = getattr(response, 'status_code', None)
+    if isinstance(status_code, int):
+        attempt['http_status'] = status_code
+    # Provider shape/unsupported-ticker ValueErrors are safe and actionable;
+    # do not serialize arbitrary SDK/network exception strings or full URLs.
+    if isinstance(error, ValueError):
+        attempt['reason'] = str(error)[:240]
+    _symbol_report(symbol)['attempts'].append(attempt)
     write_json_atomic(QUALITY_REPORT_PATH, DATA_QUALITY_REPORT)
 
 
@@ -296,18 +410,61 @@ def _iter_ticker_sources(symbol):
             except Exception as exc:
                 _record_fetch_error(symbol, f'vnstock-oapi ({src_name.upper()})', exc)
 
-    # --- NGUỒN 5: VNSTOCK (Gen 6 Market) ---
-    if VNSTOCK_AVAILABLE:
+    # --- NGUỒN 5: Vnstock 6 + FHSC Open API (cần FHSC_API_KEY) ---
+    if VNSTOCK_AVAILABLE and os.environ.get('FHSC_API_KEY', '').strip():
         try:
-            mkt = Market()
-            df = mkt.equity(symbol).ohlcv(start=START_DATE_STR, end=NOW_DATE_STR)
-            if df is not None and len(df) > 50:
-                df.rename(columns={'time': 'Date', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
-                df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None).dt.normalize()
-                df = df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].sort_values('Date').reset_index(drop=True)
-                yield df, "Vnstock (Market)"
+            market = Market('fhsc')
+            if symbol.upper() in ('VNINDEX', 'VN30', 'VN100', 'VNXALL', 'HNX', 'HNX30', 'UPCOM'):
+                history = market.index(symbol).ohlcv(
+                    start=START_DATE_STR, end=NOW_DATE_STR, interval='1D',
+                    compat='v6', floating=None)
+            else:
+                history = market.equity(symbol).ohlcv(
+                    start=START_DATE_STR, end=NOW_DATE_STR, interval='1D',
+                    compat='v6', floating=None)
+            # Vnstock compat=v6 already returns equity candles in thousand VND,
+            # index values in points, and Vietnamese market timestamps.
+            frame = _normalize_vnstock_history(symbol, history)
+            if frame is not None and len(frame) > 50:
+                yield frame.sort_values('Date').reset_index(drop=True), 'Vnstock Open API (FHSC)'
         except Exception as exc:
-            _record_fetch_error(symbol, 'Vnstock (Market)', exc)
+            _record_fetch_error(symbol, 'Vnstock Open API (FHSC)', exc)
+
+    # --- NGUỒN 6: Yahoo Finance chart API (độc lập với các nguồn VN ở trên) ---
+    # Chỉ thử sau khi các nguồn khác không cho ra tập OHLCV đạt chuẩn. Mọi bar
+    # vẫn qua cùng bộ strict validator; Yahoo không được phép bỏ volume/null.
+    try:
+        yahoo_ticker = _yahoo_symbol(symbol)
+        yahoo_url = f'https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_ticker}'
+        params = {'period1': START_TS, 'period2': NOW_TS + 1, 'interval': '1d',
+                  'events': 'div,splits', 'includeAdjustedClose': 'false'}
+        response = requests.get(
+            yahoo_url, params=params,
+            headers={'User-Agent': 'Mozilla/5.0'}, timeout=12)
+        response.raise_for_status()
+        yahoo_frame = _normalize_yahoo_chart(symbol, response.json())
+        if not yahoo_frame.empty:
+            unit = 'index points' if symbol.upper() in {'VNINDEX','VN30','VN100','VNXALL','HNX','HNX30','UPCOM'} else 'VND→thousand VND'
+            yield yahoo_frame.sort_values('Date').reset_index(drop=True), f'Yahoo Finance ({yahoo_ticker}; {unit})'
+    except Exception as exc:
+        _record_fetch_error(symbol, 'Yahoo Finance chart', exc)
+
+    # --- NGUỒN 7: TradingView guest chart (last resort; same strict validator) ---
+    if TV_DATAFEED_AVAILABLE:
+        try:
+            tv = TvDatafeed()
+            frame = tv.get_hist(symbol=symbol, exchange='HOSE',
+                                interval=Interval.in_daily, n_bars=10000)
+            if frame is not None and not frame.empty:
+                frame = frame.reset_index()
+                frame.rename(columns={'datetime':'Date','open':'Open','high':'High',
+                                      'low':'Low','close':'Close','volume':'Volume'},
+                             inplace=True)
+                frame['Date'] = pd.to_datetime(frame['Date']).dt.tz_localize(None).dt.normalize()
+                frame = frame[['Date','Open','High','Low','Close','Volume']].sort_values('Date').reset_index(drop=True)
+                yield frame, f'TradingView ({symbol}; exchange prices)'
+        except Exception as exc:
+            _record_fetch_error(symbol, 'TradingView guest chart', exc)
 
 
 def fetch_ticker_multi_source(symbol, history_start=None, history_end=None):
