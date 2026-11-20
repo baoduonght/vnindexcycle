@@ -359,11 +359,13 @@ def main(argv=None):
             writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
             writer.writeheader()
             writer.writerows(sorted(rows,key=lambda r:r['Date']))
-    for name in ('markets_database10years.csv','quant_bot.py','execution_policy.py','run_audit.py',
+    (snapshot/'models').mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(ROOT/'data'/'markets_database10years.csv', snapshot/'data'/'markets_database10years.csv')
+    for name in ('quant_bot.py','execution_policy.py','run_audit.py',
                  'vn30_universe.py','validate_winrate.py','ohlcv_quality.py'):
         shutil.copyfile(ROOT/name, snapshot/name)
-    for path in ROOT.glob('xgboost_*.json'):
-        shutil.copyfile(path, snapshot/path.name)
+    for path in (ROOT/'models').glob('xgboost_*.json'):
+        shutil.copyfile(path, snapshot/'models'/path.name)
     hashes = {str(p.relative_to(snapshot)):hashlib.sha256(p.read_bytes()).hexdigest()
               for p in snapshot.rglob('*') if p.is_file()}
     manifest = {'created_utc':datetime.now(timezone.utc).isoformat(), 'end_date':args.end_date,

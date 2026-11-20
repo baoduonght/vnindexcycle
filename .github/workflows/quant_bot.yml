@@ -79,7 +79,7 @@ jobs:
         run: |
           git config --global user.name "Quant AutoBot"
           git config --global user.email "bot@quant.com"
-          git add xgboost_*.json markets_database*.csv vn_markets_database*.csv global_markets_database*.csv
+          git add models/xgboost_*.json data/markets_database*.csv data/vn_markets_database*.csv data/global_markets_database*.csv
           git commit -m "🤖 [Auto-Update] Đã đúc xong não bộ AI Walk-Forward & Cập nhật Vĩ mô tuần mới" || echo "Không có sự thay đổi để commit"
           git push
 
@@ -98,11 +98,11 @@ jobs:
           VNSTOCK_OAPI_SESSION_BACKEND: file
         run: python quant_bot.py
 
-      - name: 📊 Cập nhật Sổ Kế Toán trading_log.csv, daily_nav.csv & completed_trades.csv lên Github (cho Power BI)
+      - name: 📊 Cập nhật Sổ Kế Toán outputs/trading_log.csv, outputs/daily_nav.csv & outputs/completed_trades.csv lên Github (cho Power BI)
         if: github.event.schedule == '30 8 * * 1-5' || github.event_name == 'workflow_dispatch'
         run: |
           git config --global user.name "Quant AutoBot"
           git config --global user.email "bot@quant.com"
-          git add trading_log.csv daily_nav.csv completed_trades.csv signal_diagnostics.csv run_manifest.json
+          git add outputs/trading_log.csv outputs/daily_nav.csv outputs/completed_trades.csv outputs/signal_diagnostics.csv outputs/run_manifest.json
           git commit -m "📊 [Auto-Update] Cập nhật sổ kế toán giao dịch & chu kỳ vị thế cho Power BI" || echo "Không có giao dịch mới để commit"
           git push

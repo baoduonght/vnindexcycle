@@ -179,10 +179,10 @@ def fetch_ticker_data(symbol, n_bars=4000):
             pass
 
     # Fallback cuối cùng nếu mất mạng: CSV
-    if symbol.upper() == 'VNINDEX' and os.path.exists('markets_database10years.csv'):
+    if symbol.upper() == 'VNINDEX' and os.path.exists('data/markets_database10years.csv'):
         try:
-            print("   ⚠️ CẢNH BÁO: Tải API thất bại, đọc VNINDEX từ markets_database10years.csv!")
-            csv_df = pd.read_csv('markets_database10years.csv')
+            print("   ⚠️ CẢNH BÁO: Tải API thất bại, đọc VNINDEX từ data/markets_database10years.csv!")
+            csv_df = pd.read_csv('data/markets_database10years.csv')
             if 'VNINDEX' in csv_df.columns:
                 c_df = csv_df[['Date', 'VNINDEX', 'VN_VOLUME']].dropna(subset=['VNINDEX']).copy()
                 c_df['Date'] = pd.to_datetime(c_df['Date']).dt.tz_localize(None).dt.normalize()
@@ -288,7 +288,7 @@ def main():
     # ==========================================
     print("3. Khởi tạo màng lưới tính toán & Đồng bộ Vĩ mô + Độ rộng...")
     try:
-        macro_df = pd.read_csv('markets_database10years.csv')
+        macro_df = pd.read_csv('data/markets_database10years.csv')
         macro_df = macro_df[['Date', 'DXY', 'US10Y', 'USD_VND']].copy()
         macro_df['Date'] = pd.to_datetime(macro_df['Date']).dt.strftime('%Y-%m-%d')
         macro_df = macro_df.drop_duplicates(subset=['Date'], keep='last').sort_values('Date').reset_index(drop=True)
@@ -412,10 +412,11 @@ def main():
     base_model.fit(X_base, y_base, sample_weight=base_weights)
 
     # Lưu làm model cho năm 2022 và mô hình cơ sở
-    base_model.save_model("xgboost_model_2022.json")
-    base_model.save_model("xgboost_ultimate.json")
+    os.makedirs("models", exist_ok=True)
+    base_model.save_model("models/xgboost_model_2022.json")
+    base_model.save_model("models/xgboost_ultimate.json")
     models_saved[2022] = base_model
-    print("   ✅ Đã hoàn tất và lưu: xgboost_model_2022.json & xgboost_ultimate.json")
+    print("   ✅ Đã hoàn tất và lưu: models/xgboost_model_2022.json & models/xgboost_ultimate.json")
 
     # 2. HUẤN LUYỆN TIẾP CÁC NĂM OUT-OF-SAMPLE: 2023, 2024, 2025, 2026 (EXPANDING TỪ 2012)
     for year in [2023, 2024, 2025, 2026]:
@@ -461,12 +462,12 @@ def main():
                 print(f"      🎯 [OOS {year}] AUC: {auc:.4f} | Precision: {prec:.4f} | Recall: {rec:.4f} (Mẫu kiểm thử: {test_mask.sum():,})")
 
         # Lưu model cho năm đó
-        model_filename = f"xgboost_model_{year}.json"
+        model_filename = f"models/xgboost_model_{year}.json"
         model.save_model(model_filename)
         models_saved[year] = model
 
     # Mô hình cập nhật mới nhất cho 2026
-    LATEST_MODEL_FILE = "xgboost_ultimate.json"
+    LATEST_MODEL_FILE = "models/xgboost_ultimate.json"
     if 2026 in models_saved:
         models_saved[2026].save_model(LATEST_MODEL_FILE)
     elif models_saved:

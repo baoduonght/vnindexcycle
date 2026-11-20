@@ -568,7 +568,7 @@ def main(argv=None):
     if all_master_rows:
         master_df = pd.concat(all_master_rows, ignore_index=True)
         master_df = master_df.sort_values(by=['Date', 'Ticker']).reset_index(drop=True)
-        master_file = f"vn_database_all_tickers_{START_DATE_STR[:4]}_{NOW_DATE_STR[:4]}.csv"
+        master_file = os.path.join(DATA_DIR, f"vn_database_all_tickers_{START_DATE_STR[:4]}_{NOW_DATE_STR[:4]}.csv")
         write_text_atomic(master_file, master_df.to_csv(index=False, float_format='%.17g'))
         print(f"✅ Đã xuất File Master: {master_file} ({len(master_df):,} dòng dữ liệu)")
 

@@ -9,6 +9,7 @@ except Exception:
 import pandas_datareader.data as web
 import yfinance as yf
 import datetime
+import os
 import requests
 
 print("🚀 Khởi động Siêu Radar Vĩ mô: Bản Tối thượng (Mốc 2011-06 -> Nay | 100% Raw Data)...")
@@ -177,26 +178,27 @@ combo_df.index.name = 'Date'
 # --- PHẦN 6: XUẤT XƯỞNG ---
 # =====================================================================
 print("6. Đang xuất CSV...")
+os.makedirs('data', exist_ok=True)
 def update_csv(filename, new_df):
     if not new_df.empty:
         new_df.to_csv(filename)
         print(f"✅ Đã đóng gói: {filename} ({len(new_df):,} dòng | {new_df.index.min().strftime('%Y-%m-%d')} -> {new_df.index.max().strftime('%Y-%m-%d')})")
 
 # Xuất file tổng
-update_csv('markets_database10years.csv', combo_df)
-update_csv('markets_database_now.csv', combo_df.head(30))
+update_csv('data/markets_database10years.csv', combo_df)
+update_csv('data/markets_database_now.csv', combo_df.head(30))
 
 # Xuất file VN (Vẫn giữ các ngày nghỉ lễ để đồng bộ mốc thời gian)
 local_cols = local_df.columns.intersection(combo_df.columns)
 if not local_cols.empty:
     local_df_clean = combo_df[local_cols]
-    update_csv('vn_markets_database10years.csv', local_df_clean)
+    update_csv('data/vn_markets_database10years.csv', local_df_clean)
 
 # Xuất file Vĩ mô Toàn cầu
 global_cols = list(global_df.columns) + list(fred_df.columns)
 global_cols = [c for c in global_cols if c in combo_df.columns]
 if global_cols:
     global_macro_clean = combo_df[global_cols]
-    update_csv('global_markets_database10years.csv', global_macro_clean)
+    update_csv('data/global_markets_database10years.csv', global_macro_clean)
 
 print("🎉 HOÀN TẤT! Dữ liệu gốc 100% (không fill) đã phủ kín từ 06/2011 đến nay.")

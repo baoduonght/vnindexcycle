@@ -45,7 +45,7 @@ def package_versions():
 def build_manifest(root, mode, model_files, frames, effective_config, loaded, missing):
     root = Path(root)
     paths = ['quant_bot.py', 'execution_policy.py', 'run_audit.py', 'vn30_universe.py',
-             'markets_database10years.csv'] + list(model_files)
+             'data/markets_database10years.csv'] + list(model_files)
     return {
         'created_utc': datetime.now(timezone.utc).isoformat(),
         'entry_mode': mode,
