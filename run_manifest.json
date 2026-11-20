@@ -1,15 +1,15 @@
 {
-  "created_utc": "2026-11-20T16:52:07.072078+00:00",
-  "entry_mode": "profit_guard",
+  "created_utc": "2026-11-20T16:57:45.445730+00:00",
+  "entry_mode": "baseline",
   "entry_policy": {
-    "name": "profit_guard",
-    "candle_filter": true,
+    "name": "baseline",
+    "candle_filter": false,
     "index_slopes": false,
     "min_close_location": 0.6,
     "max_open_gap_atr": 0.75,
     "max_open_gap_pct": 0.04,
-    "risk_per_trade": 0.015,
-    "profit_guard": true
+    "risk_per_trade": null,
+    "profit_guard": false
   },
   "effective_config": {
     "backtest_start_date": "2022-01-01",
