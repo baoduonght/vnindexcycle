@@ -1,14 +1,14 @@
 {
-  "created_utc": "2026-11-20T16:57:45.445730+00:00",
-  "entry_mode": "baseline",
+  "created_utc": "2026-11-20T17:09:11.936115+00:00",
+  "entry_mode": "balanced",
   "entry_policy": {
-    "name": "baseline",
-    "candle_filter": false,
+    "name": "balanced",
+    "candle_filter": true,
     "index_slopes": false,
     "min_close_location": 0.6,
     "max_open_gap_atr": 0.75,
     "max_open_gap_pct": 0.04,
-    "risk_per_trade": null,
+    "risk_per_trade": 0.015,
     "profit_guard": false
   },
   "effective_config": {
