@@ -1,17 +1,22 @@
 """Dependency-free tests of the downloader's actual validation wiring.
 
 Only selected function bodies are compiled from the downloader AST; importing it
-would require network SDKs and create a data directory. All bars below, including
-the deliberately bad 2012-02-10 bar, are invented fixtures, not vendor evidence.
+would require network SDKs and create a data directory. Bars are synthetic test
+fixtures. The window fixture reuses reported anomaly dates and envelope values;
+it is not a captured provider payload or evidence that a live download succeeds.
 """
 
+import argparse
 import ast
 import copy
 import csv
+from contextlib import redirect_stderr
+import datetime as datetime_module
 from datetime import date, datetime, timedelta
 import io
 from pathlib import Path
 import re
+from types import SimpleNamespace
 import unittest
 
 from ohlcv_quality import (
@@ -41,12 +46,31 @@ def compile_function(name, namespace):
     return namespace[name]
 
 
-def bars(count=60):
-    first = date(2012, 1, 1)
+def bars(count=60, first=date(2012, 1, 1)):
     return [{'Date': (first + timedelta(days=i)).isoformat(),
              'Open': '100', 'High': '110', 'Low': '90',
              'Close': '105', 'Volume': '1000'}
             for i in range(count)]
+
+
+def compile_window_helpers(namespace=None):
+    namespace = {} if namespace is None else namespace
+    namespace['datetime'] = datetime_module
+    compile_function('build_download_window', namespace)
+    compile_function('_filter_source_window', namespace)
+    return namespace
+
+
+def window_fixture():
+    """Reported anomaly dates and envelopes, with otherwise synthetic bars."""
+    old = bars(2)
+    old[0].update(Date='2012-02-10', Open='410.11', High='409.97',
+                  Low='400', Close='409')
+    old[1].update(Date='2020-09-29', Open='905', High='910',
+                  Low='904.69', Close='903.98')
+    after = bars(1, first=date(2023, 1, 1))
+    after[0]['High'] = '99'
+    return old + bars(730, first=date(2021, 1, 1)) + after
 
 
 class FrameDouble:
@@ -94,6 +118,7 @@ class WrapperHarness:
         self.pd = PandasDouble()
         self.visited = []
         self.rejected = []
+        self.crops = []
         self.writes = []
         self.report = {'symbols': {}}
         self.report_path = Path('fixture-quality-report.json')
@@ -115,18 +140,204 @@ class WrapperHarness:
         def record_write(path, payload):
             self.writes.append((path, copy.deepcopy(payload)))
 
+        def record_crop(symbol, source, raw_rows, counts, start_date, end_date):
+            self.crops.append((symbol, source, copy.deepcopy(raw_rows),
+                               dict(counts), start_date, end_date))
+
         self.namespace = {
             'pd': self.pd, 'select_valid_source': select_valid_source,
             '_iter_ticker_sources': providers, '_symbol_report': symbol_report,
             '_record_rejected_source': record_rejection,
+            '_record_window_crop': record_crop,
             'write_json_atomic': record_write,
             'QUALITY_REPORT_PATH': self.report_path,
             'DATA_QUALITY_REPORT': self.report,
         }
+        compile_window_helpers(self.namespace)
         self.fetch = compile_function('fetch_ticker_multi_source', self.namespace)
 
 
+class DownloadWindowTests(unittest.TestCase):
+    def setUp(self):
+        namespace = compile_window_helpers()
+        self.build = namespace['build_download_window']
+        self.filter = namespace['_filter_source_window']
+
+    def test_utc_request_bounds_include_both_full_days(self):
+        window = self.build('2021-01-01', '2022-12-31')
+        utc = datetime_module.timezone.utc
+        self.assertEqual(window, {
+            'start': '2021-01-01', 'end': '2022-12-31',
+            'from_ts': int(datetime(2021, 1, 1, tzinfo=utc).timestamp()),
+            'to_ts': int(datetime(2022, 12, 31, 23, 59, 59,
+                                   tzinfo=utc).timestamp()),
+        })
+        one_day = self.build('2024-02-29', '2024-02-29')
+        self.assertEqual(one_day['to_ts'] - one_day['from_ts'], 86399)
+
+    def test_only_ordered_canonical_iso_arguments_are_accepted(self):
+        invalid = ('2021-1-01', '20210101', ' 2021-01-01', '2021-01-01 ',
+                   '2021-01-01T00:00:00', '2021-02-29', '', None, 20210101)
+        for value in invalid:
+            for start, end in ((value, '2022-12-31'), ('2021-01-01', value)):
+                with self.subTest(start=start, end=end), self.assertRaises(ValueError):
+                    self.build(start, end)
+        with self.assertRaises(ValueError):
+            self.build('2022-01-02', '2022-01-01')
+
+    def test_explicit_window_preserves_every_2021_and_2022_bar_unchanged(self):
+        raw = window_fixture()
+        before = copy.deepcopy(raw)
+        kept, counts = self.filter(raw, '2021-01-01', '2022-12-31')
+        self.assertEqual(kept, before[2:-1])
+        self.assertEqual(raw, before)
+        self.assertEqual(counts, {
+            'input_rows': 733, 'kept_rows': 730, 'excluded_before_start': 2,
+            'excluded_after_end': 1, 'invalid_dates_kept': 0,
+        })
+        self.assertEqual(kept[0]['Date'], '2021-01-01')
+        self.assertEqual(kept[-1]['Date'], '2022-12-31')
+        self.assertEqual(sum(row['Date'].startswith('2022-') for row in kept), 365)
+
+    def test_missing_and_malformed_dates_are_kept_for_strict_validation(self):
+        malformed = []
+        for stamp in ('bad', '20120210', '2012-2-10', '2020-02-30', None):
+            row = bars(1)[0]
+            row['Date'] = stamp
+            malformed.append(row)
+        missing = bars(1)[0]
+        del missing['Date']
+        malformed.append(missing)
+        raw = malformed + bars(60, first=date(2021, 1, 1))
+        before = copy.deepcopy(raw)
+        kept, counts = self.filter(raw, '2021-01-01', '2022-12-31')
+        self.assertEqual(kept, before)
+        self.assertEqual(raw, before)
+        self.assertEqual(counts['invalid_dates_kept'], len(malformed))
+        self.assertEqual(counts['kept_rows'], len(raw))
+        with self.assertRaises(OHLCVValidationError) as caught:
+            validate_rows(kept, 'VNINDEX')
+        self.assertEqual(len(caught.exception.issues), len(malformed))
+
+    def test_date_objects_and_datetimes_use_daily_inclusive_boundaries(self):
+        raw = bars(4)
+        raw[0]['Date'] = date(2020, 12, 31)
+        raw[1]['Date'] = datetime(2021, 1, 1, 23, 59, 59)
+        raw[2]['Date'] = date(2022, 12, 31)
+        raw[3]['Date'] = datetime(2023, 1, 1)
+        before = copy.deepcopy(raw)
+        kept, counts = self.filter(raw, '2021-01-01', '2022-12-31')
+        self.assertEqual(kept, before[1:3])
+        self.assertEqual(raw, before)
+        self.assertEqual(counts['excluded_before_start'], 1)
+        self.assertEqual(counts['excluded_after_end'], 1)
+
+    def test_default_window_keeps_the_legacy_full_candidate(self):
+        raw = window_fixture()
+        before = copy.deepcopy(raw)
+        kept, counts = self.filter(raw)
+        self.assertEqual(kept, before)
+        self.assertEqual(raw, before)
+        self.assertEqual(counts['input_rows'], len(raw))
+        self.assertEqual(counts['kept_rows'], len(raw))
+        self.assertEqual(counts['excluded_before_start'], 0)
+        self.assertEqual(counts['excluded_after_end'], 0)
+
+
 class DownloadWrapperTests(unittest.TestCase):
+    def test_explicit_window_excludes_old_anomalies_before_real_validation(self):
+        raw = window_fixture()
+        before = copy.deepcopy(raw)
+        primary = FrameDouble(raw)
+
+        def candidates():
+            yield 'reported old anomalies', primary
+            self.fail('old out-of-window anomalies caused an unnecessary fallback')
+
+        harness = WrapperHarness(candidates())
+        frame, source = harness.fetch('VNINDEX', history_start='2021-01-01',
+                                      history_end='2022-12-31')
+        self.assertEqual(source, 'reported old anomalies')
+        self.assertEqual(primary.rows, before)
+        self.assertEqual(harness.rejected, [])
+        self.assertEqual([row['Date'] for row in frame.rows],
+                         [datetime.fromisoformat(row['Date']) for row in before[2:-1]])
+        self.assertEqual(len(frame.rows), 730)
+        self.assertEqual(len(harness.crops), 1)
+        symbol, provider, candidate, counts, start, end = harness.crops[0]
+        self.assertEqual((symbol, provider, start, end),
+                         ('VNINDEX', source, '2021-01-01', '2022-12-31'))
+        self.assertEqual(candidate, before)
+        self.assertEqual(counts, {
+            'input_rows': 733, 'kept_rows': 730, 'excluded_before_start': 2,
+            'excluded_after_end': 1, 'invalid_dates_kept': 0,
+        })
+
+    def test_bad_bar_inside_window_still_rejects_provider_and_falls_back(self):
+        raw = window_fixture()
+        raw[400]['High'] = '99'
+        before = copy.deepcopy(raw)
+        primary = FrameDouble(raw)
+        harness = WrapperHarness([('bad in range', primary),
+                                  ('complete fallback', FrameDouble(window_fixture()))])
+        frame, source = harness.fetch('VNINDEX', history_start='2021-01-01',
+                                      history_end='2022-12-31')
+        self.assertEqual(source, 'complete fallback')
+        self.assertEqual(harness.visited, ['bad in range', 'complete fallback'])
+        self.assertEqual(primary.rows, before)
+        self.assertEqual(len(frame.rows), 730)
+        self.assertEqual(len(harness.crops), 2)
+        self.assertEqual(len(harness.rejected), 1)
+        rejected = harness.rejected[0]
+        self.assertEqual(rejected[2], before[2:-1])
+        self.assertEqual(rejected[3].issues[0]['date'], before[400]['Date'])
+        self.assertEqual(rejected[3].issues[0]['raw_values'], before[400])
+        self.assertIn('High is below max(Open, Close)',
+                      rejected[3].issues[0]['reasons'])
+
+    def test_unknown_date_cannot_escape_window_validation_or_fallback(self):
+        for stamp in ('malformed', '20120210', None):
+            with self.subTest(stamp=stamp):
+                raw = bars(60, first=date(2021, 1, 1))
+                raw[0]['Date'] = stamp
+                before = copy.deepcopy(raw)
+                primary = FrameDouble(raw)
+                harness = WrapperHarness([
+                    ('unknown date', primary),
+                    ('complete', FrameDouble(bars(60, first=date(2021, 1, 1)))),
+                ])
+                frame, source = harness.fetch('VNINDEX', history_start='2021-01-01',
+                                              history_end='2022-12-31')
+                self.assertEqual(source, 'complete')
+                self.assertEqual(primary.rows, before)
+                self.assertEqual(len(frame.rows), 60)
+                self.assertEqual(harness.rejected[0][2], before)
+                self.assertEqual(harness.rejected[0][3].issues[0]['raw_values'], before[0])
+                self.assertEqual(harness.crops[0][3]['invalid_dates_kept'], 1)
+
+    def test_window_cannot_make_short_candidate_bypass_minimum_or_merge_sources(self):
+        short = bars(60, first=date(2020, 12, 1))
+        harness = WrapperHarness([
+            ('short after crop', FrameDouble(short)),
+            ('complete', FrameDouble(bars(60, first=date(2021, 1, 1)))),
+        ])
+        frame, source = harness.fetch('VNINDEX', history_start='2021-01-01',
+                                      history_end='2022-12-31')
+        self.assertEqual(source, 'complete')
+        self.assertEqual(len(frame.rows), 60)
+        self.assertEqual(harness.rejected[0][3].issues[0]['raw_values'],
+                         {'row_count': 29, 'min_rows': 51})
+
+    def test_omitting_window_does_not_ignore_known_old_invalid_bars(self):
+        harness = WrapperHarness([
+            ('old anomalies', FrameDouble(window_fixture())),
+            ('complete', FrameDouble(bars(60))),
+        ])
+        _, source = harness.fetch('VNINDEX')
+        self.assertEqual(source, 'complete')
+        self.assertEqual(harness.rejected[0][3].issues[0]['date'], '2012-02-10')
+        self.assertEqual(len(harness.rejected[0][2]), 733)
+
     def test_invalid_primary_falls_back_through_actual_wrapper_and_stops(self):
         bad_rows = bars()
         bad_rows[40]['High'] = '99'
@@ -263,6 +474,81 @@ class DownloadWrapperTests(unittest.TestCase):
         self.assertEqual(harness.visited, ['bad'])
         self.assertEqual(harness.pd.constructed, [])
         self.assertEqual(harness.writes, [])
+
+
+class DownloadCliTests(unittest.TestCase):
+    class FirstFetchReached(Exception):
+        pass
+
+    def harness(self):
+        fetches, writes = [], []
+        namespace = {
+            'argparse': argparse, 'datetime': datetime_module,
+            'time': SimpleNamespace(time=lambda: 0),
+            'START_DATE_STR': 'unchanged-start', 'NOW_DATE_STR': 'unchanged-end',
+            'START_TS': -1, 'NOW_TS': -1,
+            'DATA_DIR': 'fixture-data', 'ALL_HISTORICAL_VN30_TICKERS': [],
+            'VNSTOCK_OAPI_AVAILABLE': False, 'VNSTOCK_AVAILABLE': False,
+            'DATA_QUALITY_REPORT': {'symbols': {}},
+            'QUALITY_REPORT_PATH': Path('fixture-quality-report.json'),
+            'write_json_atomic': lambda path, payload:
+                writes.append((path, copy.deepcopy(payload))),
+            'print': lambda *_args, **_kwargs: None,
+        }
+        compile_window_helpers(namespace)
+
+        def first_fetch(symbol, **kwargs):
+            fetches.append((symbol, kwargs, {
+                key: namespace[key]
+                for key in ('START_DATE_STR', 'NOW_DATE_STR', 'START_TS', 'NOW_TS')
+            }))
+            raise self.FirstFetchReached()
+
+        namespace['fetch_ticker_multi_source'] = first_fetch
+        main = compile_function('main', namespace)
+        return main, namespace, fetches, writes
+
+    def test_explicit_dates_configure_api_globals_and_filter_before_first_fetch(self):
+        main, namespace, fetches, writes = self.harness()
+        with self.assertRaises(self.FirstFetchReached):
+            main(['--start-date', '2021-01-01', '--end-date', '2022-12-31'])
+        expected = namespace['build_download_window']('2021-01-01', '2022-12-31')
+        self.assertEqual(fetches, [('VNINDEX', {
+            'history_start': '2021-01-01', 'history_end': '2022-12-31',
+        }, {'START_DATE_STR': expected['start'], 'NOW_DATE_STR': expected['end'],
+            'START_TS': expected['from_ts'], 'NOW_TS': expected['to_ts']})])
+        self.assertEqual(writes[-1][1]['requested_range'],
+                         {**expected, 'timestamp_timezone': 'UTC'})
+
+    def test_cli_defaults_preserve_2012_history_and_use_utc_today(self):
+        main, namespace, fetches, _writes = self.harness()
+        before = datetime_module.datetime.now(datetime_module.timezone.utc).date()
+        with self.assertRaises(self.FirstFetchReached):
+            main([])
+        after = datetime_module.datetime.now(datetime_module.timezone.utc).date()
+        self.assertEqual(namespace['START_DATE_STR'], '2012-01-01')
+        self.assertIn(namespace['NOW_DATE_STR'], {before.isoformat(), after.isoformat()})
+        self.assertEqual(fetches[0][1], {
+            'history_start': '2012-01-01', 'history_end': namespace['NOW_DATE_STR'],
+        })
+
+    def test_invalid_arguments_fail_before_fetch_or_quality_artifact(self):
+        for arguments in (
+            ['--start-date', '20210101'],
+            ['--end-date', '2022-2-01'],
+            ['--start-date', '2022-01-02', '--end-date', '2022-01-01'],
+            ['--start-date', '2021-02-29'],
+        ):
+            with self.subTest(arguments=arguments), redirect_stderr(io.StringIO()):
+                main, namespace, fetches, writes = self.harness()
+                with self.assertRaises(SystemExit) as caught:
+                    main(arguments)
+                self.assertEqual(caught.exception.code, 2)
+                self.assertEqual(fetches, [])
+                self.assertEqual(writes, [])
+                self.assertEqual(namespace['START_DATE_STR'], 'unchanged-start')
+                self.assertEqual(namespace['NOW_DATE_STR'], 'unchanged-end')
+                self.assertEqual((namespace['START_TS'], namespace['NOW_TS']), (-1, -1))
 
 
 class DownloadIntegrationContractTests(unittest.TestCase):
@@ -403,6 +689,40 @@ class DownloadIntegrationContractTests(unittest.TestCase):
         self.assertEqual(attempt['status'], 'rejected')
         self.assertEqual(attempt['rows'], 60)
         self.assertEqual(attempt['issues'], error.issues)
+        self.assertEqual(raw, before)
+
+    def test_real_window_report_preserves_original_input_and_declares_crop_counts(self):
+        raw = window_fixture()
+        before = copy.deepcopy(raw)
+        helpers = compile_window_helpers()
+        _kept, counts = helpers['_filter_source_window'](
+            raw, '2021-01-01', '2022-12-31')
+        report = {'symbols': {'VNINDEX': {'attempts': []}}}
+        writes = []
+        report_path = Path('fixture-quality-report.json')
+        namespace = {
+            're': re, 'Path': Path, 'DATA_DIR': 'fixture-data',
+            'QUALITY_REPORT_PATH': report_path, 'DATA_QUALITY_REPORT': report,
+            '_symbol_report': lambda symbol: report['symbols'][symbol],
+            'write_json_atomic': lambda path, payload:
+                writes.append((Path(path), copy.deepcopy(payload))),
+        }
+        record = compile_function('_record_window_crop', namespace)
+        record('VNINDEX', 'provider / primary', raw, counts, '2021-01-01', '2022-12-31')
+        self.assertEqual(len(writes), 2)
+        evidence_path, evidence = writes[0]
+        self.assertEqual(evidence_path.parent, Path('fixture-data') / '_window_input')
+        self.assertEqual(evidence['original_candidate_rows'], before)
+        self.assertEqual(evidence['counts'], counts)
+        self.assertEqual((evidence['requested_start'], evidence['requested_end']),
+                         ('2021-01-01', '2022-12-31'))
+        self.assertEqual(writes[1][0], report_path)
+        entry = writes[1][1]['symbols']['VNINDEX']['attempts'][0]
+        self.assertEqual(entry, {
+            'source': 'provider / primary', 'status': 'window_filter',
+            'start': '2021-01-01', 'end': '2022-12-31', **counts,
+            'original_candidate_evidence': str(evidence_path),
+        })
         self.assertEqual(raw, before)
 
 
