@@ -1,5 +1,5 @@
 {
-  "created_utc": "2026-11-20T18:21:37.593329+00:00",
+  "created_utc": "2026-11-20T19:05:47.922498+00:00",
   "entry_mode": "balanced",
   "entry_policy": {
     "name": "balanced",
@@ -36,20 +36,20 @@
     "vn30_universe.py": "d4b2769f4b307bf465c68b52ce4b9e0d2cefafb048db1354f2dd66f9dd019e6f"
   },
   "input_frames_sha256": {
-    "market": "e043daf33eb00ed617fc9375820f4e6a55dfdec34df36d60aea7793368c7df79",
-    "open": "fc25256f5ef75b87c57ad5ace562cf22f3a4812188d7ef30a3b0de700efbfa26",
-    "high": "b9b70a4d40f094367260f477a22846d04299c67b80689150012c638bc1514af3",
-    "low": "cf48abbf35070337a115159166361ed9fb17727c9dcc4f2ee44f6093af8224fd",
-    "close": "4cbf356097919f83bc0fcc159e39ad714a4223f63ce5512c0edade0c22ea4917",
-    "volume": "6e23359e240c6a2515366ddb668558b8613b1252ad5a86670b7bf6ad52581929",
-    "ai_scores": "6aa84dd097e138fad7d887b8cda7907e3dc8179fe92fbd733d7fb70d226c57e7"
+    "market": "ccd4c7b4860851d0fa00103e23c94b873cdb5b716fffb0b5463e2346dc780f03",
+    "open": "3d9f0704992a4f98c2622e147fb0cb17a51e481cddb972fa14bf4f70606328a6",
+    "high": "8795c0778cc02febc6111144347ddd820b5e9b24e69719aab37eb504feaa69da",
+    "low": "2833d353c307a51bbc5392f0b04194781067463f84012015a07fec6dcd80c5c0",
+    "close": "dc6f7756147cf0e929321443d5fed982bf47daad31598e838cac535c0ff4b5d5",
+    "volume": "58fcb41cc153950d4c30700264b512377edcaae2511d7b2b1fc3a192543e5f30",
+    "ai_scores": "b9183490b8f7211e2283aee67181bbd00310cf09a8f8b3fe328347ed641e4835"
   },
   "versions": {
-    "python": "3.14.9",
+    "python": "3.11.18",
     "pandas": "3.0.6",
-    "numpy": "2.5.5",
+    "numpy": "2.4.6",
     "requests": "2.34.2",
-    "xgboost": "3.4.1",
+    "xgboost": "3.2.0",
     "scikit-learn": "1.9.1"
   },
   "loaded_tickers": [
