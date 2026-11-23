@@ -1,5 +1,5 @@
 {
-  "created_utc": "2026-11-22T08:46:29.374973+00:00",
+  "created_utc": "2026-11-23T20:29:46.879167+00:00",
   "entry_mode": "balanced",
   "entry_policy": {
     "name": "balanced",
@@ -23,7 +23,7 @@
     "atr_multiple": 2.2
   },
   "sha256": {
-    "data/markets_database10years.csv": "a8f5785e9136161d200e7d24cb4390d3f735e76e12c801a754c940656c4ea801",
+    "data/markets_database10years.csv": "a9dd54fb9531d25c7cfa4fff9f31502da21ebf7b4baf03f6b7e5c293f15ad862",
     "execution_policy.py": "0e049b475a657cc893269816888978538a676984182dbf81142a9bc737acfe9f",
     "models/xgboost_model_2022.json": "75db4f88eb0c8aa6f8a78629dc38ec37eb2250f3974e3d5ed9e1d2f3ec7328eb",
     "models/xgboost_model_2023.json": "0f507cb4d58ed354ad387a7725ed90574c75fa33ce52273cf10b12baa67045e0",
@@ -36,13 +36,13 @@
     "vn30_universe.py": "d4b2769f4b307bf465c68b52ce4b9e0d2cefafb048db1354f2dd66f9dd019e6f"
   },
   "input_frames_sha256": {
-    "market": "ccd4c7b4860851d0fa00103e23c94b873cdb5b716fffb0b5463e2346dc780f03",
-    "open": "3d9f0704992a4f98c2622e147fb0cb17a51e481cddb972fa14bf4f70606328a6",
-    "high": "8795c0778cc02febc6111144347ddd820b5e9b24e69719aab37eb504feaa69da",
-    "low": "2833d353c307a51bbc5392f0b04194781067463f84012015a07fec6dcd80c5c0",
-    "close": "dc6f7756147cf0e929321443d5fed982bf47daad31598e838cac535c0ff4b5d5",
-    "volume": "58fcb41cc153950d4c30700264b512377edcaae2511d7b2b1fc3a192543e5f30",
-    "ai_scores": "e27042bd3325976c1a454dccab0ca0baa9dc3b6816418fd43a38d7a94a855790"
+    "market": "4a418b1731b3b15d0ee84b500c9a3d2be8b5364c20c281d00e10819d1b09c0b4",
+    "open": "f4d254e0055beadb7d892e8e6005b0bbf79583cc949123cfb7d60ca769d2b0d0",
+    "high": "325812d7fef6909b1b67fbc1a9568efe87fc254c0bb384ac5cce96f4221909ae",
+    "low": "2b86039d5e2c4b684e779c08a9b563fa317145276d48970433391e70acf62896",
+    "close": "7a0f53cfecfe2345ee78daf474ad14a507267afe893dee80a47d67def3200a4e",
+    "volume": "baa1f73ed889252baf60001fc80651d2897f458646d1ed915d7b821d4600a86d",
+    "ai_scores": "de320e1fcc1aa9303b84648a6e5fe74c2768f1762b715d2c25179820209678f2"
   },
   "versions": {
     "python": "3.11.18",
