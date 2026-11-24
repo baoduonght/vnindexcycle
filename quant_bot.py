@@ -126,12 +126,12 @@ QUANT_OFFLINE = os.environ.get('QUANT_OFFLINE', '0').lower() in ('1', 'true', 'y
 # ==========================================
 ENABLE_DYNAMIC_PERCENTILE_AI = os.environ.get('ENABLE_DYNAMIC_PERCENTILE_AI', 'True').lower() in ('true', '1', 'yes')
 ENABLE_ASYMMETRIC_ATR_EXIT = os.environ.get('ENABLE_ASYMMETRIC_ATR_EXIT', 'True').lower() in ('true', '1', 'yes')
-ENABLE_MA20_SLOPE_FILTER = os.environ.get('ENABLE_MA20_SLOPE_FILTER', 'False').lower() in ('true', '1', 'yes')
-ENABLE_ANTI_CHASE_FILTER = os.environ.get('ENABLE_ANTI_CHASE_FILTER', 'False').lower() in ('true', '1', 'yes')
-MAX_PER_SECTOR = int(os.environ.get('MAX_PER_SECTOR', '2'))        # Nới trần 2 mã/ngành, áp dụng Split-Size (10% NAV/lệnh khi cùng ngành)
+ENABLE_MA20_SLOPE_FILTER = os.environ.get('ENABLE_MA20_SLOPE_FILTER', 'True').lower() in ('true', '1', 'yes')
+ENABLE_ANTI_CHASE_FILTER = os.environ.get('ENABLE_ANTI_CHASE_FILTER', 'True').lower() in ('true', '1', 'yes')
+MAX_PER_SECTOR = int(os.environ.get('MAX_PER_SECTOR', '1'))        # Nới trần 2 mã/ngành, áp dụng Split-Size (10% NAV/lệnh khi cùng ngành)
 MAX_PER_ECOSYSTEM = int(os.environ.get('MAX_PER_ECOSYSTEM', '2'))  # Nới trần 2 mã/hệ sinh thái, áp dụng Split-Size (10% NAV/lệnh khi cùng hệ sinh thái)
-HARD_STOPLOSS_FLOOR = float(os.environ.get('HARD_STOPLOSS_FLOOR', '-0.085'))  # Biên dưới tuyệt đối cắt lỗ động (mã biến động mạnh tối đa -8.5%)
-ATR_STOPLOSS_MULTIPLIER = float(os.environ.get('ATR_STOPLOSS_MULTIPLIER', '2.2'))  # Hệ số ATR cho cắt lỗ động: max(FLOOR, -ATR_MULT * ATR_pct)
+HARD_STOPLOSS_FLOOR = float(os.environ.get('HARD_STOPLOSS_FLOOR', '-0.10'))  # Biên dưới tuyệt đối cắt lỗ động (mã biến động mạnh tối đa -8.5%)
+ATR_STOPLOSS_MULTIPLIER = float(os.environ.get('ATR_STOPLOSS_MULTIPLIER', '2.5'))  # Hệ số ATR cho cắt lỗ động: max(FLOOR, -ATR_MULT * ATR_pct)
 
 # ==========================================
 # CÁC HÀM TÍNH TOÁN CHỈ BÁO KỸ THUẬT
