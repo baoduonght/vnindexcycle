@@ -1,5 +1,5 @@
 {
-  "created_utc": "2026-11-24T20:01:35.618199+00:00",
+  "created_utc": "2026-11-24T20:26:59.613182+00:00",
   "entry_mode": "balanced",
   "entry_policy": {
     "name": "balanced",
@@ -15,15 +15,15 @@
     "backtest_start_date": "2022-01-01",
     "dynamic_ai": true,
     "asymmetric_exit": true,
-    "index_slopes": false,
-    "anti_chase": false,
-    "max_per_sector": 2,
+    "index_slopes": true,
+    "anti_chase": true,
+    "max_per_sector": 1,
     "max_per_ecosystem": 2,
-    "stop_floor": -0.085,
-    "atr_multiple": 2.2
+    "stop_floor": -0.1,
+    "atr_multiple": 2.5
   },
   "sha256": {
-    "data/markets_database10years.csv": "63ed6017a5ca03311ddd94aee3d55089e4787f7a577c4ecde09ac81b7498cb84",
+    "data/markets_database10years.csv": "bf2214fe7ff789e7fdad7de4c2a59daa6a06e0ab0dc7a6793edcb15188733e21",
     "execution_policy.py": "0e049b475a657cc893269816888978538a676984182dbf81142a9bc737acfe9f",
     "models/xgboost_model_2022.json": "75db4f88eb0c8aa6f8a78629dc38ec37eb2250f3974e3d5ed9e1d2f3ec7328eb",
     "models/xgboost_model_2023.json": "0f507cb4d58ed354ad387a7725ed90574c75fa33ce52273cf10b12baa67045e0",
@@ -31,7 +31,7 @@
     "models/xgboost_model_2025.json": "06316d773ab60d30630efee5e1169be0d4bd1115fe5e3a221e0e2d0b8e296bed",
     "models/xgboost_model_2026.json": "0ca5aa4d8f96ec69064d14ab1e2921afa290adf65e22ebd1f17e017730270a7b",
     "models/xgboost_ultimate.json": "0ca5aa4d8f96ec69064d14ab1e2921afa290adf65e22ebd1f17e017730270a7b",
-    "quant_bot.py": "e3a1f26a054679fb55640d3891e5221805b1ece9b33e19b2be6b457551942eb9",
+    "quant_bot.py": "849cf13bedcfc17adad306dc9948f59386c2b2e98b704d2b2419220d7231f4ae",
     "run_audit.py": "8da3237ef853448f6328998b9815f8f4eb2bff59df8be8c41e72151fe56e8c23",
     "vn30_universe.py": "d4b2769f4b307bf465c68b52ce4b9e0d2cefafb048db1354f2dd66f9dd019e6f"
   },
