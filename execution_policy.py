@@ -1,5 +1,6 @@
 """Causal entry and execution rules. No model or numerical dependencies."""
 from dataclasses import dataclass
+from typing import Optional
 import math
 
 
@@ -7,11 +8,11 @@ import math
 class EntryPolicy:
     name: str
     candle_filter: bool = False
-    index_slopes: bool = False
-    min_close_location: float = 0.60
-    max_open_gap_atr: float = 0.75
+    min_close_location: float = 0.50
+    max_open_gap_atr: float = 1.5
     max_open_gap_pct: float = 0.04
-    risk_per_trade: float | None = None
+    risk_per_trade: Optional[float] = None
+    index_slopes: bool = False
     profit_guard: bool = False
     weekly_regime: bool = False
     crash_guard: bool = False
@@ -20,7 +21,7 @@ class EntryPolicy:
     fast_trail_trigger: float = 0.25
     fast_trail_confirm_days: int = 2
     pyramid_trigger: float = 0.08
-    allow_reentry: bool = True
+    allow_reentry: bool = False
 
 
 POLICIES = {
@@ -33,9 +34,12 @@ POLICIES = {
     "uptrend_regime": EntryPolicy(
         "uptrend_regime",
         candle_filter=True,
-        index_slopes=True,
-        risk_per_trade=0.015,
-        profit_guard=True,
+        min_close_location=0.50,
+        max_open_gap_atr=1.5,
+        max_open_gap_pct=0.04,
+        risk_per_trade=None,
+        index_slopes=False,
+        profit_guard=False,
         weekly_regime=True,
         crash_guard=True,
         max_positions=5,
