@@ -2,15 +2,9 @@ name: HỆ THỐNG QUANT VN30
 
 on:
   schedule:
-    # 🎯 NHÁNH THỰC CHIẾN: Chạy quant_bot.py vào 15:30 chiều Thứ 2 đến Thứ 6
-    # Giờ VN (UTC+7) là 15:30 -> Giờ UTC là 08:30
-    - cron: '30 8 * * 1-5'
-    
-    # 🧠 NHÁNH HỌC TẬP: Chạy train_bot.py vào 09:00 sáng Thứ 7
-    # Giờ VN (UTC+7) là 09:00 -> Giờ UTC là 02:00
-    - cron: '0 2 * * 0'
-    
-  # Cho phép bác bấm nút "Run workflow" bằng tay trên Github để test thử bot Telegram
+    # Chạy toàn bộ chu trình (Train AI + Quét 2 chế độ) vào 15:00 Chủ nhật hằng tuần (08:00 UTC)
+    - cron: '0 8 * * 0'
+
   workflow_dispatch:
     inputs:
       entry_mode:
@@ -23,14 +17,17 @@ on:
           - baseline
           - quality
           - index_trend
+      dual_mode:
+        description: 'Chạy song song cả balanced và profit_guard (gửi 2 tin nhắn Telegram)'
+        type: boolean
+        default: true
       retrain:
         description: 'Huấn luyện lại model trước khi chạy (không bật khi so sánh các chế độ)'
         type: boolean
         default: false
 
 permissions:
-  # Cấp quyền tối cao để Bot tự động lưu file não bộ (.json) và lịch sử giao dịch (.csv) lên Github
-  contents: write 
+  contents: write
 
 jobs:
   quant-trading-bot:
@@ -56,10 +53,10 @@ jobs:
         run: python run_tests.py
 
       # ==========================================
-      # NHÁNH 1: LUYỆN ĐAN & LƯU BỘ NHỚ (CHỈ CHẠY THỨ 7 HOẶC BẤM TEST TAY)
+      # NHÁNH 1: CẬP NHẬT VĨ MÔ & TRAIN LẠI AI (15:00 CHỦ NHẬT HOẶC TÍCH RETRAIN)
       # ==========================================
       - name: 📡 Cập nhật Cơ sở Dữ liệu Vĩ mô (macro_database.py)
-        if: github.event.schedule == '0 2 * * 6' || (github.event_name == 'workflow_dispatch' && inputs.retrain)
+        if: github.event.schedule == '0 2 * * 6' || github.event.schedule == '0 8 * * 0' || (github.event_name == 'workflow_dispatch' && inputs.retrain)
         env:
           DNSE_API_KEY: ${{ secrets.DNSE_API_KEY }}
           DNSE_API_SECRET: ${{ secrets.DNSE_API_SECRET }}
@@ -67,7 +64,7 @@ jobs:
         run: python macro_database.py
 
       - name: 🧠 Mở Lò Luyện Đan (train_bot.py)
-        if: github.event.schedule == '0 2 * * 6' || (github.event_name == 'workflow_dispatch' && inputs.retrain)
+        if: github.event.schedule == '0 2 * * 6' || github.event.schedule == '0 8 * * 0' || (github.event_name == 'workflow_dispatch' && inputs.retrain)
         env:
           DNSE_API_KEY: ${{ secrets.DNSE_API_KEY }}
           DNSE_API_SECRET: ${{ secrets.DNSE_API_SECRET }}
@@ -75,7 +72,7 @@ jobs:
         run: python train_bot.py
 
       - name: 💾 Lưu Não Bộ Mới & Dữ liệu Vĩ mô Lên Github
-        if: github.event.schedule == '0 2 * * 6' || (github.event_name == 'workflow_dispatch' && inputs.retrain)
+        if: github.event.schedule == '0 2 * * 6' || github.event.schedule == '0 8 * * 0' || (github.event_name == 'workflow_dispatch' && inputs.retrain)
         run: |
           git config --global user.name "Quant AutoBot"
           git config --global user.email "bot@quant.com"
@@ -84,13 +81,14 @@ jobs:
           git push
 
       # ==========================================
-      # NHÁNH 2: NGẮM BẮN & BÁO CÁO (CHẠY T2-T6 HOẶC BẤM TEST TAY)
+      # NHÁNH 2: NGẮM BẮN & BÁO CÁO (1 STEP DUY NHẤT ĐỂ PASS WORKFLOW CONTRACT)
       # ==========================================
       - name: 🎯 Bắn tín hiệu Telegram (quant_bot.py)
-        if: github.event.schedule == '30 8 * * 1-5' || github.event_name == 'workflow_dispatch'
+        if: github.event.schedule == '0 8 * * 0' || github.event_name == 'workflow_dispatch'
         env:
           ENTRY_MODE: ${{ inputs.entry_mode || 'balanced' }}
           RUN_EXPECTED_ENTRY_MODE: ${{ inputs.entry_mode || 'balanced' }}
+          DUAL_MODE: ${{ github.event_name == 'schedule' && 'true' || inputs.dual_mode }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           DNSE_API_KEY: ${{ secrets.DNSE_API_KEY }}
@@ -98,11 +96,12 @@ jobs:
           VNSTOCK_OAPI_SESSION_BACKEND: file
         run: python quant_bot.py
 
-      - name: 📊 Cập nhật Sổ Kế Toán outputs/trading_log.csv, outputs/daily_nav.csv & outputs/completed_trades.csv lên Github (cho Power BI)
-        if: github.event.schedule == '30 8 * * 1-5' || github.event_name == 'workflow_dispatch'
+      - name: 📊 Cập nhật Sổ Kế Toán outputs/*.csv lên Github (cho Power BI)
+        if: github.event.schedule == '0 8 * * 0' || github.event_name == 'workflow_dispatch'
         run: |
           git config --global user.name "Quant AutoBot"
           git config --global user.email "bot@quant.com"
           git add outputs/trading_log.csv outputs/daily_nav.csv outputs/completed_trades.csv outputs/signal_diagnostics.csv outputs/run_manifest.json
+          if [ -d "outputs/balanced" ]; then git add outputs/balanced/*.csv outputs/balanced/*.json; fi
           git commit -m "📊 [Auto-Update] Cập nhật sổ kế toán giao dịch & chu kỳ vị thế cho Power BI" || echo "Không có giao dịch mới để commit"
           git push
