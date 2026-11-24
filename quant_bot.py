@@ -1937,6 +1937,11 @@ def main():
         print('=' * 70 + '\n', flush=True)
         child_env = {**os.environ, 'ENTRY_MODE': second_mode, 'RUN_EXPECTED_ENTRY_MODE': second_mode, '_DUAL_CHILD': '1'}
         subprocess.run([sys.executable, os.path.abspath(__file__)], env=child_env, check=True)
+        os.makedirs(f'outputs/{second_mode}', exist_ok=True)
+        for fn in ('trading_log.csv', 'daily_nav.csv', 'completed_trades.csv', 'signal_diagnostics.csv', 'run_manifest.json'):
+            src = os.path.join('outputs', fn)
+            if os.path.exists(src):
+                shutil.copy2(src, os.path.join(f'outputs/{second_mode}', fn))
         try:
             def _read_metrics(folder):
                 nav_df = pd.read_csv(f'{folder}/daily_nav.csv')
