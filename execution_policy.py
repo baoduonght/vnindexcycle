@@ -8,7 +8,7 @@ import math
 class EntryPolicy:
     name: str
     candle_filter: bool = False
-    min_close_location: float = 0.50
+    min_close_location: float = 0.60
     max_open_gap_atr: float = 1.5
     max_open_gap_pct: float = 0.04
     risk_per_trade: Optional[float] = None
