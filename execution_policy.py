@@ -1,6 +1,5 @@
 """Causal entry and execution rules. No model or numerical dependencies."""
 from dataclasses import dataclass
-from typing import Optional
 import math
 
 
@@ -8,20 +7,12 @@ import math
 class EntryPolicy:
     name: str
     candle_filter: bool = False
+    index_slopes: bool = False
     min_close_location: float = 0.60
     max_open_gap_atr: float = 0.75
     max_open_gap_pct: float = 0.04
-    risk_per_trade: Optional[float] = None
-    index_slopes: bool = False
+    risk_per_trade: float | None = None
     profit_guard: bool = False
-    weekly_regime: bool = False
-    crash_guard: bool = False
-    max_positions: int = 5
-    max_per_sector: int = 2
-    fast_trail_trigger: float = 0.25
-    fast_trail_confirm_days: int = 2
-    pyramid_trigger: float = 0.08
-    allow_reentry: bool = False
 
 
 POLICIES = {
@@ -31,24 +22,6 @@ POLICIES = {
     "profit_guard": EntryPolicy("profit_guard", candle_filter=True, risk_per_trade=0.015,
                                 profit_guard=True),
     "index_trend": EntryPolicy("index_trend", index_slopes=True),
-    "uptrend_regime": EntryPolicy(
-        "uptrend_regime",
-        candle_filter=True,
-        min_close_location=0.50,
-        max_open_gap_atr=1.5,
-        max_open_gap_pct=0.04,
-        risk_per_trade=None,
-        index_slopes=False,
-        profit_guard=False,
-        weekly_regime=True,
-        crash_guard=True,
-        max_positions=5,
-        max_per_sector=2,
-        fast_trail_trigger=0.25,
-        fast_trail_confirm_days=2,
-        pyramid_trigger=0.08,
-        allow_reentry=False,
-    ),
 }
 
 
@@ -58,16 +31,9 @@ def get_policy(name):
     return POLICIES[name]
 
 
-def _is_finite(*values):
-    try:
-        return all(v is not None and math.isfinite(float(v)) for v in values)
-    except (ValueError, TypeError):
-        return False
-
-
 def valid_prices(*values):
     try:
-        return all(v is not None and math.isfinite(float(v)) and float(v) > 0 for v in values)
+        return all(math.isfinite(float(v)) and float(v) > 0 for v in values)
     except (ValueError, TypeError):
         return False
 
@@ -195,80 +161,3 @@ def stop_fill_price(open_price, high, low, close, reference_close, stop_price,
             return close
         return open_price
     return stop_price
-
-
-# --- CAUSAL UPTREND REGIME & PORTFOLIO GUARD RULES ---
-
-def vnindex_regime_ok(vni_close, prev_week_close, prev_ma20_w, prev_ma20_w_slope):
-    """Allow new entries only when VNINDEX and closed week sit above rising MA20_W."""
-    if not valid_prices(vni_close, prev_week_close, prev_ma20_w):
-        return False
-    if not _is_finite(prev_ma20_w_slope):
-        return False
-    return (
-        float(vni_close) > float(prev_ma20_w)
-        and float(prev_week_close) > float(prev_ma20_w)
-        and float(prev_ma20_w_slope) > 0.0
-    )
-
-
-def vnindex_crash_guard_exit(vni_close, vni_prev_week_close, vni_prev_ma20_w,
-                             stock_close, stock_ma20_d):
-    """Protect capital when VNINDEX breaks below weekly MA20 and stock loses daily MA20."""
-    if not valid_prices(vni_close, vni_prev_week_close, vni_prev_ma20_w,
-                        stock_close, stock_ma20_d):
-        return False
-    vni_broken = (
-        float(vni_prev_week_close) < float(vni_prev_ma20_w)
-        and float(vni_close) < float(vni_prev_ma20_w)
-    )
-    return vni_broken and float(stock_close) < float(stock_ma20_d)
-
-
-def stock_weekly_regime_ok(stock_close, prev_week_close, prev_ma20_w, prev_ma20_w_slope,
-                           stock_ret_63d=None, vni_ret_63d=None):
-    """Confirm stock weekly uptrend and optional 63-day relative strength vs VNINDEX."""
-    if not vnindex_regime_ok(stock_close, prev_week_close, prev_ma20_w, prev_ma20_w_slope):
-        return False
-    if stock_ret_63d is not None and vni_ret_63d is not None:
-        if not _is_finite(stock_ret_63d, vni_ret_63d):
-            return False
-        if float(stock_ret_63d) <= float(vni_ret_63d):
-            return False
-    return True
-
-
-def sector_cap_rejection(ticker, sector_map, open_tickers,
-                         max_positions=5, max_per_sector=2):
-    """Enforce portfolio slot limit and maximum exposure per sector."""
-    held = list(open_tickers)
-    if ticker in held:
-        return "already_held"
-    if len(held) >= max_positions:
-        return "max_positions_reached"
-    target_sector = sector_map.get(ticker, "OTHER")
-    same_sector_count = sum(1 for t in held if sector_map.get(t, "OTHER") == target_sector)
-    if same_sector_count >= max_per_sector:
-        return f"sector_cap_{target_sector}"
-    return None
-
-
-def fast_trail_ma20_exit(close, ma20_d, max_pnl_pct, below_ma20_days,
-                         trigger=0.25, confirm_days=2):
-    """Trail strong winners (>=25% peak gain) using consecutive closes below MA20_D."""
-    if not valid_prices(close, ma20_d) or not _is_finite(max_pnl_pct):
-        return False, int(below_ma20_days)
-    if float(max_pnl_pct) < float(trigger):
-        return False, 0
-    updated_days = int(below_ma20_days) + 1 if float(close) < float(ma20_d) else 0
-    return updated_days >= int(confirm_days), updated_days
-
-
-def should_pyramid_tranche(tranches, is_market_uptrend, pnl_pct, close, high_10d,
-                           trigger=0.08):
-    """Allow second 50% tranche only when tranche 1 is profitable and breaks 10D high."""
-    if int(tranches) != 1 or not is_market_uptrend:
-        return False
-    if not _is_finite(pnl_pct) or not valid_prices(close, high_10d):
-        return False
-    return float(pnl_pct) >= float(trigger) and float(close) > float(high_10d)
