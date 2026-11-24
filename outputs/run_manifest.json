@@ -1,15 +1,15 @@
 {
-  "created_utc": "2026-11-24T19:02:49.910958+00:00",
-  "entry_mode": "balanced",
+  "created_utc": "2026-11-24T19:11:11.034454+00:00",
+  "entry_mode": "profit_guard",
   "entry_policy": {
-    "name": "balanced",
+    "name": "profit_guard",
     "candle_filter": true,
     "index_slopes": false,
     "min_close_location": 0.6,
     "max_open_gap_atr": 0.75,
     "max_open_gap_pct": 0.04,
     "risk_per_trade": 0.015,
-    "profit_guard": false
+    "profit_guard": true
   },
   "effective_config": {
     "backtest_start_date": "2022-01-01",
