@@ -1918,5 +1918,39 @@ def main():
     send_telegram_msg(msg)
     print("✅ Hoàn tất chu trình quant_bot.py!")
 
+    import shutil, subprocess, sys, time
+    if os.environ.get('DUAL_MODE', '').lower() == 'true' and os.environ.get('_DUAL_CHILD') != '1':
+        os.makedirs('outputs/balanced', exist_ok=True)
+        for fn in ('trading_log.csv', 'daily_nav.csv', 'completed_trades.csv', 'signal_diagnostics.csv', 'run_manifest.json'):
+            src = os.path.join('outputs', fn)
+            if os.path.exists(src):
+                shutil.copy2(src, os.path.join('outputs/balanced', fn))
+        time.sleep(3)
+        next_mode = 'profit_guard' if os.environ.get('ENTRY_MODE', 'balanced') == 'balanced' else 'balanced'
+        print('\n' + '=' * 70)
+        print(f'>>> SWITCHING TO RUN #2: [{next_mode.upper()}] <<<')
+        print('=' * 70 + '\n')
+        child_env = {**os.environ, 'ENTRY_MODE': next_mode, 'RUN_EXPECTED_ENTRY_MODE': next_mode, '_DUAL_CHILD': '1'}
+        subprocess.run([sys.executable, os.path.abspath(__file__)], env=child_env, check=True)
+        try:
+            b_nav = pd.read_csv('outputs/balanced/daily_nav.csv')['Total_NAV'].iloc[-1]
+            p_nav = pd.read_csv('outputs/daily_nav.csv')['Total_NAV'].iloc[-1]
+            b_tr = pd.read_csv('outputs/balanced/completed_trades.csv')
+            p_tr = pd.read_csv('outputs/completed_trades.csv')
+            b_wr = (b_tr['PnL_VND'] > 0).mean() * 100 if len(b_tr) else 0.0
+            p_wr = (p_tr['PnL_VND'] > 0).mean() * 100 if len(p_tr) else 0.0
+            print('\n' + '=' * 70)
+            print('SUMMARY COMPARISON: BALANCED vs PROFIT_GUARD')
+            print('=' * 70)
+            print(f"{'Metric':<25} | {'BALANCED':>18} | {'PROFIT_GUARD':>18}")
+            print('-' * 70)
+            print(f"{'Current NAV (VND)':<25} | {b_nav:>18,.0f} | {p_nav:>18,.0f}")
+            print(f"{'Total Return (%)':<25} | {(b_nav/1e8 - 1)*100:>17.2f}% | {(p_nav/1e8 - 1)*100:>17.2f}%")
+            print(f"{'Closed Trades':<25} | {len(b_tr):>18d} | {len(p_tr):>18d}")
+            print(f"{'Win Rate (%)':<25} | {b_wr:>17.2f}% | {p_wr:>17.2f}%")
+            print('=' * 70)
+        except Exception as e:
+            print(f'[WARN] Could not build comparison table: {e}')
+
 if __name__ == "__main__":
     main()
