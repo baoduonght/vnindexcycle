@@ -185,17 +185,23 @@ def send_telegram_msg(text_message):
     if not token or not chat_id:
         print("\n[TELEGRAM PREVIEW]\n" + text_message)
         return
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    cid_str = str(chat_id).strip()
+    masked_cid = f"{cid_str[:3]}***{cid_str[-3:]}" if len(cid_str) > 6 else cid_str
+    url = f"https://api.telegram.org/bot{token.strip()}/sendMessage"
     try:
-        requests.post(url, json={"chat_id": chat_id, "text": text_message, "parse_mode": "HTML"}, timeout=10)
+        resp = requests.post(url, json={"chat_id": cid_str, "text": text_message, "parse_mode": "HTML"}, timeout=10)
+        if getattr(resp, "ok", True):
+            print(f"   [OK] Telegram sent (chat_id: {masked_cid})")
+        else:
+            print(f"   [WARN] Telegram rejected (HTTP {getattr(resp, 'status_code', '?')}): {getattr(resp, 'text', '')}")
+            if getattr(resp, "status_code", None) == 400:
+                resp2 = requests.post(url, json={"chat_id": cid_str, "text": text_message}, timeout=10)
+                if getattr(resp2, "ok", True):
+                    print(f"   [OK] Telegram fallback plain-text sent (chat_id: {masked_cid})")
     except Exception as e:
-        print(f"⚠️ Gửi Telegram thất bại: {e}")
+        print(f"   [WARN] Telegram failed: {e}")
 
-# ==========================================
-# HÀM TẢI DỮ LIỆU ĐA NGUỒN (DNSE + VNDIRECT + TCBS + TRADINGVIEW + LOCAL DATA)
-# Gắn nhãn chất lượng dữ liệu: REAL_OHLC vs SYNTHETIC_CLOSE_ONLY
-# Tuyệt đối KHÔNG làm phẳng nến (Open=High=Low=Close) để đảm bảo ATR/ADX/MFI chuẩn xác
-# ==========================================
+
 def fetch_ticker_data(symbol, n_bars=4500):
     """
     Tải dữ liệu chứng khoán OHLCV THẬT từ API hoặc thư mục local data/:
