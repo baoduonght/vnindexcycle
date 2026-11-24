@@ -1,5 +1,5 @@
 {
-  "created_utc": "2026-11-23T20:29:46.879167+00:00",
+  "created_utc": "2026-11-24T19:02:49.910958+00:00",
   "entry_mode": "balanced",
   "entry_policy": {
     "name": "balanced",
@@ -23,7 +23,7 @@
     "atr_multiple": 2.2
   },
   "sha256": {
-    "data/markets_database10years.csv": "a9dd54fb9531d25c7cfa4fff9f31502da21ebf7b4baf03f6b7e5c293f15ad862",
+    "data/markets_database10years.csv": "42024a6f402c5f24585f07733e86b34617c30c594202628514dfd15e02742a11",
     "execution_policy.py": "0e049b475a657cc893269816888978538a676984182dbf81142a9bc737acfe9f",
     "models/xgboost_model_2022.json": "75db4f88eb0c8aa6f8a78629dc38ec37eb2250f3974e3d5ed9e1d2f3ec7328eb",
     "models/xgboost_model_2023.json": "0f507cb4d58ed354ad387a7725ed90574c75fa33ce52273cf10b12baa67045e0",
