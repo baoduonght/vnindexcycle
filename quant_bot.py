@@ -180,26 +180,30 @@ def calc_macd_hist(series, fast=12, slow=26, signal=9):
 # HÀM BÁO CÁO TELEGRAM (HỖ TRỢ CẢ TELEGRAM_* VÀ BOT_TOKEN/CHAT_ID)
 # ==========================================
 def send_telegram_msg(text_message):
+    import re
     token = os.environ.get('TELEGRAM_BOT_TOKEN') or os.environ.get('BOT_TOKEN')
     chat_id = os.environ.get('TELEGRAM_CHAT_ID') or os.environ.get('CHAT_ID')
+    mode_tag = os.environ.get('ENTRY_MODE', '').strip().upper()
+    if mode_tag and "SI?U RADAR VN30" in text_message and f"[{mode_tag}]" not in text_message:
+        text_message = text_message.replace("SI?U RADAR VN30", f"[{mode_tag}] SI?U RADAR VN30", 1)
+    safe_html = re.sub(r'<(?!/?(?:b|i|u|s|code|pre|a)\b)', '&lt;', text_message)
     if not token or not chat_id:
-        print("\n[TELEGRAM PREVIEW]\n" + text_message)
+        print("\n[TELEGRAM PREVIEW]\n" + safe_html)
         return
     cid_str = str(chat_id).strip()
     masked_cid = f"{cid_str[:3]}***{cid_str[-3:]}" if len(cid_str) > 6 else cid_str
     url = f"https://api.telegram.org/bot{token.strip()}/sendMessage"
     try:
-        resp = requests.post(url, json={"chat_id": cid_str, "text": text_message, "parse_mode": "HTML"}, timeout=10)
+        resp = requests.post(url, json={"chat_id": cid_str, "text": safe_html, "parse_mode": "HTML"}, timeout=10)
         if getattr(resp, "ok", True):
-            print(f"   [OK] Telegram sent (chat_id: {masked_cid})")
+            print(f"   [OK] Telegram HTML sent [{mode_tag}] (chat_id: {masked_cid})", flush=True)
         else:
-            print(f"   [WARN] Telegram rejected (HTTP {getattr(resp, 'status_code', '?')}): {getattr(resp, 'text', '')}")
-            if getattr(resp, "status_code", None) == 400:
-                resp2 = requests.post(url, json={"chat_id": cid_str, "text": text_message}, timeout=10)
-                if getattr(resp2, "ok", True):
-                    print(f"   [OK] Telegram fallback plain-text sent (chat_id: {masked_cid})")
+            print(f"   [WARN] Telegram rejected (HTTP {getattr(resp, 'status_code', '?')}): {getattr(resp, 'text', '')}", flush=True)
+            resp2 = requests.post(url, json={"chat_id": cid_str, "text": re.sub(r'<[^>]+>', '', text_message)}, timeout=10)
+            if getattr(resp2, "ok", True):
+                print(f"   [OK] Telegram plain-text sent [{mode_tag}] (chat_id: {masked_cid})", flush=True)
     except Exception as e:
-        print(f"   [WARN] Telegram failed: {e}")
+        print(f"   [WARN] Telegram failed: {e}", flush=True)
 
 
 def fetch_ticker_data(symbol, n_bars=4500):
@@ -1920,37 +1924,44 @@ def main():
 
     import shutil, subprocess, sys, time
     if os.environ.get('DUAL_MODE', '').lower() == 'true' and os.environ.get('_DUAL_CHILD') != '1':
-        os.makedirs('outputs/balanced', exist_ok=True)
+        first_mode = os.environ.get('ENTRY_MODE', 'balanced').strip().lower()
+        second_mode = 'profit_guard' if first_mode == 'balanced' else 'balanced'
+        os.makedirs(f'outputs/{first_mode}', exist_ok=True)
         for fn in ('trading_log.csv', 'daily_nav.csv', 'completed_trades.csv', 'signal_diagnostics.csv', 'run_manifest.json'):
             src = os.path.join('outputs', fn)
             if os.path.exists(src):
-                shutil.copy2(src, os.path.join('outputs/balanced', fn))
+                shutil.copy2(src, os.path.join(f'outputs/{first_mode}', fn))
         time.sleep(3)
-        next_mode = 'profit_guard' if os.environ.get('ENTRY_MODE', 'balanced') == 'balanced' else 'balanced'
-        print('\n' + '=' * 70)
-        print(f'>>> SWITCHING TO RUN #2: [{next_mode.upper()}] <<<')
-        print('=' * 70 + '\n')
-        child_env = {**os.environ, 'ENTRY_MODE': next_mode, 'RUN_EXPECTED_ENTRY_MODE': next_mode, '_DUAL_CHILD': '1'}
+        print('\n' + '=' * 70, flush=True)
+        print(f'>>> SWITCHING TO RUN #2: [{second_mode.upper()}] <<<', flush=True)
+        print('=' * 70 + '\n', flush=True)
+        child_env = {**os.environ, 'ENTRY_MODE': second_mode, 'RUN_EXPECTED_ENTRY_MODE': second_mode, '_DUAL_CHILD': '1'}
         subprocess.run([sys.executable, os.path.abspath(__file__)], env=child_env, check=True)
         try:
-            b_nav = pd.read_csv('outputs/balanced/daily_nav.csv')['Total_NAV'].iloc[-1]
-            p_nav = pd.read_csv('outputs/daily_nav.csv')['Total_NAV'].iloc[-1]
-            b_tr = pd.read_csv('outputs/balanced/completed_trades.csv')
-            p_tr = pd.read_csv('outputs/completed_trades.csv')
-            b_wr = (b_tr['PnL_VND'] > 0).mean() * 100 if len(b_tr) else 0.0
-            p_wr = (p_tr['PnL_VND'] > 0).mean() * 100 if len(p_tr) else 0.0
-            print('\n' + '=' * 70)
-            print('SUMMARY COMPARISON: BALANCED vs PROFIT_GUARD')
-            print('=' * 70)
-            print(f"{'Metric':<25} | {'BALANCED':>18} | {'PROFIT_GUARD':>18}")
-            print('-' * 70)
-            print(f"{'Current NAV (VND)':<25} | {b_nav:>18,.0f} | {p_nav:>18,.0f}")
-            print(f"{'Total Return (%)':<25} | {(b_nav/1e8 - 1)*100:>17.2f}% | {(p_nav/1e8 - 1)*100:>17.2f}%")
-            print(f"{'Closed Trades':<25} | {len(b_tr):>18d} | {len(p_tr):>18d}")
-            print(f"{'Win Rate (%)':<25} | {b_wr:>17.2f}% | {p_wr:>17.2f}%")
-            print('=' * 70)
+            def _read_metrics(folder):
+                nav_df = pd.read_csv(f'{folder}/daily_nav.csv')
+                nav_col = [c for c in nav_df.columns if 'nav' in c.lower()][-1]
+                nav_val = float(nav_df[nav_col].iloc[-1])
+                tr_df = pd.read_csv(f'{folder}/completed_trades.csv')
+                pnl_col = [c for c in tr_df.columns if 'pnl' in c.lower()][0]
+                wr = float((tr_df[pnl_col] > 0).mean() * 100) if len(tr_df) else 0.0
+                return nav_val, len(tr_df), wr
+
+            m1 = _read_metrics(f'outputs/{first_mode}')
+            m2 = _read_metrics('outputs')
+            b_m, p_m = (m1, m2) if first_mode == 'balanced' else (m2, m1)
+            print('\n' + '=' * 70, flush=True)
+            print('SUMMARY COMPARISON: BALANCED vs PROFIT_GUARD', flush=True)
+            print('=' * 70, flush=True)
+            print(f"{'Metric':<25} | {'BALANCED':>18} | {'PROFIT_GUARD':>18}", flush=True)
+            print('-' * 70, flush=True)
+            print(f"{'Current NAV (VND)':<25} | {b_m[0]:>18,.0f} | {p_m[0]:>18,.0f}", flush=True)
+            print(f"{'Total Return (%)':<25} | {(b_m[0]/1e8 - 1)*100:>17.2f}% | {(p_m[0]/1e8 - 1)*100:>17.2f}%", flush=True)
+            print(f"{'Closed Trades':<25} | {b_m[1]:>18d} | {p_m[1]:>18d}", flush=True)
+            print(f"{'Win Rate (%)':<25} | {b_m[2]:>17.2f}% | {p_m[2]:>17.2f}%", flush=True)
+            print('=' * 70, flush=True)
         except Exception as e:
-            print(f'[WARN] Could not build comparison table: {e}')
+            print(f'[WARN] Could not build comparison table: {e}', flush=True)
 
 if __name__ == "__main__":
     main()
